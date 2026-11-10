@@ -1,0 +1,833 @@
+@import "tailwindcss";
+
+@import "tailwindcss-safe-area";
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --text-3xl: 30px;
+  --text-3xl--line-height: 36px;
+}
+/* ---------------------------------------------------------------------------
+   全站唯一主题「深空未来」（v3.99 起单套主题，不再提供主题切换）：
+     底色     深空近黑 #0E1116，面板用稍亮的深灰层级区分
+              （#161B22 / #1C2330），不用纯黑死黑；
+     强调色   只用一种电光蓝 #4D7CFE，只小面积用于主按钮、当前步骤、
+              关键高亮；成功 / 警告 / 错误沿用克制的语义色；
+     文字     高对比浅灰三级：标题亮、正文稍暗、辅助信息更暗。
+   旧变量名（--walnut / --terra / --olive / --taupe / --ivory）保留为
+   语义别名，指向新色板，保证全站既有样式不改名即可换皮：
+     --walnut = 主操作 / 选中态（电光蓝）、--terra = 强调高亮（电光蓝）、
+     --olive = 台词 / 完成（克制绿）、--taupe = 边框灰、--ivory = 页面底色。
+   --------------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+  --ivory: #0e1116;
+  --taupe: #46536a;
+  --terra: #4d7cfe;
+  --olive: #3cb179;
+  --walnut: #4d7cfe;
+
+  --bg: #0e1116;
+  --surface: #161b22;
+  --surface-alt: #1c2330;
+  --text: #e8edf4;
+  --dim: #9aa7b8; /* 辅助文字：深底上保证可读的浅灰 */
+  --border: #2a3342;
+  --accent: #4d7cfe;
+  --accent-soft: #1a2745; /* 电光蓝深底 tint */
+  --ok: #3cb179;
+  --ok-soft: #12291e; /* 绿深底 tint */
+  --bad: #f0665e; /* 危险/错误：克制的红 */
+  --bad-soft: #331d1d;
+  --info: #4d7cfe;
+  --info-soft: #1a2745;
+  --radius: 10px;
+  /* 主按钮/选中态底色（电光蓝）上的文字色。 */
+  --on-primary: #ffffff;
+  --violet: #4d7cfe;
+  --on-primary-dim: #c7d6f5;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface-alt);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+  /* 系统字体栈：不加载任何外部字体；标题与正文统一无衬线，靠字重与
+     字号分级（未来风不用衬线标题）。 */
+  --font-serif: ui-sans-serif, system-ui, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px rgba(0, 0, 0, 0.22);
+}
+.font-display {
+  font-family: var(--font-serif);
+}
+.tc {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+/* ---- shared controls ---------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 40px;
+  padding: 8px 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--taupe);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--walnut);
+  border-color: var(--walnut);
+  color: var(--on-primary);
+}
+.btn-danger-ghost {
+  color: var(--bad);
+  border-color: var(--taupe);
+}
+.btn-sm {
+  min-height: 32px;
+  padding: 4px 11px;
+  font-size: 13px;
+}
+.btn-lg {
+  min-height: 50px;
+  padding: 12px 22px;
+  font-size: 16px;
+  font-weight: 700;
+}
+.field {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: 9px 12px;
+  font-size: 15px;
+  line-height: 22px;
+}
+.field:focus {
+  outline: 2px solid var(--terra);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+.field::placeholder {
+  color: var(--dim);
+}
+.monitor-paste-field::placeholder {
+  color: #ffffff;
+  opacity: 0.15;
+  text-shadow:
+    0 0 1px rgba(0, 0, 0, 0.9),
+    1px 0 1px rgba(0, 0, 0, 0.9),
+    -1px 0 1px rgba(0, 0, 0, 0.9),
+    0 1px 1px rgba(0, 0, 0, 0.9),
+    0 -1px 1px rgba(0, 0, 0, 0.9);
+}
+textarea.field {
+  resize: vertical;
+}
+/* Segmented switch （工作台切换等）: quiet pills; the active one is walnut. */
+.seg {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.seg button {
+  min-height: 38px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--dim);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.seg button[aria-pressed="true"] {
+  background: var(--walnut);
+  border-color: var(--walnut);
+  color: var(--on-primary);
+}
+/* 紧凑变体（v3.47，基础设置专用）：芯片改小号、一行排完不占多行，
+   输入框与预设芯片并行紧凑排布。只在显式加了 seg-sm / field-sm
+   的控件上生效，其他窗口的分段按钮与输入框尺寸不变。 */
+.seg-sm {
+  gap: 4px;
+}
+.seg-sm button {
+  min-height: 30px;
+  padding: 3px 10px;
+  font-size: 13px;
+}
+.field-sm {
+  padding: 5px 9px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.chip-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--dim);
+  cursor: pointer;
+}
+.chip-check[data-state="ok"] {
+  color: var(--olive);
+  background: var(--ok-soft);
+  border-color: transparent;
+}
+.chip-check[data-state="bad"] {
+  color: var(--bad);
+  background: var(--bad-soft);
+  border-color: transparent;
+}
+/* ---- content cards --------------------------------------------------------
+   简约大气的内容卡：暖白底、taupe 细边、柔和阴影、均衡内边距。 */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow-card);
+  padding: 14px 16px;
+}
+@media (max-width: 767px) {
+.card {
+    padding: 12px;
+  }
+}
+/* ---- script document ----------------------------------------------------- */
+.script-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.script-table th,
+.script-table td {
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+.script-table th {
+  background: var(--surface-alt);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.line-input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 23px;
+  padding: 2px 1px;
+}
+.line-input:focus {
+  outline: none;
+  border-bottom: 1px solid var(--terra);
+  background: var(--accent-soft);
+}
+/* ---- auto-growing textareas ---------------------------------------------
+   Beat editors use textareas whose height hugs their content (JS sets
+   the height); they never scroll internally. */
+.fit-textarea {
+  resize: none;
+  overflow: hidden;
+}
+.card-shadow {
+  box-shadow: var(--shadow-card);
+}
+/* ---- 台词 / 情绪区分（全站统一，只用 5 色） --------------------------------
+   情绪 = terracotta 极浅底 + terracotta 字 + 细边；
+   台词 = olive 极浅底 + olive 字。说话人名用 walnut 粗体（正文样式）。 */
+.tone-tag {
+  background: var(--accent-soft);
+  color: var(--terra);
+  border: 1px solid var(--terra);
+}
+.line-tag {
+  background: var(--ok-soft);
+  color: var(--olive);
+  border: 1px solid var(--olive);
+}
+.line-input.line-tag:focus {
+  background: var(--ok-soft);
+  border-bottom-color: var(--olive);
+}
+/* 顶部导航标签（v3.99 导航上移后，窗口切换走顶栏标签页；
+   .nav-rail-btn 类名保留供外壳挂接）。 */
+.nav-rail-btn {
+  position: relative;
+}
+/* 人物卡（v3.38 从简）：悬停倾斜已删除（非功能性装饰）——卡片
+   不再旋转 / 透视，悬停只加一层柔和悬浮阴影表示可点，干净稳定。
+   .tilt-card 类名保留供旧标记挂接，不再有任何变换效果。 */
+.tilt-card {
+  transition: box-shadow 0.18s ease;
+}
+.char-view-tabs {
+  display: none;
+}
+/* AI 光点（未来主题，右下角）：v3.38 从简——呼吸动画已删除，
+   改为静态小点：一圈细光边 + 一层很淡的静态微光，不动、不抢眼，
+   点开仍是 AI 助手建议面板（入口也同时在底部操作条里）。 */
+@media (prefers-reduced-motion: reduce) {
+.tilt-card { transition: none; }
+}
+/* 未来主题下编辑控件浮层做成小玻璃便签（更深阴影浮在纸面上）。 */
+/* ---- 审查页：人物信息区 / 正文修改区分隔（= 纸的上边缘） -------------
+   上半人物信息区是「桌面层」，下半正文是一张放在桌面上的纸：分割
+   线不再是桌面上的一条粗线，而是纸的上边——标签坐在纸的正上方，
+   纸面自身的顶边高光与阴影紧随其后，一眼分开两个层级。 */
+.paper-divider {
+  max-width: 860px;
+  margin: 44px auto 0;
+  text-align: center;
+}
+.paper-divider-label {
+  display: inline-block;
+  padding: 0 14px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+/* ---- 立体纸面修稿台（审查页正文修改区，v3.21） -----------------------
+   四级层级（页 → 段落 → 节拍 → 行）只用字号与留白区分；字号整体
+   改小、纸面收窄到约 860px 居中一列，行长变短。立体感只做在「纸」
+   这一层，克制版：两层柔和阴影（近处贴合纸边、远处更淡更扩散）
+   拉开纸与桌面的前后关系，纸边带极细的深色厚度边，顶部一道极淡
+   高光像光从上面打下来；不做旋转 / 透视 / 渐变 / 彩色光晕，节拍
+   不再各自成卡。纸面内部仍用固定纸面色板，两款主题下结构、字号、
+   间距、读 / 改逻辑完全一致，只换阴影色温与描边（见下方覆盖）。
+   默认阅读态是 plain text 文档；编辑控件是浮在纸面上的一层。 */
+.paper-edit {
+  --bg: #161b22;
+  --surface: #161b22;
+  --surface-alt: #1c2330;
+  --text: #e8edf4;
+  --dim: #9aa7b8;
+  --border: #2a3342;
+  --taupe: #46536a;
+  --terra: #4d7cfe;
+  --accent: #4d7cfe;
+  --accent-soft: #1a2745;
+  --olive: #3cb179;
+  --ok: #3cb179;
+  --ok-soft: #12291e;
+  --walnut: #4d7cfe;
+  --on-primary: #ffffff;
+  --on-primary-dim: #c7d6f5;
+  --shadow-card: none;
+  position: relative;
+  max-width: 860px;
+  margin: 10px auto 0;
+  background: #161b22;
+  color: #e8edf4;
+  border: 1px solid #2a3342;
+  border-radius: 8px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.35),
+    0 12px 32px rgba(0, 0, 0, 0.28);
+  padding: 38px 44px;
+}
+@media (max-width: 767px) {
+.paper-edit {
+    padding: 26px 20px 30px;
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.35),
+      0 8px 20px rgba(0, 0, 0, 0.25);
+  }
+.paper-divider {
+    margin-top: 34px;
+  }
+}
+/* 未来·立体：深空桌面上同一张白纸板——侧边 2-3px 纸边厚度、顶部
+   一道高光、底部两层阴影（近处贴合板边、远处更淡更扩散），纸面内部
+   色板与字号不变，正文仍是高对比干净黑字、无霓虹无发光字。 */
+/* 纸面顶部：大标题 + 阅读 / 修改开关（开关是浮在纸面上的一层，
+   带轻阴影，不占正文版心、不挤压标题）。 */
+.paper-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 16px;
+}
+.paper-mode-switch {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+  padding: 3px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 6px 14px rgba(0, 0, 0, 0.25);
+}
+.paper-mode-switch button {
+  min-height: 32px;
+  padding: 4px 16px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.paper-mode-switch button[aria-pressed="true"] {
+  background: var(--walnut);
+  color: var(--on-primary);
+}
+.paper-doc-title {
+  font-size: 22px;
+  line-height: 30px;
+  font-weight: 900;
+}
+.paper-doc-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dim);
+}
+.paper-group {
+  margin-top: 44px;
+}
+.paper-group-title {
+  font-size: 17px;
+  line-height: 25px;
+  font-weight: 800;
+}
+.paper-group-meta {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dim);
+}
+/* 节拍不再是卡片：无边框、无底色，只靠 28px 间距与拍头标题分层。 */
+.paper-beat {
+  position: relative;
+  margin-top: 28px;
+}
+/* 缩减流程高亮：超长镜头对应的节拍——浅陶土底 + 左侧粗标线，
+   在白纸上醒目但不刺眼；只在用户选了「缩减」回审查页时出现。 */
+.paper-beat-highlight {
+  background: var(--accent-soft);
+  outline: 1px solid var(--accent);
+  outline-offset: 6px;
+  border-radius: 2px;
+  scroll-margin: 90px 0;
+}
+.paper-beat-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 8px;
+  row-gap: 6px;
+  min-height: 28px;
+}
+.paper-beat-title {
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 800;
+}
+/* 编辑控件浮层：比纸面高一层的小便签，带更深一点的阴影；只在该拍
+   处于编辑态时出现，阅读态下不占位、不打断阅读。 */
+.paper-beat-tools {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-left: auto;
+  padding: 4px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  box-shadow:
+    0 2px 5px rgba(0, 0, 0, 0.3),
+    0 10px 22px rgba(0, 0, 0, 0.28);
+}
+.paper-beat-edit-hint {
+  margin-left: auto;
+  box-shadow:
+    0 2px 5px rgba(0, 0, 0, 0.3),
+    0 10px 22px rgba(0, 0, 0, 0.25);
+}
+.paper-lines {
+  list-style: none;
+  margin-top: 8px;
+}
+.paper-line {
+  position: relative;
+  margin-top: 7px;
+  padding-left: 17px;
+  font-size: 14px;
+  line-height: 23px; /* 正文行距 1.65 */
+}
+.paper-line::before {
+  content: "•";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  color: var(--taupe);
+  font-weight: 700;
+}
+/* 标签列 + 正文列两列对齐：标签固定 44px，正文从同一列开始，
+   长文本换行后第二行仍与第一行正文对齐，不顶到标签下面。 */
+.paper-row {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: start;
+}
+.paper-line-label {
+  font-weight: 600;
+  color: var(--dim);
+}
+.paper-read-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.paper-read-empty {
+  color: var(--dim);
+}
+.paper-note {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dim);
+  text-align: right;
+}
+/* 纸面上的输入：字号跟正文同为 14px；平时无边、透明底，像文档里
+   直接改字，悬停透浅边，聚焦才显完整边框与浅底。 */
+.paper-edit .line-input {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 23px;
+  border-bottom: 1px dashed transparent;
+}
+.paper-edit .line-input:hover {
+  border-bottom-color: var(--border);
+}
+.paper-edit .line-input:focus {
+  border-bottom: 1px solid var(--terra);
+  background: var(--accent-soft);
+}
+.paper-edit .field {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 23px;
+}
+.paper-edit .field:hover {
+  border-color: var(--border);
+}
+.paper-edit .field:focus {
+  outline: none;
+  border-color: var(--taupe);
+  background: var(--surface-alt);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.paper-edit .btn {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+  box-shadow: none;
+}
+
+/* ---- 新功能高光引导（v3.29，Coach Marks / 聚光灯导览） ----------------
+   全屏压暗靠 .tour-spotlight 的巨型 box-shadow 实现：只有目标元素所在
+   的矩形是亮的，其余全部变暗。目标本身再叠一层发光描边 + 脉冲光晕
+   （.tour-target）。不用 WebGL、不改目标布局（不改 position，避免
+   fixed 目标如左下角主题切换器被打乱），只加 outline 与 shadow。 */
+.tour-spotlight {
+  position: fixed;
+  z-index: 64;
+  border-radius: 12px;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 9999px rgba(3, 5, 9, 0.72),
+    0 0 0 3px var(--terra),
+    0 0 28px rgba(77, 124, 254, 0.55);
+}
+.tour-spotlight-pulse {
+  animation: tour-spot-pulse 1.8s ease-in-out infinite;
+}
+/* v3.57 共用生成进度条（genprogress.tsx）的不确定进度滑动动画：
+   总数未知（如整体规划中）或单次调用流程时用，不假装百分比。 */
+@keyframes gen-progress-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(330%); }
+}
+.gen-progress-indet {
+  width: 100%;
+  height: 100%;
+  animation: gen-progress-slide 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+.gen-progress-indet { animation: none; }
+.gen-progress-indet > div { width: 100% !important; opacity: 0.55; }
+}
+@keyframes tour-spot-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 9999px rgba(3, 5, 9, 0.72),
+      0 0 0 3px var(--terra),
+      0 0 18px rgba(77, 124, 254, 0.4);
+  }
+  50% {
+    box-shadow:
+      0 0 0 9999px rgba(3, 5, 9, 0.72),
+      0 0 0 4px var(--terra),
+      0 0 36px rgba(77, 124, 254, 0.75);
+  }
+}
+/* 找不到目标时的全屏压暗（无聚光洞，气泡居中说明位置） */
+.tour-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 64;
+  background: rgba(3, 5, 9, 0.72);
+  pointer-events: none;
+}
+.tour-target {
+  outline: 3px solid var(--terra) !important;
+  outline-offset: 3px;
+  border-radius: 10px;
+  box-shadow: 0 0 0 5px var(--accent-soft), 0 0 26px rgba(77, 124, 254, 0.5) !important;
+}
+.tour-bubble {
+  position: fixed;
+  z-index: 66;
+  width: 340px;
+  max-width: calc(100vw - 24px);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--terra);
+  border-radius: 14px;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4), 0 22px 48px rgba(0, 0, 0, 0.5);
+  padding: 14px 16px;
+}
+.tour-bubble:focus {
+  outline: 2px solid var(--terra);
+  outline-offset: 2px;
+}
+.tour-step-badge {
+  position: absolute;
+  top: -13px;
+  left: -13px;
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  background: var(--terra);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+@media (prefers-reduced-motion: reduce) {
+.tour-spotlight-pulse { animation: none; }
+}
+/* 手机端未来感收敛：视差 / 倾斜 / 毛玻璃关掉或减弱，纸面几乎满宽、
+   阴影变浅、厚度边缘变细，不横向溢出。 */
+/* ---- v3.35 评审修复：分镜宽表 + 顶部窄屏折行 -------------------------
+   分镜文档（山海经表）在经典版分镜窗已放宽到约 1104px 内容列；
+   表格真挤不下时只在 .sb-doc-scroll 容器内横向滚动，且首列固定
+   （行首的片名 / 节拍列不滚走），不带出整页横向滚动。 */
+.sb-doc-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.sb-doc-scroll .script-table th:first-child,
+.sb-doc-scroll .script-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+.sb-doc-scroll .script-table th:first-child {
+  background: var(--surface-alt);
+}
+.sb-doc-scroll .script-table td:first-child {
+  background: var(--surface);
+}
+/* ---------------------------------------------------------------------------
+   v3.99 起主题系统整体删除：左下角主题切换器、暖纸·经典与简约·白昼
+   两套主题变量全部移除，全站只保留 :root 的「深空未来」单套深色
+   主题，不再有 data-theme 覆盖层。
+   --------------------------------------------------------------------------- */
+
+/* ---- v4.00 去杂乱：折叠说明（默认收起，点开才看解释性文字） -------------
+   长篇指导 / 规则说明统一收进 <details class="help-fold">：默认只显示
+   一行小字标题（summary），正文藏在一层点击之后。错误 / 警告不用它。 */
+.help-fold {
+  margin-top: 6px;
+}
+.help-fold > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.help-fold > summary::-webkit-details-marker {
+  display: none;
+}
+.help-fold > summary::before {
+  content: "？";
+  font-weight: 800;
+  color: var(--accent);
+}
+.help-fold > summary:hover {
+  color: var(--text);
+  border-color: var(--taupe);
+}
+.help-fold > .help-fold-body {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 19px;
+  color: var(--dim);
+}
+/* 下一步引导：默认只露一行（line-clamp），展开看全文，可关闭。 */
+.next-guide-text[data-collapsed="true"] {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* ---------------------------------------------------------------------------
+   v4.57 AI解剖进度（analysisbench.tsx DissectProgress）：小型赛博朋克风——
+   深色面板 + 霓虹青边框与发光细条，只在深空未来这套深色主题里用。
+   当前步的条带流动光泽（cyber-flow），错误态整条转霓虹红（--bad 同系）。
+   --------------------------------------------------------------------------- */
+.cyber-progress {
+  border: 1px solid rgba(34, 211, 238, 0.45);
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(34, 211, 238, 0.035) 0 1px,
+      transparent 1px 3px
+    ),
+    #0a0f16;
+  box-shadow:
+    0 0 0 1px rgba(34, 211, 238, 0.08),
+    0 0 18px rgba(34, 211, 238, 0.12),
+    inset 0 0 24px rgba(34, 211, 238, 0.05);
+  color: #d7f6ff;
+  transition: opacity 0.7s ease;
+}
+.cyber-progress[data-fading="true"] {
+  opacity: 0;
+}
+.cyber-progress[data-status="error"] {
+  border-color: rgba(240, 102, 94, 0.55);
+  box-shadow:
+    0 0 0 1px rgba(240, 102, 94, 0.1),
+    0 0 18px rgba(240, 102, 94, 0.14),
+    inset 0 0 24px rgba(240, 102, 94, 0.05);
+}
+.cyber-track {
+  height: 4px;
+  background: rgba(148, 197, 255, 0.14);
+  overflow: hidden;
+}
+.cyber-fill {
+  height: 100%;
+  background: #22d3ee;
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.9);
+  transition: width 0.3s ease;
+}
+.cyber-fill[data-done="true"] {
+  background: #34e0a1;
+  box-shadow: 0 0 8px rgba(52, 224, 161, 0.8);
+}
+.cyber-fill[data-error="true"] {
+  background: #f0665e;
+  box-shadow: 0 0 8px rgba(240, 102, 94, 0.9);
+}
+.cyber-fill[data-active="true"] {
+  background-image: linear-gradient(
+    115deg,
+    rgba(255, 255, 255, 0.45) 0 6px,
+    transparent 6px 14px,
+    rgba(255, 255, 255, 0.45) 14px 20px,
+    transparent 20px 28px
+  );
+  background-size: 28px 100%;
+  animation: cyber-flow 0.9s linear infinite;
+}
+@keyframes cyber-flow {
+  0% { background-position-x: 0; }
+  100% { background-position-x: -28px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cyber-fill[data-active="true"] { animation: none; }
+  .cyber-progress { transition: none; }
+}
+
+/* ---------------------------------------------------------------------------
+   v5.12 封面生成单屏三栏（coverbench.tsx）：栏内紧凑内边距 + 细滚动条。
+   桌面端整页不滚动，内容超长只在栏内滚；滚动条收细、低对比，不抢眼。
+   --------------------------------------------------------------------------- */
+.cover-panel.card {
+  padding: 12px;
+}
+.cover-panel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--taupe) transparent;
+}
+.cover-panel::-webkit-scrollbar {
+  width: 6px;
+}
+.cover-panel::-webkit-scrollbar-thumb {
+  background: var(--taupe);
+  border-radius: 3px;
+}
+.cover-panel::-webkit-scrollbar-track {
+  background: transparent;
+}

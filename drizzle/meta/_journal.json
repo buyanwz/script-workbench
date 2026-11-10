@@ -1,0 +1,286 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1792912486277,
+      "tag": "0001_initial",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1792912486277,
+      "tag": "0002_script_workbench_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1792916982990,
+      "tag": "0003_add_character_mapping_fields_and_scene_description",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792918021466,
+      "tag": "0004_add_project_versions_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792928824805,
+      "tag": "0005_add_asset_presets_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792930733932,
+      "tag": "0006_custom_speech_rate_and_optional_target_duration",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1793000493036,
+      "tag": "0007_add_card_fields_and_image_to_asset_presets",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1793002725485,
+      "tag": "0008_add_preset_categories",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1793034605925,
+      "tag": "0009_character_single_name_and_outline_backup",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1793091380478,
+      "tag": "0010_mode_system_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1793094540254,
+      "tag": "0011_viral_gene_card_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1793124792405,
+      "tag": "0012_image_gen_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1793125365516,
+      "tag": "0013_chunked_character_image_upload",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1793298367410,
+      "tag": "0014_add_cover_generations_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1793365787851,
+      "tag": "0015_add_character_image_prompt_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1793390666816,
+      "tag": "0016_outline_overlap_and_mode_training_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1793395194162,
+      "tag": "0017_add_mode_core_logic",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "6",
+      "when": 1793459894270,
+      "tag": "0018_add_scene_asset_cards",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1793471566768,
+      "tag": "0019_add_mode_suggestions_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1793585941398,
+      "tag": "0020_add_project_publish_copy",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1793668871247,
+      "tag": "0021_add_monitor_accounts_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1793725550742,
+      "tag": "0022_add_monitor_videos_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1793737356958,
+      "tag": "0023_add_monitor_video_extra_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1793746686375,
+      "tag": "0024_add_monitor_creator_groups",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1793752203451,
+      "tag": "0025_add_monitor_meta_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1793759630589,
+      "tag": "0026_add_monitor_deletion_tombstones",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1793764294969,
+      "tag": "0027_add_video_analyses_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "6",
+      "when": 1793766294687,
+      "tag": "0028_add_video_analysis_dissection_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "6",
+      "when": 1793819969554,
+      "tag": "0029_project_archive_and_batch_delete_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1793824599390,
+      "tag": "0030_add_project_source_marker",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1794008804666,
+      "tag": "0031_add_cover_analysis_jobs_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1794023563887,
+      "tag": "0032_add_cover_prompt_drafts_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1794033297805,
+      "tag": "0033_add_cover_generation_ref_provenance",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1794100182316,
+      "tag": "0034_add_cover_ref_fetch_evidence",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1794201115064,
+      "tag": "0035_drop_char_analysis_jobs_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1794225409373,
+      "tag": "0036_add_asset_preset_classification_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1794229785151,
+      "tag": "0037_add_asset_preset_pending_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "6",
+      "when": 1794272955108,
+      "tag": "0038_add_monitor_cleanup_log_table",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1794275693747,
+      "tag": "0039_add_per_image_look_fields_to_asset_preset_images",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1794286360362,
+      "tag": "0040_add_image_gen_record_ref_provenance",
+      "breakpoints": true
+    }
+  ]
+}

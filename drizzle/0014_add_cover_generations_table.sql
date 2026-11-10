@@ -1,0 +1,23 @@
+CREATE TABLE `cover_generations` (
+	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+	`project_id` integer NOT NULL REFERENCES `projects`(`id`),
+	`project_name` text DEFAULT '' NOT NULL,
+	`title` text DEFAULT '' NOT NULL,
+	`style_id` text DEFAULT 'explosive_vs' NOT NULL,
+	`style_name` text DEFAULT '' NOT NULL,
+	`ratio` text DEFAULT '3:4' NOT NULL,
+	`layout_type` text DEFAULT 'vs' NOT NULL,
+	`prompt_zh` text DEFAULT '' NOT NULL,
+	`prompt_en` text DEFAULT '' NOT NULL,
+	`analysis_json` text DEFAULT '' NOT NULL,
+	`model` text DEFAULT '' NOT NULL,
+	`quality` text DEFAULT '' NOT NULL,
+	`task_id` text,
+	`line` text DEFAULT 'geeknow.top' NOT NULL,
+	`status` text DEFAULT 'submitted' NOT NULL,
+	`staged_key` text,
+	`mime_type` text,
+	`error` text,
+	`created_at` integer DEFAULT (cast((julianday('now') - 2440587.5)*86400000 as integer)) NOT NULL,
+	`updated_at` integer DEFAULT (cast((julianday('now') - 2440587.5)*86400000 as integer)) NOT NULL
+);
