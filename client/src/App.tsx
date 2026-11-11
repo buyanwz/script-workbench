@@ -11,7 +11,7 @@ type ReactNode,
 type TextareaHTMLAttributes,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { SafeAreaTopScrim, shouldRetryAction } from "@hatch/space-sdk/client";
+import { SafeAreaTopScrim, shouldRetryAction } from "./sdk-local";
 import { api, type ApiResponse } from "./api";
 import { CharacterBench, type CharWindow } from "./charbench";
 import { MonitorBench } from "./monitorbench";
