@@ -85,7 +85,7 @@ looksLikeExcelSerial,
 parseMonitorXlsx,
 } from "./monitorxlsx";
 import { CloudBadge, useCloudVideoSource } from "./cloudvideo";
-import sampleCover from "./assets/monitor-huanxiong-cover.jpg";
+import sampleCover from "./assets/封面参照图-21张/monitor-huanxiong-cover.jpg";
 import type { AnalysisPrefill } from "./analysisbench";
 
 type FeedAccount = ApiResponse<typeof api, "listMonitorFeed">["accounts"][number];

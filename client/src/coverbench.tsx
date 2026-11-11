@@ -244,29 +244,29 @@ import {
 uploadImageUrlInChunks,
 type ChunkedImageRef,
 } from "./chunkedupload";
-import coverRefVs from "./assets/cover-ref-vs.jpg";
-import coverRefFace from "./assets/cover-ref-face.jpg";
-import coverRefCollage from "./assets/cover-ref-collage.jpg";
-import coverRefPanorama from "./assets/cover-ref-panorama.jpg";
-import coverRefSolo from "./assets/cover-ref-solo.jpg";
-import coverRefPoster from "./assets/cover-ref-poster.jpg";
-import coverRefPanels from "./assets/cover-ref-panels.jpg";
-import coverRefCamps from "./assets/cover-ref-camps.jpg";
-import coverRefSpectacle from "./assets/cover-ref-spectacle.jpg";
-import coverRefMarket from "./assets/cover-ref-market.jpg";
+import coverRefVs from "./assets/封面参照图-21张/cover-ref-vs.jpg";
+import coverRefFace from "./assets/封面参照图-21张/cover-ref-face.jpg";
+import coverRefCollage from "./assets/封面参照图-21张/cover-ref-collage.jpg";
+import coverRefPanorama from "./assets/封面参照图-21张/cover-ref-panorama.jpg";
+import coverRefSolo from "./assets/封面参照图-21张/cover-ref-solo.jpg";
+import coverRefPoster from "./assets/封面参照图-21张/cover-ref-poster.jpg";
+import coverRefPanels from "./assets/封面参照图-21张/cover-ref-panels.jpg";
+import coverRefCamps from "./assets/封面参照图-21张/cover-ref-camps.jpg";
+import coverRefSpectacle from "./assets/封面参照图-21张/cover-ref-spectacle.jpg";
+import coverRefMarket from "./assets/封面参照图-21张/cover-ref-market.jpg";
 // v5.57：风格参照图在选择排里只显示 46px 高的小图，另备一份
 // ≤224px 的降质小图（十张合计约 129KB，原图约 1MB）；点开看大图
 // 仍用原图全质（上方十个导入）。
-import coverRefVsSm from "./assets/cover-ref-vs-sm.jpg";
-import coverRefFaceSm from "./assets/cover-ref-face-sm.jpg";
-import coverRefCollageSm from "./assets/cover-ref-collage-sm.jpg";
-import coverRefPanoramaSm from "./assets/cover-ref-panorama-sm.jpg";
-import coverRefSoloSm from "./assets/cover-ref-solo-sm.jpg";
-import coverRefPosterSm from "./assets/cover-ref-poster-sm.jpg";
-import coverRefPanelsSm from "./assets/cover-ref-panels-sm.jpg";
-import coverRefCampsSm from "./assets/cover-ref-camps-sm.jpg";
-import coverRefSpectacleSm from "./assets/cover-ref-spectacle-sm.jpg";
-import coverRefMarketSm from "./assets/cover-ref-market-sm.jpg";
+import coverRefVsSm from "./assets/封面参照图-21张/cover-ref-vs-sm.jpg";
+import coverRefFaceSm from "./assets/封面参照图-21张/cover-ref-face-sm.jpg";
+import coverRefCollageSm from "./assets/封面参照图-21张/cover-ref-collage-sm.jpg";
+import coverRefPanoramaSm from "./assets/封面参照图-21张/cover-ref-panorama-sm.jpg";
+import coverRefSoloSm from "./assets/封面参照图-21张/cover-ref-solo-sm.jpg";
+import coverRefPosterSm from "./assets/封面参照图-21张/cover-ref-poster-sm.jpg";
+import coverRefPanelsSm from "./assets/封面参照图-21张/cover-ref-panels-sm.jpg";
+import coverRefCampsSm from "./assets/封面参照图-21张/cover-ref-camps-sm.jpg";
+import coverRefSpectacleSm from "./assets/封面参照图-21张/cover-ref-spectacle-sm.jpg";
+import coverRefMarketSm from "./assets/封面参照图-21张/cover-ref-market-sm.jpg";
 import {
 COVER_STYLES,
 buildCoverPrompts,
