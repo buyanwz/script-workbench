@@ -80,7 +80,7 @@ jobs:
         run: bun build --compile --target=bun-windows-x64 ./server.ts --outfile=./resources/script-workbench-server.exe
 
       - name: Package NSIS installer
-        run: bun x electron-builder --win nsis --x64
+        run: bun x electron-builder --win nsis --x64 --publish never
 
       - name: Verify installer
         shell: pwsh
