@@ -11,7 +11,7 @@
 // 此降级（有云端原件走云端转写、都没有才回落纯文本估计）。
 // ---------------------------------------------------------------------------
 
-import { bytesToBase64 } from "@hatch/space-sdk/client";
+import { bytesToBase64 } from "./sdk-local";
 import { api } from "./api";
 import { describeThrownError } from "./gateway";
 

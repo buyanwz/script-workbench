@@ -1,4 +1,4 @@
-import { shouldRetryAction } from "@hatch/space-sdk/client";
+import { shouldRetryAction } from "./sdk-local";
 
 // ---------------------------------------------------------------------------
 // 网关超时重试（v3.57 追加修复，全站共用一套，不为每个流程各写一套）。

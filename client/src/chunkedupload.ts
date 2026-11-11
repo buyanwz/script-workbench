@@ -8,7 +8,7 @@
 // 暂存，最后由完成动作拼回完整原图存入——不压缩、不改尺寸、不转
 // 格式，原图多少字节就存多少字节。界面层不做任何文件大小拦截。
 
-import { bytesToBase64 } from "@hatch/space-sdk/client";
+import { bytesToBase64 } from "./sdk-local";
 import { api } from "./api";
 import { describeThrownError } from "./gateway";
 

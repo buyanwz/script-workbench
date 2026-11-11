@@ -16,7 +16,11 @@
 //      库里原图与无损下载不动。提交失败文案透出真实状态码与错误
 //      原文，不再只有一句通用文案（P0）。提交设置另有 Key（密码
 //      框、只存内存、填了当次优先）与 API 地址两个小输入框，为空
-//      时走已连接的安全凭证、流程不变。v3.84 起点「生成封面」先
+//      时走已连接的安全凭证、流程不变。v5.70 起这两个框下面多一
+//      层：生图接口总设置（顶部「生图」面板里维护、只存本机），
+//      生效顺序 = 本页单次输入 > 总设置 > 已连接凭证，逐项解析见
+//      imageapi.ts；本页设置区只显示当前生效来源一行，不另设一份
+//      总设置输入。v3.84 起点「生成封面」先
 //      跑一次只读鉴权预检（不存在的模型名探异步提交端点，不建
 //      任务、不计费）：实际将生效的凭证被拒就拦下提交，并分清是
 //      自填 Key 被拒还是已连接凭证被拒——401 Invalid token 是
@@ -212,6 +216,12 @@ import {
   regenerateOversizedPreview,
 } from "./previewimg";
 import { ConfirmDialog } from "./confirm";
+import {
+loadImageApiSettings,
+resolveImageApiConfig,
+IMAGE_API_SETTINGS_EVENT,
+type ImageApiSettings,
+} from "./imageapi";
 import { sha256Hex } from "./sha256";
 import {
 describeThrownError,
@@ -399,7 +409,29 @@ export function CoverBench({
     apiKey: "",
     apiBase: "https://api.geeknow.top",
   });
-  submitCfgRef.current = { apiKey: customKey, apiBase };
+  // v5.70 生图接口总设置接入：实际生效配置按「封面页单次输入 >
+  // 总设置 > 已连接凭证」逐项解析（imageapi.ts）。本页两个框仍是
+  // 单次输入（只存内存、不写回总设置、刷新即失效）；总设置在顶部
+  // 「生图」面板里维护、只存本机，本页只读它并随其变化刷新解析。
+  const [globalApiSettings, setGlobalApiSettings] =
+    useState<ImageApiSettings>(() => loadImageApiSettings());
+  useEffect(() => {
+    const on = () => setGlobalApiSettings(loadImageApiSettings());
+    window.addEventListener(IMAGE_API_SETTINGS_EVENT, on);
+    window.addEventListener("storage", on);
+    return () => {
+      window.removeEventListener(IMAGE_API_SETTINGS_EVENT, on);
+      window.removeEventListener("storage", on);
+    };
+  }, []);
+  const coverResolved = resolveImageApiConfig(globalApiSettings, {
+    apiKey: customKey,
+    apiBase,
+  });
+  submitCfgRef.current = {
+    apiKey: coverResolved.apiKey ?? "",
+    apiBase: coverResolved.apiBase ?? "",
+  };
   const [refNote, setRefNote] = useState<string | null>(null);
   // v3.98 参考图部分缺失的黄色提醒（提交前由 submitCover 对账后
   // 写入：方案里有人没带上图但仍有图可交时，亮黄提醒再提交，
@@ -1562,7 +1594,7 @@ export function CoverBench({
   };
   const probeFailText = (p: ProbeResult): string =>
     p.usedCustomKey
-      ? `你填的 Key 被 Geeknow 拒绝了（${p.error ?? "鉴权失败"}）：已连接的 Geeknow 凭证是好的，卡住的是这个自填 Key——多半是填错了、已过期，或不是这个 API 地址的 Key。把 Key 输入框清空改用已连接凭证、或换一个正确的 Key 再生成。这次没有提交生图；被拒的请求没到计费环节，Geeknow 控制台的使用日志里也不会有这一条。`
+      ? `你填的 Key 被 Geeknow 拒绝了（${p.error ?? "鉴权失败"}）：已连接的 Geeknow 凭证是好的，卡住的是这个自填 Key（封面页单次输入、或生图接口总设置里的那份）——多半是填错了、已过期，或不是这个 API 地址的 Key。把填 Key 的地方清空改用已连接凭证、或换一个正确的 Key 再生成。这次没有提交生图；被拒的请求没到计费环节，Geeknow 控制台的使用日志里也不会有这一条。`
       : `已连接的 Geeknow 凭证被 Geeknow 拒绝了（${p.error ?? "鉴权失败"}）：请重新连接 Geeknow 后再生成。这次没有提交生图；被拒的请求不会出现在 Geeknow 控制台的使用日志里。`;
   const runManualProbe = async () => {
     if (probing) return;
@@ -3467,7 +3499,7 @@ export function CoverBench({
               }}
             />
             <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-              只留在本次页面内存里，不保存；填了优先用它，不填走已连接凭证。
+              只留在本次页面内存里，不保存；填了本次优先用它，不填先用总设置、再走已连接凭证。
             </p>
           </div>
           <div>
@@ -3488,10 +3520,22 @@ export function CoverBench({
               }}
             />
             <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-              默认当前已连接地址；换其他域名必须同时填该线路的 Key。
+              默认当前已连接地址；换其他域名必须同时填该线路的 Key；这个框保持默认地址时，总设置里填的地址先生效。
             </p>
           </div>
         </div>
+
+        {/* v5.70 当前生效来源：单次输入 > 总设置 > 已连接凭证，一眼
+            看清这次封面生成走哪份设置（不露 Key）。总设置本身只在
+            顶部「生图」面板里维护，这里不另设一份。 */}
+        <p className="text-xs leading-5" role="status">
+          <span className="font-bold" style={{ color: "var(--olive)" }}>
+            {coverResolved.sourceLabel}
+          </span>
+          <span className="text-[var(--dim)]">
+            。上面两个框是封面页单次输入：填了只对本次提交优先、刷新就没了，也不会改总设置；不填时用「生图接口总设置」（在顶部「生图」面板里，填一次生图面板和封面生成都用），总设置也没填才走已连接凭证。
+          </span>
+        </p>
 
         {/* v3.84 只读鉴权预检：手动检测当前实际会生效的配置 */}
         <div className="flex flex-wrap items-start gap-2">

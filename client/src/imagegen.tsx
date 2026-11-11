@@ -10,10 +10,14 @@
 // 规则：
 //   - 只从入口手动打开，绝不自动弹；可关闭、可最小化；位置在右侧，
 //     手机端打开时先最小化成一条小条，点「展开」才铺开，不遮主窗口。
-//   - 调用只走已连接的 custom.geeknow 凭证（服务端特权层），面板里
-//     没有 Key 输入框、永不显示 Key 明文；点「生成图片」才调用，
-//     打开面板、改设置不花钱；费用按用户的 Geeknow 账户计费，面板
-//     不编造单价。
+//   - 调用默认走已连接的 custom.geeknow 凭证（服务端特权层）；点
+//     「生成图片」才调用，打开面板、改设置不花钱；费用按实际生效
+//     的那份接口设置对应的账户计费，面板不编造单价。
+//   - v5.70 生图接口总设置：面板顶部有全站唯一一份「生图接口总
+//     设置」（API 地址 + 密钥密码框），生图面板与封面生成共用、
+//     只存本机 localStorage（见 imageapi.ts）；封面页单次输入优先
+//     于总设置，总设置没填才回落已连接凭证；Key 永不明文、不进
+//     数据库 / 备份 / 记录 / 日志，v3.83 服务端护栏原样保留。
 //   - 生成走 v3.60 异步路径：先提交拿任务号（几秒返回），再用短
 //     调用轮询任务状态直到出图。同步等图会被守护进程 30 秒上限
 //     掐断（v3.58 的失败根因，与 Key 无关）；提交绝不自动重试，
@@ -78,7 +82,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { fileToBase64 } from "@hatch/space-sdk/client";
+import { fileToBase64 } from "./sdk-local";
 import { api, type ApiResponse } from "./api";
 import {
 callWithGatewayRetry,
@@ -90,6 +94,15 @@ withReadTimeout,
 } from "./gateway";
 import { PreviewImg } from "./previewimg";
 import { ConfirmDialog } from "./confirm";
+import {
+clearImageApiSettings,
+loadImageApiSettings,
+resolveImageApiConfig,
+saveImageApiSettings,
+DEFAULT_IMAGE_API_BASE,
+IMAGE_API_SETTINGS_EVENT,
+type ImageApiSettings,
+} from "./imageapi";
 import { sha256Hex } from "./sha256";
 import { runPresetImageLookCore } from "./presetimagelook";
 import {
@@ -796,6 +809,89 @@ function ImageGenPanel({
   // 决定经 runGenerate 的 opts 递进提交，不改 refHostConsent 本身
   // 以外的任何状态（「勾上同意并继续」会顺手把勾选补上）。
   const [refConsentAsk, setRefConsentAsk] = useState(false);
+  // v5.70 生图接口总设置（全站唯一一份编辑入口就在本面板顶部）：
+  // 地址 / Key 只存本机 localStorage（imageapi.ts），输入即保存；
+  // 提交与续查经 imgCfgRef 读解析后的生效配置（总设置优先于已连
+  // 接凭证；封面页的单次输入只在封面页那边叠加、不经这里）。
+  const [apiSettings, setApiSettings] = useState<ImageApiSettings>(() =>
+    loadImageApiSettings(),
+  );
+  const [apiProbeMsg, setApiProbeMsg] = useState<string | null>(null);
+  const [apiProbeBad, setApiProbeBad] = useState(false);
+  const [apiProbing, setApiProbing] = useState(false);
+  const [apiClearAsk, setApiClearAsk] = useState(false);
+  const imgResolved = resolveImageApiConfig(apiSettings);
+  const imgCfgRef = useRef(imgResolved);
+  imgCfgRef.current = imgResolved;
+  // 总设置在别处被改（理论上只有本面板会写，跨窗口时同步一下）。
+  useEffect(() => {
+    const on = () => setApiSettings(loadImageApiSettings());
+    window.addEventListener(IMAGE_API_SETTINGS_EVENT, on);
+    window.addEventListener("storage", on);
+    return () => {
+      window.removeEventListener(IMAGE_API_SETTINGS_EVENT, on);
+      window.removeEventListener("storage", on);
+    };
+  }, []);
+  const updateApiSettings = (next: ImageApiSettings) => {
+    setApiSettings(next);
+    saveImageApiSettings(next);
+    setApiProbeMsg(null);
+  };
+  // v5.70 只读预检：用当前总设置探一次提交口鉴权（不存在的模型
+  // 名，不建任务、不计费）；护栏类拒绝（非 geeknow 主机没填 Key /
+  // http:// 地址）由特权层在发请求前回 ok=false + 护栏原文，这里
+  // 单独按「会被拦下」展示，不混进「预检没查成」。
+  const runApiProbe = async () => {
+    if (apiProbing) return;
+    setApiProbing(true);
+    setApiProbeMsg(null);
+    try {
+      const cfg = resolveImageApiConfig(apiSettings);
+      const p = await api.probeGeeknowAuth({
+        apiKey: cfg.apiKey,
+        apiBase: cfg.apiBase,
+      });
+      if (
+        !p.ok &&
+        p.error &&
+        (p.error.includes("不在 Geeknow") || p.error.includes("API 地址格式不对"))
+      ) {
+        setApiProbeBad(true);
+        setApiProbeMsg(
+          `这份设置提交时会被拦下：${p.error}。请求还没发出去，不会计费。`,
+        );
+        return;
+      }
+      if (!p.ok) {
+        setApiProbeBad(true);
+        setApiProbeMsg(
+          `预检没查成（${p.error ?? "网络或服务异常"}）：这说明不了 Key 有没有问题，可以再点一次检测；点「生成图片」时用的就是这份设置。`,
+        );
+        return;
+      }
+      if (p.authOk) {
+        setApiProbeBad(false);
+        setApiProbeMsg(
+          p.usedCustomKey
+            ? "预检通过：总设置里这份地址 + Key 能通过鉴权——生图面板和封面生成提交时都会用它。"
+            : "预检通过：已连接的 Geeknow 凭证可用（总设置没填内容，走的就是这份凭证）。",
+        );
+      } else {
+        setApiProbeBad(true);
+        setApiProbeMsg(
+          p.usedCustomKey
+            ? `总设置里填的 Key 被拒绝了（${p.error ?? "鉴权失败"}）：多半是填错了、已过期，或不是这个 API 地址的 Key。改对，或点「清除」改用已连接凭证。这次没有提交生图、不会计费。`
+            : `已连接的 Geeknow 凭证被拒绝了（${p.error ?? "鉴权失败"}）：请重新连接 Geeknow。这次没有提交生图、不会计费。`,
+        );
+      }
+    } catch (e) {
+      setApiProbeBad(true);
+      setApiProbeMsg(`预检没查成：${describeThrownError(e)}`);
+    } finally {
+      setApiProbing(false);
+    }
+  };
   // v5.61 自动带入标注：从人物卡 / 分镜打开面板时自动带入的参考
   // 图说明（如「已自动带入人物参考图 1 张（人物卡 B 的图）」）；
   // 非自动带入时为 null。清除按钮只删 origin=auto 的那几张。
@@ -1460,9 +1556,14 @@ function ImageGenPanel({
         let res: Awaited<ReturnType<typeof api.pollGeeknowImageTask>> | null =
           null;
         try {
+          // v5.70：续查带当前总设置（用总设置 Key 提交的任务要带同
+          // 一份才查得到）；总设置没填时即已连接凭证，与旧口径同。
+          const cfg = imgCfgRef.current;
           res = await api.pollGeeknowImageTask({
             taskId: tid,
             downloadTimeoutSec: dlTimeout,
+            apiKey: cfg.apiKey,
+            apiBase: cfg.apiBase,
           });
         } catch {
           res = null;
@@ -1501,7 +1602,9 @@ function ImageGenPanel({
           await api.updateImageGenRecord({
             id: rec.id,
             status: "failed",
-            error: `Geeknow 未连接：${res.error ?? "鉴权失败"}。这是 Key / 连接问题，不是超时；重新连接 Geeknow 后点这条记录的「续查」接着查同一个任务。`,
+            error: imgCfgRef.current.usedGlobalKey
+              ? `续查被 Geeknow 拒绝：${res.error ?? "鉴权失败"}。续查用的是生图接口总设置里填的 Key——它可能不正确或已失效；在顶部「生图」面板的总设置里改对、或清除改用已连接凭证后，点这条记录的「续查」接着查同一个任务，不会重新提交。`
+              : `Geeknow 未连接：${res.error ?? "鉴权失败"}。这是 Key / 连接问题，不是超时；重新连接 Geeknow 后点这条记录的「续查」接着查同一个任务。`,
           });
           await invalidateRecords();
           return;
@@ -1647,6 +1750,9 @@ function ImageGenPanel({
       );
       return false;
     }
+    // v5.70：提交带生图接口总设置的解析结果（填了用总设置、没填
+    // 回落已连接凭证）；Key 只随当次请求透传，不落库不进记录。
+    const submitCfg = imgCfgRef.current;
     const res = await api.submitGeeknowImageTask({
       model: input.useModel,
       prompt: finalPrompt,
@@ -1656,12 +1762,16 @@ function ImageGenPanel({
       downloadTimeoutSec: dlTimeout,
       retryCount: retries,
       referenceImages: preparedRefs,
+      apiKey: submitCfg.apiKey,
+      apiBase: submitCfg.apiBase,
     });
     if (!res.ok) {
       const errText = res.error ?? "提交失败，请重试";
       setSubmitError(
         /401|403|鉴权|未连接|api key/i.test(errText)
-          ? `Geeknow 未连接：${errText}。这是 Key / 连接问题，不是超时；请重新连接 Geeknow 后再生成。`
+          ? submitCfg.usedGlobalKey
+            ? `总设置里填的 Key 被 Geeknow 拒绝了：${errText}。这是 Key 问题，不是超时；到面板顶部「生图接口总设置」把 Key 改对、或清除改用已连接凭证后再生成。`
+            : `Geeknow 未连接：${errText}。这是 Key / 连接问题，不是超时；请重新连接 Geeknow 后再生成。`
           : errText,
       );
       return false;
@@ -2265,6 +2375,99 @@ function ImageGenPanel({
         <p className="mt-1.5 text-[12px] leading-5 text-[var(--dim)]">
           按你的 Geeknow 账户计费；只有点「生成图片」才会调用。
         </p>
+
+        {/* v5.70 生图接口总设置：全站唯一一份（生图面板与封面生成
+            共用），只存本机 localStorage；封面页的单次输入只对封面
+            那一次提交优先、不会改这里。 */}
+        <div
+          className="mt-3 rounded-[var(--radius)] border p-3"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--surface-alt)",
+          }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-bold">生图接口总设置</p>
+            <span
+              className="text-xs font-bold"
+              style={{ color: "var(--olive)" }}
+              role="status"
+            >
+              {imgResolved.sourceLabel}
+            </span>
+          </div>
+          <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
+            填一次就行：生图面板和封面生成都用这一份；两项都不填，就继续用已连接的
+            Geeknow 凭证。只存在这台浏览器的本机里（刷新还在、换电脑要重填），不进数据库、不进备份包。
+          </p>
+          <div className="mt-2">
+            <label className={labelCls} htmlFor="imagegen-api-base">
+              API 地址
+            </label>
+            <input
+              id="imagegen-api-base"
+              type="text"
+              className="field field-sm"
+              value={apiSettings.apiBase}
+              autoComplete="off"
+              placeholder={DEFAULT_IMAGE_API_BASE}
+              aria-label="生图接口总设置：API 地址（留空用默认 https://api.geeknow.top）"
+              onChange={(e) =>
+                updateApiSettings({ ...apiSettings, apiBase: e.target.value })
+              }
+            />
+          </div>
+          <div className="mt-2">
+            <label className={labelCls} htmlFor="imagegen-api-key">
+              密钥（Key）
+            </label>
+            <input
+              id="imagegen-api-key"
+              type="password"
+              className="field field-sm"
+              value={apiSettings.apiKey}
+              autoComplete="off"
+              placeholder="留空 = 用已连接的 Geeknow 凭证"
+              aria-label="生图接口总设置：密钥（密码框，永不明文显示；留空用已连接的 Geeknow 凭证）"
+              onChange={(e) =>
+                updateApiSettings({ ...apiSettings, apiKey: e.target.value })
+              }
+            />
+            <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
+              密码框输入、永不明文显示。地址换成其他域名时必须同时填那个地址的
+              Key——工作台绝不会把已连接凭证发去别的地址，没填 Key 会在提交前拦下。
+            </p>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-sm"
+              disabled={apiProbing}
+              aria-label="检测生图接口总设置能否通过鉴权（只读预检，不提交生图、不计费）"
+              onClick={() => void runApiProbe()}
+            >
+              {apiProbing ? "检测中…" : "检测这份设置（只读预检）"}
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm btn-danger-ghost"
+              disabled={!apiSettings.apiBase && !apiSettings.apiKey}
+              aria-label="清除生图接口总设置（先弹确认；清掉保存在本机的 API 地址和密钥，之后回落已连接凭证）"
+              onClick={() => setApiClearAsk(true)}
+            >
+              清除
+            </button>
+          </div>
+          {apiProbeMsg && (
+            <p
+              className="mt-2 text-xs leading-5"
+              style={{ color: apiProbeBad ? "var(--bad)" : "var(--olive)" }}
+              role="status"
+            >
+              {apiProbeMsg}
+            </p>
+          )}
+        </div>
 
         <div className="mt-3">
           <label className={labelCls} htmlFor="imagegen-family">
@@ -3389,6 +3592,29 @@ function ImageGenPanel({
             void doGenerate({ refConsent: true });
           }}
           onCancel={() => setRefConsentAsk(false)}
+        />
+      )}
+      {/* v5.70 清除总设置确认：Key 清掉就找不回来（本机没有别处存
+          份），先确认一次防手滑；确认后地址与 Key 一并清掉、回落
+          已连接凭证，状态行随之更新。 */}
+      {apiClearAsk && (
+        <ConfirmDialog
+          title="清除生图接口总设置？"
+          body={
+            <p>
+              会把保存在这台浏览器本机里的 API 地址和密钥一起清掉。密钥清掉后找不回来（工作台别处没有存份），之后生图面板和封面生成都会改回用已连接的
+              Geeknow 凭证。要继续吗？
+            </p>
+          }
+          confirmLabel="清除"
+          cancelLabel="不清除"
+          onConfirm={() => {
+            clearImageApiSettings();
+            setApiSettings({ apiBase: "", apiKey: "" });
+            setApiProbeMsg(null);
+            setApiClearAsk(false);
+          }}
+          onCancel={() => setApiClearAsk(false)}
         />
       )}
       {/* v4.20 出图大图预览（面板内弹窗）：旧版「预览出图」是

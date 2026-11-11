@@ -52,7 +52,7 @@
 
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { bytesToBase64 } from "@hatch/space-sdk/client";
+import { bytesToBase64 } from "./sdk-local";
 import { api, type ApiResponse } from "./api";
 import { downloadText } from "./scriptlib";
 import { sha256Hex } from "./sha256";
