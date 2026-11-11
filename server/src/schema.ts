@@ -866,6 +866,59 @@ export const projectDeleteSnapshots = sqliteTable(
 // Legacy scene-image table (v4.03：场景设置整体删除）: no action reads
 // or writes it any more; rows are only cleaned up when their project
 // is deleted. Kept so existing databases keep loading.
+// ---------------------------------------------------------------------------
+// v5.75 问题处理页：用户攒着要处理的问题，一条一行，id 即问题编号
+// （自增、删行不复用，编号稳定）。status: pending（待处理）/ sent
+// （已发送到聊天）；sendCount / lastSentAt 记发送历史。附图字节存
+// ctx.blobs（key 形如 issues/<issueId>/<imageId>），本表只存 key 与
+// 原文件名 / 类型；删问题时动作层连带删行与 blob。
+// ---------------------------------------------------------------------------
+
+export const issueReports = sqliteTable("issue_reports", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  text: text("text").notNull().default(""),
+  // v5.79 进度三态（用户 2026-11-11 补要求「每个问题有一个进度」）：
+  // open=未解决 / working=进行中 / done=已完成。旧值 sent 是 v5.75–
+  // v5.78「已发送」口径的历史值，v5.79 起不再写入；读取时按 open
+  // （未解决）显示，不回填改写存量行。
+  status: text("status", { enum: ["open", "working", "done", "sent", "pending"] })
+    .notNull()
+    .default("open"),
+  sendCount: integer("send_count").notNull().default(0),
+  lastSentAt: integer("last_sent_at", { mode: "timestamp_ms" }),
+  // v5.76：发送任务真把问题送进聊天后的回执时刻（recordIssueDelivery
+  // 回调写入）；为空 = 已派发但还没确认送达，与 lastSentAt（派发时刻）
+  // 分开，页面据此区分「已提交发送」与「已送达聊天」。
+  deliveredAt: integer("delivered_at", { mode: "timestamp_ms" }),
+  // v5.77：最近一轮发送派出的后台任务 id（sendIssueToChat 派发成功时
+  // 写入）。页面据此调 getIssueSendStatus 查任务真实状态（排队 / 运行 /
+  // 失败+原因），不再对着「还没确认送达」瞎等；新一轮派发覆盖旧值。
+  sendTaskId: text("send_task_id").notNull().default(""),
+  // v5.79：进度翻成「已完成」的时刻（setIssueStatus 写入）；退回
+  // 未解决 / 进行中时清空。页面显示「完成于 …」。
+  resolvedAt: integer("resolved_at", { mode: "timestamp_ms" }),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+export const issueImages = sqliteTable("issue_images", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  issueId: integer("issue_id")
+    .notNull()
+    .references(() => issueReports.id),
+  blobKey: text("blob_key").notNull(),
+  fileName: text("file_name").notNull().default(""),
+  mime: text("mime").notNull().default("image/png"),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
 export const sceneImages = sqliteTable("scene_images", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   projectId: integer("project_id")
