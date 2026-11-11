@@ -15,7 +15,7 @@ z,
 InferenceSchemaError,
 type ActionsModule,
 type Ctx,
-} from "@hatch/space-sdk";
+} from "./local-sdk";
 import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
 import { privileged } from "@space/privileged";
 import * as schema from "./schema";

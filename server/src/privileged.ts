@@ -1,12 +1,13 @@
 // ---------------------------------------------------------------------------
 // Privileged handlers — Geeknow（GeekAI）图片中转调用（v3.58 生图悬浮窗）。
 //
-// 为什么走特权层：用户的 Geeknow API Key 只存在于已连接的
-// custom.geeknow 凭证里，服务端动作与客户端都拿不到、也不该拿到
-// Key 明文。这里在宿主机上调连接器自带的凭证机制
-// （dynamic_credentials 只给出 hsurr: 代理值，真实 Key 由运行时在
-// 发往已登记主机 geeknow.top / api.geeknow.top 的请求上替换），
-// 全程没有任何 Key 经过本文件、动作层、页面或日志。
+// 为什么走特权层：生图调用由内嵌 Python 小程序发往 Geeknow，
+// Key 不经过动作层落库、不进日志。P4 起不再走 Muse 平台的
+// dynamic_credentials 代理凭证（exe 环境里不存在）：Key 按
+// “动作入参 apiKey/apiBase > 请求头（工作台「生图接口总设置」）
+// > 环境变量 GEEKNOW_API_KEY/GEEKNOW_API_BASE”的顺序解析后由
+// handler 放进当次 payload，Python 侧有 Key 走 Bearer 头，没 Key
+// 明确报错、绝不静默用假 Key。
 //
 // 实际请求由一个内嵌的 Python 小程序完成（与连接器 helper 同一条
 // 凭证路径）：
@@ -22,13 +23,15 @@
 
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { homedir } from "node:os";
 import path from "node:path";
+import { resolveDataDir } from "./db";
+import { pythonHelperEnv, resolvePython } from "./python-runtime";
 import {
 definePrivilegedContracts,
 definePrivilegedHandlers,
 z,
-} from "@hatch/space-sdk";
+} from "./local-sdk";
+import { resolveGeeknowCredentials } from "./geeknow";
 
 export const privileged = definePrivilegedContracts({
   geeknowListImageModels: {
@@ -104,7 +107,8 @@ export const privileged = definePrivilegedContracts({
         .max(16),
       // v3.83 提交设置：用户自填 Key / API 地址（可空）。Key 只经
       // 本契约透传到助手进程用于当次请求头，绝不落库、不进日志
-      // 与任何返回字段；为空走连接器安全凭证与默认地址。
+      // 与任何返回字段；为空时再按请求头（总设置）> 环境变量的
+      // 顺序取 Key，仍没有则明确报“未填 Geeknow Key”。
       apiKey: z.string().min(1).max(400).optional(),
       apiBase: z.string().min(1).max(300).optional(),
     }),
@@ -476,12 +480,26 @@ export const privileged = definePrivilegedContracts({
   },
 });
 
-// 与连接器 bin/geeknow.py 同一条凭证路径，但不截断输出（模型列表
+// 与连接器 bin/geeknow.py 同一条调用口径，但不截断输出（模型列表
 // 与图片 base64 都可能远超 8000 字），结果以 RESULT_JSON 行回传。
 const GEEKNOW_PY = `
 import json, sys, base64, time, urllib.request, urllib.error
-sys.path.insert(0, "/opt/muse/skills/custom-connector-setup/bin")
-from dynamic_credentials import add_surrogate_to_request, read_json_response
+
+# P4：exe 环境没有 Muse 平台的 dynamic_credentials 代理凭证机制，
+# read_json_response 在此本地实现（与原 helper 等价：分块读完
+# body 再 json.loads，非 JSON 抛错）。
+def read_json_response(resp):
+    chunks = []
+    while True:
+        chunk = resp.read(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    try:
+        return json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("provider response was not valid JSON") from exc
 
 ALLOWED = ["geeknow.top", "api.geeknow.top", "www.geeknow.top"]
 BASE = "https://api.geeknow.top"
@@ -496,9 +514,8 @@ def opener():
 # v3.83 提交设置：用户可自填 API 地址与 Key（封面页两个小输入框）。
 # 地址为空用默认 BASE；填了必须是 https:// 开头的完整地址（带不带
 # /v1 后缀都认）。鉴权口径：填了 Key → 直接用 Bearer 头（Key 只用
-# 于当次请求，绝不打印、绝不拼进任何错误文案）；没填 Key → 只对
-# 已连接凭证明确允许的 geeknow 主机走代理凭证；其他主机直接报错
-# 说明要同时填 Key——绝不把已连接凭证发去陌生主机。
+# 于当次请求，绝不打印、绝不拼进任何错误文案）；没填 Key → 明确
+# 报错，不再走任何代理凭证（exe 环境里没有该机制）。
 def effective_base(req_in):
     raw = (req_in.get("apiBase") or "").strip()
     if not raw:
@@ -519,10 +536,7 @@ def apply_auth(req, req_in, host):
     if key:
         req.add_header("Authorization", "Bearer " + key)
         return None
-    if host in ALLOWED:
-        add_surrogate_to_request(req, "custom.geeknow", allowed_hosts=ALLOWED)
-        return None
-    return "这个 API 地址不在 Geeknow 已连接凭证可用的主机内：要使用这个地址，请在提交设置里同时填写该线路的 Key（Key 只用于当次提交、不会保存）"
+    return "未填 Geeknow Key，请在工作台生图设置里填写"
 
 # v4.22 参考图临时托管（恢复 v3.86 已实测链路，用户明确要求恢复带
 # 参考图生成、推翻 v4.05 下线决定）：把参考图降采样副本（最长边
@@ -745,8 +759,16 @@ def main():
     mode = req_in.get("mode")
     if mode == "models":
         try:
-            r = urllib.request.Request(BASE + "/v1/models", method="GET")
-            add_surrogate_to_request(r, "custom.geeknow", allowed_hosts=ALLOWED)
+            base, berr = effective_base(req_in)
+            if berr:
+                emit({"ok": False, "models": [], "error": berr})
+                return
+            host = urllib.parse.urlparse(base).hostname or ""
+            r = urllib.request.Request(base + "/v1/models", method="GET")
+            aerr = apply_auth(r, req_in, host)
+            if aerr:
+                emit({"ok": False, "models": [], "error": aerr})
+                return
             with opener().open(r, timeout=60) as resp:
                 body = read_json_response(resp)
             ids = []
@@ -947,12 +969,20 @@ def main():
     req_timeout = float(req_in.get("requestTimeoutSec", 60))
     dl_timeout = float(req_in.get("downloadTimeoutSec", 60))
     last_err = "生成失败"
+    base, berr = effective_base(req_in)
+    if berr:
+        emit({"ok": False, "imageBase64": None, "mimeType": None, "error": berr})
+        return
+    host = urllib.parse.urlparse(base).hostname or ""
     for attempt in range(attempts):
         try:
             data = json.dumps(payload).encode("utf-8")
-            r = urllib.request.Request(BASE + "/v1/images/generations", data=data, method="POST")
+            r = urllib.request.Request(base + "/v1/images/generations", data=data, method="POST")
             r.add_header("Content-Type", "application/json")
-            add_surrogate_to_request(r, "custom.geeknow", allowed_hosts=ALLOWED)
+            aerr = apply_auth(r, req_in, host)
+            if aerr:
+                last_err = aerr
+                break
             with opener().open(r, timeout=req_timeout) as resp:
                 body = read_json_response(resp)
             items = body.get("data") or []
@@ -996,10 +1026,10 @@ main()
 // 误文案、不打印、原样返回的 bodyJson 是中转自己的响应（里面
 // 没有密钥）。失败时只回 HTTP 状态码与截断后的响应原文/异常名。
 const RELAY_PY = `
-import json, sys, urllib.request, urllib.error, urllib.parse
+import json, os, sys, urllib.request, urllib.error, urllib.parse
 
 BASE = "https://smzs-relay.weathered-breeze-337c.workers.dev"
-TOKEN = "MopDOgjO6CmGeolGfjGNBVdsG0pnnnKWha4XpbWI"
+TOKEN = os.environ.get("SMZS_RELAY_TOKEN", "")
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args):
@@ -1013,6 +1043,8 @@ def emit(obj):
     sys.stdout.flush()
 
 def do_get(path, with_token):
+    if with_token and not TOKEN:
+        return None, None, "中转站 token 未配置（U6 待定：等用户拍板后再接通）"
     r = urllib.request.Request(BASE + path, method="GET")
     if with_token:
         r.add_header("x-token", TOKEN)
@@ -1032,6 +1064,8 @@ def do_get(path, with_token):
         return None, None, type(e).__name__ + ": " + str(e)[:300]
 
 def do_post(path, payload):
+    if not TOKEN:
+        return None, None, "中转站 token 未配置（U6 待定：等用户拍板后再接通）"
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     r = urllib.request.Request(BASE + path, data=data, method="POST")
     r.add_header("x-token", TOKEN)
@@ -1235,11 +1269,13 @@ main()
 // 500MB 上限，下载成功后以同样的文件锁口径合并进 state.json。
 // 失败分类：http 403/410 直接失败不重试（链接过期、提示重采）；
 // oversize 直接失败；timeout / network 自动重试 1 次再记失败。
+// 收不全（Content-Length 声明长度与实收不符）按 network 计、可重试
+// 1 次（P5 修：urllib 在干净 FIN 断开时不抛错，原代码会把半截文件记成功）。
 const QUEUE_WORKER_PY = `
 import json, os, re, time, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 
-BASE = os.path.expanduser("~/workspace/video-cloud")
+BASE = os.path.join(os.environ["DATA_DIR"], "video-cloud") if os.environ.get("DATA_DIR") else os.path.expanduser("~/workspace/video-cloud")
 QUEUE_PATH = os.path.join(BASE, "queue.json")
 STATE_PATH = os.path.join(BASE, "state.json")
 VIDEOS_DIR = os.path.join(BASE, "videos")
@@ -1363,12 +1399,14 @@ def download_once(url, tmp_path):
         return ("network", None, 0, type(e).__name__ + ": " + str(e)[:200])
     status = getattr(resp, "status", None)
     total = 0
+    declared_len = None
     try:
         with resp:
             declared = resp.headers.get("Content-Length")
             if declared:
                 try:
-                    if int(declared) > MAX_BYTES:
+                    declared_len = int(declared)
+                    if declared_len > MAX_BYTES:
                         return ("oversize", status, 0, "declared too big")
                 except ValueError:
                     pass
@@ -1385,6 +1423,12 @@ def download_once(url, tmp_path):
                     f.write(chunk)
     except Exception as e:
         return ("network", None, total, type(e).__name__ + ": " + str(e)[:200])
+    # P5 修复（2026-11-10）：urllib 在对方中途断开（干净 FIN）时，
+    # read() 只返回已收到的部分字节、再返回 b''，不抛 IncompleteRead，
+    # 原代码会把半截文件当 success 存盘（实测 20480/245760 字节记成功）。
+    # 声明了 Content-Length 就必须收满，否则按网络中断计（可自动重试 1 次）。
+    if declared_len is not None and total != declared_len:
+        return ("network", status, total, "incomplete: got %d of %d bytes" % (total, declared_len))
     return ("done", status, total, None)
 
 def fail(item_id, attempts, msg):
@@ -1769,9 +1813,20 @@ function runPythonHelper(
 ): Promise<GeeknowRaw> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
+    let py: ReturnType<typeof resolvePython>;
     try {
-      child = spawn("python3", ["-c", script], {
+      py = resolvePython();
+    } catch (e) {
+      resolve({
+        ok: false,
+        error: e instanceof Error ? e.message : "找不到可用的 Python",
+      });
+      return;
+    }
+    try {
+      child = spawn(py.cmd, [...py.argsPrefix, "-c", script], {
         stdio: ["pipe", "pipe", "pipe"],
+        env: pythonHelperEnv(),
       });
     } catch {
       resolve({ ok: false, error: "无法启动图片处理程序" });
@@ -1815,8 +1870,11 @@ function runPythonHelper(
 }
 
 export const privilegedHandlers = definePrivilegedHandlers(privileged, {
-  async geeknowListImageModels() {
-    const raw = await runPythonHelper(GEEKNOW_PY, { mode: "models" });
+  async geeknowListImageModels(_args, auth) {
+    const raw = await runPythonHelper(GEEKNOW_PY, {
+      mode: "models",
+      ...resolveGeeknowCredentials(undefined, auth),
+    });
     const models = Array.isArray(raw.models)
       ? raw.models.filter((m): m is string => typeof m === "string")
       : [];
@@ -1831,7 +1889,7 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
             : "Geeknow 模型列表读取失败",
     };
   },
-  async geeknowGenerateImage(args) {
+  async geeknowGenerateImage(args, auth) {
     const raw = await runPythonHelper(GEEKNOW_PY, {
       mode: "generate",
       model: args.model,
@@ -1842,6 +1900,7 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
       downloadTimeoutSec: args.downloadTimeoutSec,
       retryCount: args.retryCount,
       referenceImages: args.referenceImages,
+      ...resolveGeeknowCredentials(undefined, auth),
     });
     const ok = raw.ok === true && typeof raw.imageBase64 === "string";
     return {
@@ -1858,7 +1917,7 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
         typeof raw.previewBase64 === "string" ? raw.previewBase64 : null,
     };
   },
-  async geeknowSubmitImageTask(args) {
+  async geeknowSubmitImageTask(args, auth) {
     const raw = await runPythonHelper(GEEKNOW_PY, {
       mode: "submit",
       model: args.model,
@@ -1869,8 +1928,10 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
       downloadTimeoutSec: args.downloadTimeoutSec,
       retryCount: args.retryCount,
       referenceImages: args.referenceImages,
-      apiKey: args.apiKey,
-      apiBase: args.apiBase,
+      ...resolveGeeknowCredentials(
+        { apiKey: args.apiKey, apiBase: args.apiBase },
+        auth,
+      ),
     });
     const ok = raw.ok === true;
     return {
@@ -1893,11 +1954,13 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
         : [],
     };
   },
-  async geeknowProbeAuth(args) {
+  async geeknowProbeAuth(args, auth) {
     const raw = await runPythonHelper(GEEKNOW_PY, {
       mode: "probe",
-      apiKey: args.apiKey,
-      apiBase: args.apiBase,
+      ...resolveGeeknowCredentials(
+        { apiKey: args.apiKey, apiBase: args.apiBase },
+        auth,
+      ),
     });
     return {
       ok: raw.ok === true,
@@ -1907,13 +1970,15 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
       error: typeof raw.error === "string" ? raw.error : null,
     };
   },
-  async geeknowPollImageTask(args) {
+  async geeknowPollImageTask(args, auth) {
     const raw = await runPythonHelper(GEEKNOW_PY, {
       mode: "poll",
       taskId: args.taskId,
       downloadTimeoutSec: args.downloadTimeoutSec,
-      apiKey: args.apiKey,
-      apiBase: args.apiBase,
+      ...resolveGeeknowCredentials(
+        { apiKey: args.apiKey, apiBase: args.apiBase },
+        auth,
+      ),
     });
     const status =
       typeof raw.status === "string"
@@ -2796,11 +2861,14 @@ main()
 `;
 
 function asrDir(): string {
-  return path.join(homedir(), "workspace", "video-cloud", "asr");
+  return path.join(resolveDataDir(), "video-cloud", "asr");
 }
 
 function asrVenvPython(): string {
-  return path.join(asrDir(), "venv", "bin", "python");
+  // Windows 上 venv 的解释器在 Scripts/python.exe，Linux/macOS 在 bin/python。
+  return process.platform === "win32"
+    ? path.join(asrDir(), "venv", "Scripts", "python.exe")
+    : path.join(asrDir(), "venv", "bin", "python");
 }
 
 function asrModelDir(): string {
@@ -2812,12 +2880,12 @@ function asrModelDir(): string {
 function runShellCapture(
   cmd: string,
   args: string[],
-  opts: { stdin?: string; timeoutMs: number },
+  opts: { stdin?: string; timeoutMs: number; env?: NodeJS.ProcessEnv },
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], env: opts.env });
     } catch (e) {
       resolve({
         code: null,
@@ -2858,7 +2926,8 @@ function runShellCapture(
 // faster-whisper==1.2.1 + av==12.3.0（av 更高版本改了 av.open 的
 // metadata_errors 参数、与 faster-whisper 1.2.1 不兼容，必须锁版）
 // → 下载 small 模型四件套（hf-mirror 优先、huggingface.co 兜底，
-// curl 断点续传 + 重试；model.bin 字节数精确校验）。
+// curl 断点续传 + 重试；model.bin 字节数精确校验；连接挂起 0 字节
+// 时 --speed-limit/--speed-time 30 秒即断开重试，不等满 600 秒 --max-time）。
 const ASR_MODEL_FILES: { name: string; size: number }[] = [
   { name: "config.json", size: 2370 },
   { name: "tokenizer.json", size: 2203239 },
@@ -2889,16 +2958,84 @@ function ensureAsrRuntime(): Promise<void> {
       }
       if (!pyOk) {
         await fs.mkdir(asrDir(), { recursive: true });
-        const venv = await runShellCapture("python3", ["-m", "venv", path.join(asrDir(), "venv")], {
-          timeoutMs: 300_000,
-        });
+        const venvDir = path.join(asrDir(), "venv");
+        const basePy = resolvePython();
+        // pip 解包/建轮子要写临时目录：沙箱 /tmp 只有 512M 且常满，
+        // 一律改走 workspace 磁盘上的 DATA_DIR，避免 No space left。
+        // Windows 上 pip 认 TEMP/TMP，Linux 认 TMPDIR，三处都指过去。
+        const pipTmp = path.join(asrDir(), "pip-tmp");
+        await fs.mkdir(pipTmp, { recursive: true });
+        const pipEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          TMPDIR: pipTmp,
+          TEMP: pipTmp,
+          TMP: pipTmp,
+          PIP_CACHE_DIR: path.join(asrDir(), "pip-cache"),
+        };
+        // ① 先按标准流程建 venv。Windows 内嵌 Python（embeddable 版
+        // 没有 ensurepip，python -m venv 默认失败）与个别缺
+        // python3-venv 的 Linux 会在这一步失败，走 ② 回落。
+        let venv = await runShellCapture(
+          basePy.cmd,
+          [...basePy.argsPrefix, "-m", "venv", venvDir],
+          { timeoutMs: 300_000 },
+        );
         if (venv.code !== 0) {
-          throw new Error("建 Whisper 运行环境（venv）失败：" + venv.stderr.slice(-300));
+          // ② 回落：--without-pip 建裸 venv（不装 pip 就不碰
+          // ensurepip），再用 get-pip.py 单独把 pip 装进 venv。
+          await fs.rm(venvDir, { recursive: true, force: true }).catch(() => undefined);
+          venv = await runShellCapture(
+            basePy.cmd,
+            [...basePy.argsPrefix, "-m", "venv", "--without-pip", venvDir],
+            { timeoutMs: 300_000 },
+          );
+          if (venv.code !== 0) {
+            throw new Error("建 Whisper 运行环境（venv）失败：" + venv.stderr.slice(-300));
+          }
+        }
+        // ③ venv 里没有 pip 时（--without-pip 的情况），用
+        // get-pip.py 引导安装 pip；下载失败报明确错误，不静默跳过。
+        const pipCheck = await runShellCapture(py, ["-m", "pip", "--version"], {
+          timeoutMs: 60_000,
+          env: pipEnv,
+        });
+        if (pipCheck.code !== 0) {
+          const getPipPath = path.join(asrDir(), "get-pip.py");
+          let haveGetPip = false;
+          try {
+            haveGetPip = (await fs.stat(getPipPath)).size > 1000;
+          } catch {
+            haveGetPip = false;
+          }
+          if (!haveGetPip) {
+            const dl = await runShellCapture(
+              "curl",
+              ["-sfL", "--retry", "3", "--retry-all-errors", "--speed-limit", "1000", "--speed-time", "30", "--max-time", "120", "-o", getPipPath, "https://bootstrap.pypa.io/get-pip.py"],
+              { timeoutMs: 180_000 },
+            );
+            try {
+              haveGetPip = dl.code === 0 && (await fs.stat(getPipPath)).size > 1000;
+            } catch {
+              haveGetPip = false;
+            }
+          }
+          if (!haveGetPip) {
+            throw new Error(
+              "建 Whisper 运行环境失败：venv 里没有 pip，且 get-pip.py 下载失败（请检查网络后重试；Windows 内嵌 Python 须联网下载 get-pip.py）",
+            );
+          }
+          const boot = await runShellCapture(py, [getPipPath, "--disable-pip-version-check"], {
+            timeoutMs: 600_000,
+            env: pipEnv,
+          });
+          if (boot.code !== 0) {
+            throw new Error("安装 pip（get-pip.py）失败：" + boot.stderr.slice(-300));
+          }
         }
         const pip = await runShellCapture(
           py,
           ["-m", "pip", "install", "--quiet", "--disable-pip-version-check", "faster-whisper==1.2.1", "av==12.3.0"],
-          { timeoutMs: 900_000 },
+          { timeoutMs: 900_000, env: pipEnv },
         );
         if (pip.code !== 0) {
           throw new Error("安装 faster-whisper 失败：" + pip.stderr.slice(-300));
@@ -2919,7 +3056,7 @@ function ensureAsrRuntime(): Promise<void> {
           for (let attempt = 0; attempt < 4 && !done; attempt += 1) {
             await runShellCapture(
               "curl",
-              ["-sfL", "--retry", "3", "--retry-all-errors", "-C", "-", "--max-time", "600", "-o", dest, `${base}/Systran/faster-whisper-small/resolve/main/${f.name}`],
+              ["-sfL", "--retry", "3", "--retry-all-errors", "--speed-limit", "1000", "--speed-time", "30", "-C", "-", "--max-time", "600", "-o", dest, `${base}/Systran/faster-whisper-small/resolve/main/${f.name}`],
               { timeoutMs: 660_000 },
             );
             try {
@@ -3061,6 +3198,9 @@ async function startTranscriptionJob(
     const child = spawn(asrVenvPython(), [runnerPath, specPath], {
       detached: true,
       stdio: "ignore",
+      // 转写脚本里 ffmpeg 走 PATH：把内嵌 ffmpeg 目录与 DATA_DIR 一起透传，
+      // runner 再原样传给它拉起的 TRANSCRIBE_PY。
+      env: pythonHelperEnv(),
     });
     child.on("error", () => undefined);
     child.unref();
@@ -3081,7 +3221,7 @@ async function startTranscriptionJob(
 const CLOUD_VIDEO_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 function cloudBaseDir(): string {
-  return path.join(homedir(), "workspace", "video-cloud");
+  return path.join(resolveDataDir(), "video-cloud");
 }
 
 function cloudStatePath(): string {
@@ -3343,17 +3483,48 @@ async function cloudQueueWorkerAlive(): Promise<boolean> {
 // 与本特权进程脱钩——页面关掉、服务端重启都不影响它继续下；
 // 它退出后下一次入队 / 状态查询会再把队列续跑起来。拉起失败不
 // 抛错：队列文件已经落盘，状态查询还会重试拉起。
+//
+// P5 修复（2026-11-10，队列 worker 3 并发验证实测）：原来这里有竞态——
+// worker 启动后约 100ms 才自己写 pid 文件，入队后紧跟的状态查询
+// （前端正常顺序）在这窗口里查不到 pid，会再拉一个 worker；
+// 两个 worker 会把同一批条目各下载一遍（实测每条 2 次请求）。
+// 修法：① 进程内加拉起互斥（并发的 ensure 共用一次拉起）；
+// ② 拉起方用 spawn 返回的 pid 立即写 pid 文件占位（就是 worker
+// 本人的 pid，worker 退出时按值比对清理的逻辑不受影响）。
+let queueWorkerStartPromise: Promise<void> | null = null;
 async function ensureCloudQueueWorker(): Promise<void> {
   try {
     if (await cloudQueueWorkerAlive()) return;
-    const workerPath = cloudQueueWorkerPath();
-    await fs.writeFile(workerPath, QUEUE_WORKER_PY, "utf8");
-    const child = spawn("python3", [workerPath], {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.on("error", () => undefined);
-    child.unref();
+    if (queueWorkerStartPromise) {
+      await queueWorkerStartPromise;
+      return;
+    }
+    queueWorkerStartPromise = (async () => {
+      if (await cloudQueueWorkerAlive()) return;
+      const workerPath = cloudQueueWorkerPath();
+      await fs.writeFile(workerPath, QUEUE_WORKER_PY, "utf8");
+      const py = resolvePython();
+      const child = spawn(py.cmd, [...py.argsPrefix, workerPath], {
+        detached: true,
+        stdio: "ignore",
+        // DATA_DIR 显式透传：QUEUE_WORKER_PY 用它定位 video-cloud。
+        env: pythonHelperEnv(),
+      });
+      child.on("error", () => undefined);
+      child.unref();
+      if (typeof child.pid === "number") {
+        try {
+          await fs.writeFile(cloudQueuePidPath(), String(child.pid), "utf8");
+        } catch {
+          // pid 占位写不上不拦拉起（worker 自己启动时还会再写一次）。
+        }
+      }
+    })();
+    try {
+      await queueWorkerStartPromise;
+    } finally {
+      queueWorkerStartPromise = null;
+    }
   } catch {
     // 拉起失败不拦入队 / 状态查询。
   }

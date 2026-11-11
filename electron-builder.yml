@@ -1,0 +1,54 @@
+# electron-builder 打包配置（P1 定稿；真正打安装包是 P6）。
+#
+# 目标（port-plan.md D1/D6）：Windows exe，NSIS per-user 安装（不用管理员权限），
+# 数据目录与程序目录分离（数据在 %APPDATA%\ScriptWorkbench，卸载不删数据）。
+# 注意：
+#   - resources/python/ 与 resources/ffmpeg/（内嵌 Python + ffmpeg）是 P4 才打包，
+#     本阶段 extraResources 里先不列不存在的目录，打包时缺目录会报错；
+#     P4 接线时把下面两行取消注释。
+#   - Windows 安装包须在 Windows 上打（或 Linux + wine）；本机 Linux 沙箱
+#     只验证壳的运行逻辑，不出 NSIS 包（见 p1-report.md）。
+appId: com.scriptworkbench.app
+productName: 剧本创作工作台
+copyright: Copyright © 2026
+
+directories:
+  output: release
+
+files:
+  - electron/dist/**
+  - package.json
+
+extraResources:
+  # 服务端编译产物（P1 已验证 bun build --compile；P6 打包时由构建脚本生成后放这里）
+  - from: resources/script-workbench-server.exe
+    to: script-workbench-server.exe
+  # 前端构建产物（P1 已验证 client/dist 同源托管）
+  - from: client/dist
+    to: client/dist
+  # P4 已启用：内嵌 Python + ffmpeg 随安装包分发（见 python-runtime.ts）。
+  - from: resources/python
+    to: python
+  - from: resources/ffmpeg
+    to: ffmpeg
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  artifactName: ScriptWorkbench-Setup-${version}.exe
+
+nsis:
+  oneClick: true
+  perMachine: false
+  # allowToChangeInstallationDirectory 只能用于非 oneClick（assisted）安装器；
+  # oneClick 安装器无目录选择页，P1 原稿的 true 会被 electron-builder 校验拒绝，
+  # 故删除该行（P6 实测结论）。
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  # 卸载只删程序目录，不动 %APPDATA%\ScriptWorkbench 数据目录（D3）。
+  deleteAppDataOnUninstall: false
+
+# 便携版（P6 时再定做不做；先留口径）
+# portable:
+#   artifactName: ScriptWorkbench-Portable-${version}.zip

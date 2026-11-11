@@ -1,55 +1,50 @@
-# 剧本创作工作台（script-workbench）
+# script-workbench-port — 剧本创作工作台移植工程
 
-AI 短剧一站式创作工作台源码：学爆款、写剧本、做分镜、出封面，全流程一次搞定。
+把工作台 v5.69 的源码 1:1 移植到用户自己的服务器上。只一人用，AI 与生图走
+Geeknow，数据库不搬（部署后是空的新工作台）。
 
-当前版本：v5.69（2026-11-10）
+原版项目介绍见 GitHub 公开仓 `buyanwz/script-workbench` 的 README
+（本目录原样复制的源码里也有一份，见 `README.github.md`）。
 
-## 这是什么
+## 这个目录是什么
 
-- 五步创作流程：选模式 → 定人物 → 写大纲 → 审剧本 → 做分镜 → 出封面
-- 爆款模式学习：基因卡 + 训练记录 + 元素库
-- 聊天精修解剖：1:1 复刻爆款视频（台词一字不差核对、分镜表 + 资产清单、一键套用成项目）
-- 分镜提示词：Seedance 四档 + MiniMax H3 两版，人物严格锁定、人物—参考图绑定
-- 人物资产储存库：性别 + 成年/未成年分类、AI 分析待确认、一键匹配资产图、换装设为主体
-- 封面生成：11 款爆款封面风格、参考图选择、封面分析
-- 对标账号监控：视频入库、存云端、3 天留存自动清理、发送到聊天解剖
-- 生图：参考图锁脸句 + 生成溯源记录
+移植工程的工作目录：源码 + 新写的自建服务端层（逐步替换原来依赖 Muse 平台
+`@hatch/space-sdk` 的部分）。第一阶段只搭架子，不接真实功能。
 
-## 技术栈
+## 文件来源
 
-- 前端：React 19 + Tailwind CSS 4（`client/`）
-- 服务端：Bun + TypeScript 动作层（`server/src/actions.ts`，约 100 个动作）
-- 数据库：SQLite + Drizzle ORM，迁移在 `drizzle/`（0001–0040）
-- 构建：Bun（`bun run build`）
+- **原样复制（109 个文件）**：来自 `~/workspace/github-upload/script-workbench`
+ （与 GitHub 公开仓 `buyanwz/script-workbench` 提交 `36cb2f4f` 的 88 个文本文件一致）。
+  另外 21 张封面参照图（`client/src/assets/*.jpg`，约 1.3MB）因 GitHub 上传通道
+  只支持 UTF-8 文本文件而未入库，本目录已从正在用的工作台副本
+  （`~/workspace/ts-spaces/space-4`，只读复制、未改动原目录）补齐，文件名与
+  `coverbench.tsx` / `monitorbench.tsx` 的静态 import 一致，客户端构建不再缺图。
+- **本阶段新增（2 个文件）**：
+  - `server.ts` — 最小服务端入口骨架：只做到能启动、能返回健康检查，不接任何真实动作。
+  - 本文件 `README.md`（原 GitHub 版 README 改名为 `README.github.md` 保留在原处）。
 
-## 来源与现状
+## 还没接的东西（后续阶段，见 port-plan.md）
 
-本仓库代码原为 Muse 平台上的 TypeScript 全栈应用，直接运行在 Muse 的
-Artifact 运行时里，前后端通过 `@hatch/space-sdk` 连接。
+- 全部约 100 个服务端动作（`server/src/actions.ts`）尚未以 HTTP 路由暴露
+- SQLite 数据库尚未按 `drizzle/` 迁移建立（部署时建空库）
+- 前端静态文件尚未托管、`@hatch/space-sdk` 引用尚未替换
+- 分片上传、文件下载、鉴权、Geeknow Key 配置尚未实现
+- Python 图片处理（PIL / ffmpeg / ffprobe）尚未部署
 
-**独立部署到自己的服务器时，以下几层需要换成自建实现（不在本次搬运范围内）：**
+## 跑骨架
 
-1. `@hatch/space-sdk` 客户端/服务端调用 → 换成自建 HTTP 服务层（动作接口、文件分片上传、查询客户端）
-2. 数据库：首次运行按 `drizzle/` 迁移建空库即可；本仓库不含任何已有数据
-3. 图片处理：服务端内嵌 Python 小程序，需 Python + Pillow（PIL）+ ffmpeg / ffprobe
-4. AI 分析与生图：走 Geeknow OpenAI 兼容接口（默认 `https://api.geeknow.top`），Key 由部署方自行配置；工作台内有总设置入口可填 API 地址与 Key（Key 只存浏览器本机，不进数据库与备份）
-5. 参考图异步提交：经 uguu.se 临时托管换 https 链接再交生图服务商（提交前需用户具名同意）
-6. 监控收片：扩展 + Cloudflare Worker 中转站 + 下载器是工作台之外的三件套，不在本仓库内
+```bash
+bun server.ts
+# 再开一个终端：
+curl http://127.0.0.1:3000/health
+# 应返回 {"ok":true,"service":"script-workbench-port","version":"v5.69-port-skeleton",...}
+```
 
-## 本仓库不含
+环境变量：`PORT`（默认 3000）、`HOST`（默认 127.0.0.1）。
 
-- 数据库（`app.db`）：按用户要求不搬，部署后是空的新工作台
-- 用户图片（人物资产图、封面图等 blobs）
-- 任何密钥、Token：代码里不含凭证
+## 约束
 
-## 已知缺口
-
-`client/src/assets/` 下的 21 张封面风格参照图（`cover-ref-*.jpg`、
-`monitor-huanxiong-cover.jpg`，共约 1.3MB）因本次上传通道只支持 UTF-8
-文本文件，暂未入库。`client/src/coverbench.tsx` 与监控页通过静态 import
-引用这些图片，**缺失时客户端构建会失败**。补入方式：把这 21 张图放回
-`client/src/assets/`（文件名与 import 一致），或通过 GitHub 网页端直接上传到该目录。
-
-## 许可证
-
-待定。
+- 本目录不含任何密钥、Token；Geeknow Key 走环境变量配置，绝不写进文件。
+- 不向 GitHub 推送任何东西；所有产出只留在本地。
+- 清点与方案见 `~/workspace/goals/goal-3/hidden_files/port-inventory.md`
+  与 `port-plan.md`。
