@@ -16,7 +16,6 @@ import { api, type ApiResponse } from "./api";
 import { CharacterBench, type CharWindow } from "./charbench";
 import { MonitorBench } from "./monitorbench";
 import { ArchiveBench } from "./archivebench";
-import { AssistantBench } from "./assistantbench";
 import { AnalysisBench, type AnalysisPrefill } from "./analysisbench";
 import { ModeSection } from "./modebench";
 import { ConfirmDialog } from "./confirm";
@@ -30,6 +29,13 @@ import {
 uploadImageFileInChunks,
 uploadErrorText,
 } from "./chunkedupload";
+import {
+CopyrightGuardControl,
+formatGuardHits,
+guardTextNow,
+useCopyrightGuard,
+type CopyrightGuardHit,
+} from "./copyrightguard";
 import {
 callWithGatewayRetry,
 describeThrownError,
@@ -215,7 +221,7 @@ export const tiltCardHandlers = {
   onMouseLeave: (_e: ReactMouseEvent<HTMLElement>) => {},
 };
 
-type Bench = "script" | "character" | "monitor" | "archive" | "assistant";
+type Bench = "script" | "character" | "monitor" | "archive";
 type ScriptWindow =
   | "mode"
   | "characters"
@@ -1311,13 +1317,6 @@ export function App() {
             >
               储存箱{archivedCount > 0 ? `（${archivedCount}）` : ""}
             </button>
-            <button
-              type="button"
-              aria-pressed={bench === "assistant"}
-              onClick={() => switchBench("assistant")}
-            >
-              AI助手
-            </button>
           </div>
           <div className="flex min-w-0 items-center">
             <label className="sr-only" htmlFor="topbar-project-select">
@@ -1349,9 +1348,7 @@ export function App() {
                   ? "人物资产储存库窗口列表"
                   : bench === "archive"
                     ? "储存箱窗口列表"
-                    : bench === "assistant"
-                      ? "AI助手窗口列表"
-                      : "监控账号窗口列表"
+                    : "监控账号窗口列表"
             }
           >
             {bench === "script"
@@ -1382,15 +1379,7 @@ export function App() {
                       () => {},
                       "当前窗口：项目储存箱",
                     )
-                  : bench === "assistant"
-                    ? navBtn(
-                        true,
-                        "AI助手",
-                        "能查项目、查模式、做封面分析",
-                        () => {},
-                        "当前窗口：AI助手",
-                      )
-                    : MONITOR_WINDOWS.map((w) =>
+                  : MONITOR_WINDOWS.map((w) =>
                       navBtn(
                         monitorWindow === w.id,
                         w.label,
@@ -1699,15 +1688,6 @@ export function App() {
                 requestAnimationFrame(scrollMainTop);
               }}
             />
-          </div>
-          )}
-
-          {/* AI助手（v5.74，原型 v0.1）：顶栏新页，聊天界面；对话
-              只存本页内存、刷新即没，挂载后不卸载保住当前对话。
-              v5.13 口径同其他台：首次切到才挂载。 */}
-          {mountedBenches.has("assistant") && (
-          <div hidden={bench !== "assistant"}>
-            <AssistantBench />
           </div>
           )}
 
@@ -11418,9 +11398,13 @@ function StepThree({
                   file: `${scriptDraft.title}_生成清单.md`,
                   mime: "text/markdown;charset=utf-8",
                   build: (ann: boolean) =>
-                    buildGenChecklist(sbScript, project.name, mappingCtx, {
-                      pendingLines: ann ? exportPendingLines : [],
-                    }),
+                    // v5.80：AI 视频清单导出走防版权拦截开关（开时
+                    // 替换 + 末尾原创声明，只改导出的这份文本）。
+                    guardTextNow(
+                      buildGenChecklist(sbScript, project.name, mappingCtx, {
+                        pendingLines: ann ? exportPendingLines : [],
+                      }),
+                    ),
                 },
               ] as const
             ).map((item) => (
@@ -11492,9 +11476,12 @@ function StepThree({
                   requestExport("分镜文档", (ann) => {
                     downloadText(
                       `${scriptDraft.title}.md`,
-                      (ann
-                        ? `> ⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
-                        : "") + buildMarkdown(sbScript, mappingCtx),
+                      // v5.80：Markdown 导出走防版权拦截开关。
+                      guardTextNow(
+                        (ann
+                          ? `> ⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
+                          : "") + buildMarkdown(sbScript, mappingCtx),
+                      ),
                       "text/markdown;charset=utf-8",
                     );
                     setExportMsg("分镜版 Markdown 已导出");
@@ -11510,9 +11497,12 @@ function StepThree({
                 onClick={() =>
                   requestExport("分镜文档", (ann) => {
                     void copyText(
-                      (ann
-                        ? `⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
-                        : "") + buildMarkdown(sbScript, mappingCtx),
+                      // v5.80：复制全文同样走防版权拦截开关。
+                      guardTextNow(
+                        (ann
+                          ? `⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
+                          : "") + buildMarkdown(sbScript, mappingCtx),
+                      ),
                     ).then((ok) =>
                       setExportMsg(ok ? "分镜全文已复制" : "复制失败，请改用下载"),
                     );
@@ -12516,7 +12506,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v5.74";
+const WORKSPACE_VERSION = "v5.82";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12528,9 +12518,57 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
-    version: "v5.74",
+    version: "v5.82",
     date: "2026-11-11",
     current: true,
+    text: "这一版按你定的，把「问题处理」这个页面整个删掉——页面和数据一起删。顶栏的「问题处理」入口没了，那个页面（存问题、自动编号、看进度、复制、传图）整个下线；里面存的问题也全删干净了，包括问题 #2「测试」和全部附图，删了就恢复不了了。其他页面、你的项目和剧本、生图、封面，还有分镜页的「防版权拦截」开关和替换表，一个字都没动。以后有问题直接在聊天里发我就行。这一版没有提交任何生图或视频生成。",
+    features: "问题处理页整页下线 + 数据全删（v5.82，用户 2026-11-11 亲口定「把问题处理这个页面进行删除」并点选「页面和数据一起删」确认删除范围；客户端 App.tsx + 删 issuesbench.tsx 整文件 + 服务端 actions.ts / privileged.ts + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration（两表结构保留、只清记录）；NO real image/video generation submitted）：【删页面】顶栏「问题处理」入口按钮、Bench 类型 issues 值、顶栏窗口列表的 issues 分支（aria-label 与 navBtn 两处）、问题页渲染区整块全删；issuesbench.tsx 整文件删除（自由添加 / 自动编号 / 进度三态未解决·进行中·已完成切换 / 复制按钮 / 附图区随之全下线）。【删动作】服务端问题页 12 个动作全下线：listIssues / createIssue / updateIssue / deleteIssue / addIssueImage / deleteIssueImage / sendIssueToChat（v5.79 兼容壳）/ recordIssueDelivery / getIssueSendStatus / checkAgentTaskStatus / buildIssueShareText / setIssueStatus；帮助函数 issueOut / loadIssueOut / buildShareText 整块删除；特权层 exportIssueImages 契约 + 处理器删除（随之无用的 node:crypto createHash 导入一并删）；原唯一调用方就是问题页，全站再无死引用。【删数据】新增一次性动作 purgeIssueData（先读两表计数 → 删 issue_images 全部行 → 删 issue_reports 全部行 → 逐个 ctx.blobs.delete 附图 blob，回三项删除计数），经提交后一次性调用在正式库执行，走应用自身删除路径、不直接操作数据库文件；两表结构与 schema 定义保留、记录清零，其他表一行未动。【不动】其他四台全部页面与功能、全部项目数据、生图／封面链路、分镜页防版权拦截开关与内置／自定义替换表、封面记录 id 43、生图禁令。基线升 v5.82（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + workbenches 删第五台条目、DATA-PLAN 一条）。动作总数 185 → 174（删 12、新增 purgeIssueData 1）。真机待核：打开工作台核对顶栏已无「问题处理」入口；其余四台照常打开使用。",
+  },
+  {
+    version: "v5.81",
+    date: "2026-11-11",
+    text: "这一版只修两件事，都是你亲口报的。第一件：「防版权拦截」开关点不动、关不掉。原因找到了：旧开关点下去时，先把状态写进本机存储、紧接着又回头读一遍存储来对齐状态；在你打开工作台的这个环境里，存储回读拿不到刚写进去的值，只会按「默认开」兜底，于是每一次点「关」，都在同一次点击里被自己弹回「开」——看起来就是点一下完全没反应，而且只坏在关不掉这一个方向上。现在改成：开关状态以页面内存为准，点下去立刻生效，存储只负责下次打开时恢复，读不到也弹不回；另外把能点的范围放大了——以前只有那个 46×26 的小滑轨能点，现在滑轨连同「防版权拦截」标题和「已打开／已关闭」那几个字整块都能点，手机上好点得多。关掉后复制分镜提示词就是原文（「钢铁侠铠甲」这些词原样回来），分镜文档和生成清单导出同理。第二件：按你定的，封面页不做防拦截了——封面页第三步的开关撤掉，提交封面时也不再换词、不再加声明，提示词按原文提交、记录里存的也是原文；防拦截只留在分镜页管分镜提示词。其他什么都没动：项目数据、替换表、自定义替换词都还在。这一版没有提交任何生图或视频生成。真机等你亲验：在分镜页点一下开关，应该立刻变成「已关闭」，再复制镜头 7，应该是没换过的原文。",
+    features: "防版权拦截开关点不动修复 + 封面页下线防拦截（v5.81，用户 2026-11-11 真机报障「放拦截关不掉、点一下没有反应、两页都点不动」并定「封面页不用做防拦截」；纯客户端 copyrightguard.tsx + coverbench.tsx + App.tsx 版本/日志 + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【根因】useCopyrightGuard 的 setEnabled 先 setState 再 saveCopyrightGuardEnabled（写 localStorage + 派发 copyright-guard-changed 事件），组件自身监听器随即 reload 回读 localStorage 覆盖状态；沙箱 iframe / WebView 存储受限时 getItem 抛错、loadCopyrightGuardEnabled 走 catch 回落「默认开」，每次点关都在同一次点击内被回读弹回开——只坏关不掉一个方向，与真机报告逐字吻合；沙箱审计浏览器存储健康、点按正常，故 v5.80 沙箱验证未暴露。【状态层改法】copyrightguard.tsx 加模块级会话内存 sessionEnabled / sessionCustom 作权威状态：load* 内存非空直接返回、为空才读一次 localStorage 并回填内存（读抛错回落默认开/空表并回填）；save* 先写内存、再尽力写 localStorage、最后派发事件——监听器 reload 回读先看内存，存储再不可靠也弹不回本会话刚切换的值；自定义词表同病同治（增删同样走 save* 回读链）。guardTextNow 经 load* 自动跟随新口径，分镜文档 Markdown / AI 视频清单导出的开关口径不变。【可点区】CopyrightGuardControl 开关重构为整块按钮：滑轨（46×26 视觉不变）+「防版权拦截」标题 + 已打开/已关闭状态字同属一个 role=switch 按钮，min-height 44px、透明底无边框，点标题/状态字同样切换。【封面页下线】coverbench.tsx 删除 copyrightguard 全部接线：第三步 CopyrightGuardControl 渲染、coverGuardHits 替换清单计算与显示行、submitCover 提交前对 finalPromptZh/finalPromptEn 的 applyCopyrightGuard 处理与相关 import 全删；封面提示词按原文提交、封面记录存原文（v5.80 已按替换版存档的旧记录不追溯改动）。【不动】分镜页开关位置与文案、内置/自定义替换表与管理面板、applyCopyrightGuard 替换与声明逻辑、H3/Seedance 显示与复制口径、项目 43 及全部存储数据、封面记录 id 43、生图禁令。基线升 v5.81（App WORKSPACE_VERSION + 更新日志一条 current、replication 防版权拦截开关规则改写、DATA-PLAN 一条）。真机待核：分镜页点开关应立刻变「已关闭」、复制镜头 7 应为原文；封面页第三步应无开关、提交按原文。",
+  },
+  {
+    version: "v5.80",
+    date: "2026-11-11",
+    text: "这一版按你确认的方案，给提示词加了一个单独的开关「防版权拦截」，专治豆包那句「生成的视频可能涉及版权限制，请更换输入内容后重试」。开关在分镜页提示词区的最上方，封面页第三步也有一个，两个是同一个开关——在哪边切，另一边打开就是同个状态。默认是开着的。打开后做三件事：一是按一张替换表把可能涉及版权的词换成通用说法——钢铁侠铠甲换成红金色未来机甲、无限手套换成金色宝石手套、打响指换成做个手势、灭霸直接删掉、六颗宝石换成彩色宝石，先换长词组再换单个词；「钢铁胖」是角色名、不换，台词里的「灭建国」也不在表里、不动。二是每份提示词末尾自动加一句原创声明，就是项目 41 用过的那条版权与原创声明原文。三是每个提示词块下面都有一行小字写清这一块到底换了什么，没换的写「本次无替换」，一眼能核对。最要紧的一条：只换导出和复制出去的那份文本，工作台里存的人物、剧本、分镜、封面草稿一个字都不动，关掉开关立刻恢复原文。开关旁边有「管理替换词」：内置那张表能看不能改；你自己还能再加词——填原词和替换词（替换词留空就是删掉这个词），加完立即生效，自己加的词只存在这台设备上，不进备份。管的范围：分镜页 Seedance 四档和 MiniMax H3 两版的显示与复制、复制全部、分镜文档 Markdown 导出、AI 视频清单导出、封面页实际提交的提示词；人物和场景的生图提示词不在范围内。项目 43 不用改任何数据：打开分镜页直接复制镜头 7，就是换好的版本。这一版没有提交任何生图或视频生成。真机等你亲验：把开关打开后复制的镜头 7 贴进豆包生成一次，看还拦不拦。",
+    features: "防版权拦截开关（v5.80，用户 2026-11-11 拍板「做一个功能开关防版权拦截」并对四项推荐全点确认：①替换+声明两者都做 ②分镜+封面都生效 ③默认开 ④内置替换表 v1 + 可自定义加词；纯客户端新文件 copyrightguard.tsx + App.tsx（ScriptDocument / StepThree 导出）+ coverbench.tsx 接线 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【模块】copyrightguard.tsx：内置替换表 9 条（灭霸同款无限手套→金色宝石手套、钢铁侠铠甲→红金色未来机甲、无限手套→金色宝石手套、六颗彩色宝石→彩色宝石、六颗宝石→彩色宝石、打响指→做个手势、响指→手势、灭霸→删、钢铁侠→机甲战士；「钢铁胖」与台词「灭建国」不在表内不动）；applyCopyrightGuard 合并自定义（同原词自定义优先）后按词长降序最长匹配优先全量替换、删/换后收多余空格（连续空格压一、中文标点前去空格）、末尾加原创声明——文案取自项目 41 提示词【郑重声明】第 4 条原文（用户文件 项目41-提示词-加原创声明版.txt 与 项目41-提示词-过审改写版.txt 两份逐字一致，未用备用文案）、文本已含「版权与原创声明」时不重复加、空文本不加；返回 hits 供逐块显示替换清单（formatGuardHits：已替换：A→B、…／本次无替换／删词写作→（删掉））。状态存本机 localStorage：开关 copyrightGuard.v1（\"1\"/\"0\"、缺省=开）、自定义词 copyrightGuard.custom.v1（数组）；useCopyrightGuard 经 window 自定义事件 + storage 事件跨组件同步（分镜页 ScriptDocument 与封面页 CoverBench 共用同一状态）；guardTextNow 供导出点击时现读现处理。【分镜页】ScriptDocument 在 H3/Seedance 两版区上方加 CopyrightGuardControl（开关 role=switch + 逐字大白话说明 + 管理替换词面板：内置只读列表、自定义增删、改动即存即生效）；h3Shown/sdShown = 原拼装结果过 guard.apply（显示全文与逐镜头复制走 shown），每张镜头卡 details 下方开关开时显示本块替换清单；复制全部改为先用未处理的 h3Lenses/sdLenses 拼全文、再整体 guard.apply 一次——声明只在全文末尾出现一份（修审计 P1：逐块拼 shown 会让声明每镜头重复一遍）；原始 h3Lenses/sdLenses 与 scriptlib 拼装一字未动。【导出】StepThree 导出成片资料包：生成清单（buildGenChecklist）与分镜文档 Markdown（下载 + 复制全文）包 guardTextNow；剧本格式01 / 台词本 / SRT / 逐镜头提示词包按确认范围不动。【封面页】第三步顶部同放 CopyrightGuardControl；将提交那一版的替换清单常显一行（按 withRatioAdapter 后的提交口径现算）；submitCover 在降级摘除后、提交前对 finalPromptZh/finalPromptEn 过 applyCopyrightGuard 并重取 finalPrompt，记录存的仍是实际提交那份；提示词框原文、草稿与人物/场景生图提示词不动。【不动】项目 43 及全部项目存储数据、人物卡、封面记录 id 43、生图禁令、其他页面与导出。基线升 v5.80（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 新增功能规则「防版权拦截开关（v5.80）」、DATA-PLAN 一条）。真机待核：豆包贴一镜开着开关复制的项目 43 镜头 7 提示词，看是否还拦（须用户亲手生成）；分镜页关掉开关复制应逐字恢复原文；封面页切开关后另一页同步；自定义加词后导出即生效。",
+  },
+  {
+    version: "v5.79",
+    date: "2026-11-11",
+    text: "这一版按你选的方案一改问题处理页：你存，我取。「发送」按钮整个取消了——那条自动发送的路前后修了四回都没真把问题送进聊天，不再在它身上耗。你以后只管在这一页把问题存好（写描述、附截图、编号自动有），想让我处理时，去聊天里跟我说一句「处理问题」，我自己过来把还没解决的问题一条一条取走、按编号解决：开始处理标「进行中」，解决完标「已完成」，并在聊天里告诉你结果。你补的那条也加了：每个问题现在都有进度——未解决 / 进行中 / 已完成，卡片上有一排小按钮，你自己也能点着改，改成已完成会记上完成时间。你之前存的问题都在，老的「已发送」这类旧状态一律按「未解决」显示，没动你写的内容。哪条特别急等不及，等不了那句「处理问题」，就点它右边的「复制」：问题全文（编号 + 原文 + 附图）复制好，你粘贴到聊天框发我，我立刻处理。其他功能和数据一个没动，没有自动生图。",
+    features: "问题处理改方案一「你存，我取」+ 进度三态（v5.79，用户 2026-11-11 选定方案一、并补要求「每个问题有一个编号（已有）、每个问题有一个进度：未解决／进行中／已完成」；服务端 actions.ts（sendIssueToChat 派发下线 + 新动作 buildIssueShareText / setIssueStatus + issueOut 进度出参）+ schema issue_reports 加 resolved_at 与 status 三态 + migration 0044 + 客户端 issuesbench.tsx 状态机整体重写 + App 版本/日志 + replication 基线 + DATA-PLAN；NO real image/video generation submitted）：【发送整套下线】客户端删「发送」按钮与发送确认框、sendMut、送达三态徽章（待处理／已提交发送·还没确认送达／已送达聊天）、任务失败/失效红字、getIssueSendStatus 轮询与列表 10 秒自动刷新；服务端 sendIssueToChat 不再 spawnTask、不改任何状态，只导出附图回 shareText（wouldSpawn 恒 false），仅防旧页面缓存调用；recordIssueDelivery / getIssueSendStatus / checkAgentTaskStatus 动作保留不删（页面不再调用，历史 taskId 仍可查）。【你存我取】页面新口径：用户只存问题；在聊天里说「处理问题」，主聊 Muse 调 listIssues 取未解决（open）问题连附图逐条处理，用 setIssueStatus 同步进度（开始=working、完成=done）并在聊天里回报——取活通道就是主聊 Muse 的 artifact 动作调用，不依赖任何派发任务。【进度三态】issue_reports.status 新值 open/working/done（列本是 text、无需改表结构）；migration 0044 加 resolved_at（翻 done 写入、退回清空）；issueOut status 枚举改三态 + resolvedAtMs，loadIssueOut 把存量旧值 pending/sent 统一映射 open 显示、不回填改写存量行（正式库现存问题 #2 即此口径）；卡片进度徽章三态配色（未解决=灰、进行中=蓝描边、已完成=绿）+ seg-sm 三按钮切换（当前态禁用、aria-pressed）+ 计数行改「未解决 N、进行中 M、已完成 K」；完成的问题显示「完成于 时间」。【复制急件】新动作 buildIssueShareText{issueId, dryRun?}：与旧发送同源导出附图（exportIssueImages）+ buildShareText 拼装（标题「【工作台问题 #N】」+ 原文逐字 + 附图路径清单 / 无图注明），不派发不改状态，拦截口径同旧（不存在 / 空 / 只有图没描述 / 导出失败点名）；客户端「复制」按钮（原发送位、btn-primary）调它后走既有 copyTextToClipboard + 手动复制框兜底。【不动】问题增删改、附图增删与导出、其他全部功能与数据、封面记录 id 43、生图禁令、P7。基线升 v5.79（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 第五台规格改写、DATA-PLAN 一条）。动作总数 183 → 185。真机待核：问题页没有「发送」了，每条有进度徽章与三按钮，点「已完成」刷新后仍在且带完成时间；点「复制」提示复制好了、去聊天框粘贴能看到带编号全文；在聊天里说「处理问题」，Muse 应能取到未解决的问题逐条处理并把进度标成进行中/已完成。",
+  },
+  {
+    version: "v5.78",
+    date: "2026-11-11",
+    text: "这一版把问题处理页的「发送」换了个做法，先回答你的想法：你说点发送后自动粘贴到聊天框里、再自动发送——这个真做不到。工作台和聊天框是两个分开的界面，工作台在一个隔离的小框里运行，手伸不进聊天框的输入框，没法替你往里粘贴、也没法替你按发送；这不是哪一版代码的毛病，是界面本身隔着。这次我也把你上次发送的任务又调出来查了：任务是跑完了、回执那一步这次也对上了，可聊天里还是没出现问题——那条后台通道前前后后试了四回，一回都没真把问题送进你看得见的聊天里，不能再指望它当主路。所以发送改成这样：你点「发送」，问题全文（带编号、原文、附图的存放路径）立刻自动复制到你的剪贴板，你只要切到聊天框、粘贴出来按发送，问题就真到我手里了，附图我会按文字里的路径打开看——就多你粘贴这一下，其余全自动。万一浏览器把自动复制拦下来，页面会弹出全文让你手动复制，不会卡住。后台任务那条路还留着，它同时也会试着送一趟，送到后页面照样标「已送达聊天」；但从这一版起，剪贴板这条才是主路，它不依赖任何后台环节，复制成功就是成功。你在问题页对任意一条点「发送」试试：正常会提示「已经复制好了」，然后去聊天框粘贴发送就行。其他功能和数据一个没动，没有自动生图。",
+    features: "问题发送改主通道：剪贴板复制（v5.78，用户 2026-11-11 真机复测 v5.77 仍送不到聊天框，并提议「点击发送后就自动粘贴到，我现在这个聊天框内，然后自动发送」；服务端 actions.ts sendIssueToChat 出参扩展 + 客户端 issuesbench.tsx 复制流程 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无新动作；NO real image/video generation submitted）：【用户提议评估】自动粘贴进聊天框 + 自动发送不可行——工作台运行在沙箱 iframe 中，与外壳聊天界面是两个隔离界面，工作台无任何口子能聚焦/写入聊天输入框或替用户触发发送，浏览器亦不许程序代替用户向其他应用粘贴；主聊 Muse 此前已向用户如实说明，本版按最接近的可行形态落地：点发送 → 全文自动入剪贴板 → 用户粘贴发送（两步）。【本版实证】构建前用 artifact 动作复查正式库副本：问题 #2 共发过 3 次、delivered_at 仍为空；其 send_task_id（600766e8…）经 getIssueSendStatus 复查 taskStatus=completed、returnContractStatus=satisfied——即 v5.77 的回执前置确实生效、任务也跑完了，但聊天里始终没出现问题（用户 03:04 实报），证明 spawnTask 任务汇报并不落成用户主聊天里的一条可见消息，该通道四轮实测（v5.75 / v5.76 / v5.77 沙箱 / v5.77 真机）零送达，降为并行兜底。【服务端改法】sendIssueToChat 响应加 shareText / shareImagePaths 两字段：shareText 在附图导出后拼装 = 首行「【工作台问题 #N】」+ 问题原文逐字 + 附图段（有图：「附图共 X 张，已存到本机，请按路径逐张打开看图：」+ 编号路径清单，与任务通道同一批 exportedPaths；无图：「（这个问题没有附图）」）；成功与派发失败（spawned.ok=false）两种结果都带回（失败也不拖死复制主通道），dryRun 同样带回（按规则路径拼）；拦截口径、任务说明、落库字段全部不变。【客户端改法】issuesbench 新增 copyTextToClipboard（navigator.clipboard.writeText 优先，失败退临时 textarea + execCommand('copy')，再失败回 false）；sendMut onSuccess 改异步：res.shareText 非空先复制——成功按 res.ok 分两支 toast（派发成功：已复制好、去聊天框粘贴发送、后台同时在送；派发失败：已复制好 + 点名派发失败原因、粘贴发送照样送到）；复制失败弹手动复制框（只读 textarea、聚焦自动全选、「再复制一次」按钮走同一助手、「关闭」），用户全选复制仍可走通；无 shareText 的旧式成功结果保留原 toast 兜底。发送确认框改题「发送问题 #N」、确认键改「复制并发送」、正文改剪贴板口径并写明粘贴这一下替不了的原因；页头说明同步改（主路 = 复制 + 粘贴发送，附图按路径打开；后台任务为第二条路、送达三态与失败红字不变）。【不动】问题增删改、附图增删与 exportIssueImages、sendIssueToChat 的 spawnTask 派发与回执/状态机（recordIssueDelivery / getIssueSendStatus / checkAgentTaskStatus 全保留）、其他全部功能与数据、封面记录 id 43、生图禁令、P7。基线升 v5.78（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 第五台规格发送口径补 v5.78、DATA-PLAN 一条）。动作总数不变（183）。真机待核：在问题页对任意一条点「发送」→ 确认「复制并发送」——应弹「已经复制好了」提示；切到聊天框粘贴，应出现「【工作台问题 #N】」开头、带原文（有附图带路径清单）的全文，按发送即完成投递；若浏览器拦截自动复制，会弹手动复制框，全选复制后同样粘贴发送。",
+  },
+  {
+    version: "v5.77",
+    date: "2026-11-11",
+    text: "这一版接着修问题处理页的发送——上一版你按新办法对问题 #2 再点了一次发送，还是没送到。这次我把上一版派出去的那个发送任务本身调出来查了（任务后台能查到真实状态）：任务其实跑完了，但它从头到尾没做成「回写送达回执」那一步，系统给它记的原因是「回执动作为空」。毛病出在给任务的交代顺序上：上一版让任务第一件事先「发一条消息进聊天」，可派出去的任务手里根本没有往聊天里发消息的口子（三次发送，聊天里都没出现过消息就是证据），它卡在这一步收了尾，排在最后的回执自然永远轮不到。这版把顺序倒过来、并且只让它做做得到的事：任务一接单，第一件事就先把送达回执写回工作台；然后打开附图看清楚；最后用它的任务汇报把问题送回聊天——汇报开头就是「【工作台问题 #N】」、原文一字不差，Muse 在聊天里收到汇报就接着处理（这条汇报通道和「同步到 GitHub」出结果用的是同一条，那条是验过能通的）。另外还加了一道保险：以后每次发送，任务编号都会记在工作台里，页面在等送达时会去查这个任务的真实状态——排队中、正在投递、还是已经失败、失败原因是什么，页面上都直接写出来；真失败了会亮红字告诉你为什么，不会再让你对着「还没确认送达」一直干等。你那条问题 #2 再点一次「发送」就会走新顺序。其他功能和数据一个没动，没有自动生图。",
+    features: "问题发送二次修复：任务说明重排（回执前置 + 汇报投递）+ taskId 落库 + 页面轮询任务真实状态（v5.77，用户 2026-11-11 真机复测 v5.76 后实报「点击发送好像，不行，你检查什么问题，送达不了」；服务端 actions.ts sendIssueToChat / 新增 getIssueSendStatus 与 checkAgentTaskStatus + schema issue_reports 加 send_task_id + migration 0043 + 客户端 issuesbench.tsx 状态轮询 + App 版本/日志 + replication 基线 + DATA-PLAN；NO real image/video generation submitted）：【实证诊断】沙箱里真派一轮 sendIssueToChat（问题 #2 第 2 次）拿到 taskId，再用新动作 checkAgentTaskStatus（直调 ctx.agent.status）复查：status=failed、agentStatus=completed、returnContractStatus=unsatisfied、failureReason=expected_return_action_missing、completedAction=null——任务本身跑完了，但从没调用 recordIssueDelivery；同时三次发送（v5.75 #1、v5.76 #2、本轮沙箱）聊天记录里都没出现任务消息。【根因】v5.76 任务说明第 1 步要求任务「用 chat.send_message 把消息发进用户主聊天（chat_id 写明）」，派发任务没有这个投递口，这一步做不到、整条任务在没走到第 4 步回执前就收尾；回执排在最后是结构性必失。【服务端改法】①sendIssueToChat 任务说明重排为三步：第 1 步先调用 recordIssueDelivery 落回执（带 expected_return_invocation_id）；第 2 步逐张打开附图核对；第 3 步任务结果即投递件——以「【工作台问题 #N】（第 M 次发送）」标题开头、问题原文逐字、附图所见与处理结果，由任务汇报通道送回主聊（与 requestGithubSync 汇报同一通道，已实证）；明示任务不要另找聊天工具发消息。②派发成功落库 sendTaskId（schema send_task_id + migration 0043，issueOut 不变、客户端不直接用）。③新动作 getIssueSendStatus{issueId}：按 send_task_id 调 ctx.agent.status，回 hasTask / taskStatus / returnContractStatus / failureReason / statusMessage / deliveredAtMs。④诊断动作 checkAgentTaskStatus{taskId}保留（本次诊断就是用它拿到实证）。【客户端改法】issuesbench：等送达的卡片每 8 秒轮询 getIssueSendStatus（失败 / 失效自动停轮询）；徽章新增红字两态——「发送失败 · 没送到」（taskStatus=failed，红字说明把 expected_return_action_missing 翻成大白话 + 其他原因原样带出）、「发送没成功 · 任务已失效」（not_found）；queued / running 显示「任务排队中 / 正在投递」小字；页头说明、发送确认框、成功 toast 同步改口（任务失败会亮红字写明原因）。【存量】正式库问题 #2（status=sent、sendCount=1、delivered_at 为空、send_task_id 为空——v5.76 没落库 taskId）：新版页面 hasTask=false、不显示失败红字（旧轮次状态无从查起，不冒充），仍显示「已提交发送 · 还没确认送达」；用户再点一次发送即落库新 taskId 并走新顺序。【不动】问题增删改、附图增删与 exportIssueImages、拦截口径、recordIssueDelivery 本身、其他全部功能与数据、封面记录 id 43、生图禁令、P7。基线升 v5.77（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 第五台规格发送口径改 v5.77、DATA-PLAN 一条）。动作总数 181 → 183。真机待核：在问题页对问题 #2 再点一次「发送」——页面应很快翻成「已送达聊天」并带送达时间（任务接单先落回执），聊天里随后出现这条问题的汇报与处理；若这一轮任务仍失败，页面会亮红字写明真实原因，不再是无限期「还没确认送达」。",
+  },
+  {
+    version: "v5.76",
+    date: "2026-11-11",
+    text: "这一版修你刚报的那个毛病：问题处理页里点了「发送」、页面也显示发了，可我们的聊天里根本没出现那条问题。毛病出在发送的做法上：上一版点发送只是把活派给一个后台任务，任务刚派出去，页面就标成「已发送」——可派出去不等于送到，中间没有任何回执能证明问题真进了聊天，这次就是卡在这里。这版把发送改成带回执的做法（和「同步到 GitHub」用的同一套回执口径，那条是验过能把结果送回聊天的）：发送任务接活后，第一件事就是把问题（带编号、原文一字不差）作为一条消息真正发进我们的聊天记录，你能在聊天里直接看到它；之后它再打开附图核对；最后它还要回工作台报一声「送到了」，页面收到回执才把这条标成「已送达聊天」，并写明送达时间。状态从此分三档，老实分开：没发的是「待处理」；点了发送、还没收到回执的显示「已提交发送 · 还没确认送达」；真送到了才显示「已送达聊天」。等送达期间页面每 10 秒自己刷新一次，状态变了你不用手动刷新就能看到；发送时的提示话也改了，不再一派出去就说「已发送」。你那条问题 #1 之前标的「已发送」只是派出去了、没确认送达，这版它会显示「已提交发送 · 还没确认送达」——你在问题页再点一次「发送」，新流程就会把它真正送进聊天。其他功能和数据一个没动，没有自动生图。",
+    features: "问题发送送达修复：派发带 expectsAction 回执 + 任务先发聊天消息 + 页面三态送达状态（v5.76，用户 2026-11-11 实报「点击发送后，我没看到我们的聊天记录里出现了我的问题」；服务端 actions.ts sendIssueToChat / 新增 recordIssueDelivery + schema issue_reports 加 delivered_at + migration 0042 + 客户端 issuesbench.tsx 状态口径 + App 版本/日志 + replication 基线 + DATA-PLAN；NO real image/video generation submitted）：【根因】v5.75 的 sendIssueToChat 用 ctx.agent.spawnTask 只带 dedupeKey 派发、消息只写「汇报回主聊」，没有 expectsAction 回执通道、没有任何送达确认字段；动作在 spawnTask 返回 ok（=任务已派发）的那一刻就写 status=sent 并回页面「已发送」，客户端随即显示已发送——派发与送达被混为一谈，任务侧实际没把问题作为消息发进聊天记录（工作台自己的任务汇报不等于聊天里出现这条问题），用户点发送后聊天里查无此问、页面却已标已发送。【对照实证】同页另一条派发链「同步到 GitHub」requestGithubSync 带 expectsAction=recordGithubSyncResult，其结果确实回到本聊天且顶栏状态由回调写回（用户 2026-11-11 01:02 亲手点击、01:31 回报 v1.1.2，顶栏「上次同步：1.1.2」在截图中可见）——本版把问题发送对齐到这条已验证的回执口径。【服务端改法】①sendIssueToChat：spawnTask 选项加 expectsAction=recordIssueDelivery；任务消息重写为四步硬顺序——第 1 步先用 chat.send_message 把含「【工作台问题 #N】（第 M 次发送）」标题 + 问题原文（逐字）+ 附图张数的消息发到用户主聊天（chat_id 写明 d7ee4290-5c8a-428f-9439-f12028517371，即本工作台的来源聊天）；第 2 步逐张打开附图核对；第 3 步任务结果里复述问题与图中关键信息及处理结果；第 4 步收尾必须调用 recordIssueDelivery（带 expected_return_invocation_id）。派发落库时 deliveredAt 清空（新一轮回执作废旧值），status/sendCount/lastSentAt 口径不变（语义改为「已提交发送」）。②新动作 recordIssueDelivery{issueId, note?}：问题存在才写 delivered_at=now 并 invalidateQueries，回 {ok, deliveredAtMs}（expectsAction 回调，同 recordGithubSyncResult 先例）。③schema/migration 0042：issue_reports 加 delivered_at（timestamp_ms 可空）；issueOut/loadIssueOut 加 deliveredAtMs。【客户端改法】issuesbench 状态三态：待处理 / 已提交发送·还没确认送达（accent 描边徽章）/ 已送达聊天（绿徽章 + 「送达聊天于 时间」）；计数行补「N 条已提交发送、正在等送达确认」；有未送达的已发送问题时列表每 10 秒 refetchInterval 自动刷新、全送达自动停；发送成功 toast 与发送确认框文案改口径（提交≠送达、送到后标已送达聊天、页面自动更新不用刷新）；页头说明同步改。【存量】正式库问题 #1（用户真机所建，status=sent、sendCount=1、无附图）delivered_at 为空 → 新版显示「已提交发送 · 还没确认送达」，属实（v5.75 那次确实没送达）；不伪造回执、不回填，用户再点一次发送即走新流程。【不动】问题增删改、附图增删与 exportIssueImages 导出链、问题为空/只有图的拦截口径、其他全部功能与数据、封面记录 id 43、生图禁令、P7。基线升 v5.76（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 第五台规格补送达口径、DATA-PLAN 一条）。动作总数 180 → 181。真机待核：在问题页对问题 #1 再点一次「发送」并确认——聊天里应出现一条「【工作台问题 #1】」开头的消息（带原文），稍后问题页这条自动翻成「已送达聊天」并带送达时间；带附图的问题发送后，聊天消息里写明附图张数、处理结果随后在聊天里汇报。",
+  },
+  {
+    version: "v5.75",
+    date: "2026-11-11",
+    text: "这一版按你说的，把顶栏的「AI助手」取消了（你试用后觉得它不够全面），原位置换成新页「问题处理」。这是一个专门攒问题的本子：你在上面点「添加问题」写下要处理的问题，每条自动带编号（问题 #1、#2……，删掉某条也不会把编号挪给别人）；写完还能改描述（改完点别处就自动存上），也能给每条问题附图片（截图、照片都行，一条最多 6 张，点缩略图上的 × 能删，删之前会先问你一句）。每条问题右边有一个「发送」按钮：点它、确认一下，问题描述和附图就一起发到聊天里，Muse 会在聊天里先复述一遍问题和图里看到的东西，再动手处理，处理完在聊天里告诉你。发过的问题会标成「已发送」，写明发过几次、上次什么时候发的；没发成的会把真实原因摆出来，不会假装发了。发过的也能再发。所有问题都存在工作台里，刷新、关掉重开都不会丢。原来 AI 助手的聊天框、它在服务端跑的那套问答，一并都撤了；项目、剧本、封面这些数据一个没动，也没有自动生图。",
+    features: "取消 AI助手 + 新增问题处理页（v5.75，用户 2026-11-11 亲口定：AI助手试用后不够全面、取消，原位置加问题处理页——存问题 + 上传图片、每条带编号、右侧发送按钮一键把问题与图片发到聊天里处理；客户端新增 issuesbench.tsx + App.tsx 顶栏接线（Bench assistant→issues、页签 / 窗口标签 / 渲染区改名）+ 服务端新表 migration 0041（issue_reports / issue_images）与 7 个新动作 + 特权层新契约 exportIssueImages + 版本/日志 + replication 基线 + DATA-PLAN；NO real image/video generation submitted）：【删除清单（AI助手整套）】客户端 assistantbench.tsx 整文件、App 顶栏「AI助手」页签与聊天渲染区；服务端 runAssistantChat 动作、ASSISTANT_* 常量 / 工具注册表 / executeAssistantTool / 回复 schema 整块；特权层 geeknowChatCompletion 契约 + handler + GEEKNOW_PY 的 chat 模式分支 + RawResult 三个 chat 回传字段。助手没存过任何数据（对话只在页面内存），删除不涉及数据迁移；它唯一写过的封面草稿是走既有 cover_prompt_drafts 表的正常数据，不受影响。【问题页】页首添加表单（描述 textarea + 添加问题按钮）；卡片列表按编号升序：问题 #N + 状态徽章（待处理 / 已发送）+ 发送次数与上次发送时间 + 添加时间；描述 textarea 可改（失焦自动存 + 脏态「保存描述」按钮与未保存红字提示，updatedAtMs 变化时与服务端对齐）；附图区逐图 76px 缩略图 + 删除 ×（ConfirmDialog 二次确认）+「＋ 添加图片」（多选、只收 image/*、逐张 fileToBase64 走 addIssueImage，每条上限 6 张、超限点名）；右侧固定 86px 列：btn-primary「发送」+ 删除问题（均二次确认）；空态 / 读取失败（带真实原因 + 重新读取）/ 计数行（共 N 条、M 条未发送）齐备；结果 toast 沿 githubsync 同款式。【数据模型】issue_reports（id 自增 = 编号、text、status pending|sent、send_count、last_sent_at、created_at、updated_at）+ issue_images（issue_id 外键、blob_key、file_name、mime、sort_order）；图字节存 ctx.blobs（key=issues/<问题id>/<图id>，先插行拿 id 再 put、失败回滚删行）；删问题连带删图行与 blob（blob 清理失败不拦删除）；编号删行不复用。【7 动作】listIssues（逐条 loadIssueOut：blobUrlOrNull 容错取址）/ createIssue / updateIssue（只改文字）/ deleteIssue / addIssueImage（mime 必须 image/*、解码后 ≤约 10MB、上限 6 张）/ deleteIssueImage / sendIssueToChat。【发送链路】sendIssueToChat{issueId, dryRun?}：问题不存在 / 空问题（没文字没图）/ 只有图没描述 → 如实拦截不派发；有附图先 ctx.executePrivileged(exportIssueImages) 把 blob 导出成本机图片文件，任一张失败整条拦截、错误点名、不标已发送；消息 = 第 N 次发送 + 问题原文 + 附图路径清单 + 要求任务在主聊先复述问题与图中关键信息再处理；ctx.agent.spawnTask（dedupeKey=issue-send-<id>-<sendRound>，与「同步到 GitHub」同一派发通道，任务结果汇报回来源聊天）；派发成功才写 status=sent / sendCount+1 / lastSentAt；dryRun=true 只回 wouldSpawn + composed 消息 + 按规则拼出的附图路径，不导出、不派发、不改状态（沙箱验证专用）。【特权层 exportIssueImages】按运行时同一寻址（对象名 = sha256(blob key) 十六进制、blobs/objects/<前2位>/<对象名>）从 ~/workspace/ts-spaces/space-4/blobs 复制到 ~/workspace/issue-attachments/issue-<id>/<序号>-<原文件名><按 mime 定扩展名>，逐张回 path / error；仅 Muse 内部成立（spawnTask 与本机路径在 exe 里不存在），移植时本台 + 本契约 + 发送动作一并排除（同 githubsync 先例）。【不动】项目 / 剧本 / 模式 / 封面 / 监控 / 储存库全部数据与动作、封面记录 id 43、生图禁令、P7（暂停非取消，未动）。基线升 v5.75（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 第五台规格整条改写、DATA-PLAN 一条）。真机待核：顶栏点「问题处理」能打开、AI助手页签已消失；添加一条问题带编号出现、刷新还在；改描述点别处自动存；附一张截图能看到缩略图、删图有确认；点「发送」确认后聊天里出现这条问题（带编号、原文与附图）并开始处理，页面上这条变「已发送」并记次数时间。",
+  },
+  {
+    version: "v5.74",
+    date: "2026-11-11",
     text: "这一版在顶栏加了一个新页「AI助手」（和剧本工作台、人物资产储存库并列），是先做出来让你亲手试效果的原型 v0.1：一个聊天框，接的是 Geeknow（文字模型 deepseek-v4-flash，用的是你已经连好的那份凭证 / 生图总设置里填的 Key，不用再填一遍）。它不只是聊天，还能真动手查工作台：你问它有哪些项目、某个项目里写了什么、几个模式各是什么状态、有哪些封面风格，它会去查了再回答，查过什么会在它的话下面用小灰字写出来（如「查了项目列表（3 个）」）。最要紧的是封面分析也能交给它：把一段剧本摘要发给它、说清项目和风格，它按老规矩只定三样（人物站位、标题位置、标题风格，人物只按代号绑参考图、不写长相穿搭），写好中英文提示词后会直接存进工作台对应项目 + 风格的草稿里，封面页第三步就能读到，不用再手动粘贴。它能碰的东西只有这几样：查项目、读项目、查模式、查封面风格、读和存封面草稿；删项目、改剧本、提交生图这些它一律做不了（工具就没给它）。先说清原型的边界：对话只存在这个页面里，刷新就没了（存下来以后再做）；聊天框只收文字、不能贴图；一轮对话里它最多查 8 次，到上限会停下来把已查到的先给你；Geeknow 那边报错（比如 Key 不对、模型不可用、超时）会把中文原因原样摆出来，不会假装成功。没动任何项目数据、封面记录，也没有自动生图。",
     features: "AI助手聊天原型 v0.1（v5.74，用户 2026-11-11 定「先做一个接 Geeknow 跑一个助手看效果」、P7 一期暂停非取消；客户端新增 assistantbench.tsx 独立模块 + App.tsx 顶栏接线（Bench 加 assistant、新页签按钮、窗口标签与渲染区）+ 服务端 actions.ts 新动作 runAssistantChat + 特权层新契约 geeknowChatCompletion（GEEKNOW_PY 加 chat 模式）+ 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration——助手不存任何聊天记录（无状态），唯一写库是经工具存封面草稿（复用 cover_prompt_drafts 同口径）；NO real image/video generation submitted）：【入口与界面】顶栏 seg 加「AI助手」页签（Bench = assistant，v5.13 首次切到才挂载、挂载后 hidden 常驻保对话）；页面 = 消息列表 + 输入框 + 发送 + 清空对话，消息左右分（用户右 accent 底、助手左 surface-alt），助手工具轨迹在消息内以小灰字逐行显示（服务端 trace 原文），发送中禁用输入并显示「思考中…」，Enter 发送 / Shift+Enter 换行；提示行写明能查项目、查模式、做封面分析、解释功能、v0.1 是原型、对话只在页面内存刷新即没、只收文字不贴图。【服务端 agent 循环】runAssistantChat{messages（user/assistant 历史，≤40 条）, apiKey?, apiBase?}：系统提示词按定稿逐字写死（服务端 ASSISTANT_SYSTEM_PROMPT 四段）；循环 = 拼 system + 历史 → 特权层调 Geeknow /v1/chat/completions（tools + tool_choice auto）→ 有 tool_calls 逐个执行白名单工具、结果以 tool 角色喂回 → 无 tool_calls 即最终回答；工具调用总数上限 8 次（超限的调用回 tool 错误说明、再让模型基于已查信息作答并在回复前加注到上限），轮次保险丝 10 轮；每次模型调用超时 120 秒（timeoutSec 钳制、契约 timeoutMs 360s 容纳整轮）。【模型】文字用 deepseek-v4-flash（不用 deepseek-chat：实测 Geeknow 上 3 次全 503 model_not_found、/v1/models 无此 id；v4-flash 实测调通、实际跑 v4.1-flash 中转映射、原生 function calling 已实测返回 tool_calls）；模型名动作层常量 ASSISTANT_TEXT_MODEL，特权层 handler 允许宿主机环境变量 GEEKNOW_ASSISTANT_MODEL 覆盖；v0.1 不贴图、不走视觉模型。【工具白名单 6 个，ASSISTANT_TOOLS 注册表集中一处】list_projects（同 listProjects 口径查 projects + 人物数）、get_project{id}（loadProjectDetail，结果截断 24000 字喂回并注明）、get_cover_draft{projectId, styleId}、save_cover_draft{projectId, styleId, promptZh, promptEn}（与 saveCoverPromptDraft 同口径 upsert cover_prompt_drafts + invalidateQueries）、list_modes（ensureModes + loadModeSummary 同 listModeSummaries 口径）、list_cover_styles{styleId?}（直读 COVER_STYLES：不传回 11 个摘要 id/短名/说明、传了回完整规则）；白名单外工具名一律拒绝并回错误给模型；工具执行异常回错误结果不中断循环。【凭证与安全】与生图同口径：客户端发送时经 resolveImageApiConfig(loadImageApiSettings()) 读生图总设置（封面单次输入不参与），apiKey/apiBase 当次透传特权层，填 Key 用 Bearer、没填只对 geeknow 主机走已连接代理凭证（apply_auth 既有护栏）；不新增填 Key 入口；无 Key / 模型不存在 / 超时由特权层原样回中文错、动作回 ok:false + error、页面红字展示，绝不假装成功；Key 不进日志 / 记录 / 返回值（trace 只含工具轨迹文本）。【删除清单】零删除（纯新增：1 客户端模块 + 1 服务端动作 + 1 特权契约与 chat 模式 + 顶栏一处接线）。【不动】项目 / 剧本 / 模式 / 封面数据与全部既有动作、封面记录 id 43、生图禁令（助手无生图工具、验证不提交真实生图）、30 秒软顶、人物锁定、P7 服务器 / 登录 / 同步（暂停非取消，未动）。基线升 v5.74（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 一条）。真机待核：顶栏点「AI助手」能打开聊天页；问「有哪些项目」回真实列表且小灰字轨迹在；给一段剧本摘要 + 项目 + 风格做封面分析，助手回话并说存好了，去封面页对应风格第三步能读到草稿；无 Key 环境下发消息应原样报中文错。",
   },
@@ -18156,6 +18194,26 @@ const sdDurationLenses = useMemo<SeedanceLensPrompt[]>(
 );
 const sdLenses = sdVersion === "plot" ? sdPlotLenses : sdDurationLenses;
 const sdVersionLabel = sdVersion === "plot" ? "按剧情版" : "每镜 20–30 秒版";
+// v5.80 防版权拦截：开关打开时，H3 / Seedance 两版区里显示与逐镜
+// 头复制的都是过完替换表 + 末尾原创声明的文本，每张镜头卡下方带
+// 本块的替换清单；「复制全部」先拼未处理全文再整体过一次处理
+// （替换照常、声明只在全文末尾一份）。关掉立刻恢复原文。原始拼装
+// 结果（h3Lenses / sdLenses）一字不动，替换只发生在这层副本上。
+const guard = useCopyrightGuard();
+const guardLens = <T extends { text: string }>(
+l: T,
+): T & { hits: CopyrightGuardHit[] } => {
+const r = guard.apply(l.text);
+return { ...l, text: r.text, hits: r.hits };
+};
+const h3Shown = useMemo(
+() => h3Lenses.map(guardLens),
+[h3Lenses, guard],
+);
+const sdShown = useMemo(
+() => sdLenses.map(guardLens),
+[sdLenses, guard],
+);
 const copySeedance = (key: string, text: string) => {
 void copyText(text).then((ok) => {
 if (ok) {
@@ -18958,6 +19016,8 @@ style={{ borderColor: "var(--taupe)", background: "var(--surface)" }}
 )}
 
 {(sdPlotLenses.length > 0 || h3PlotLenses.length > 0) && (
+<>
+<CopyrightGuardControl guard={guard} />
 <div
 className={
 "grid items-start gap-x-6" +
@@ -18998,17 +19058,17 @@ onClick={() => setH3Version("duration")}
 type="button"
 className="btn btn-sm"
 aria-label={`复制${h3VersionLabel}全部 H3 提示词`}
-onClick={() => copyH3("all", buildH3FullText(h3Lenses, h3VersionLabel))}
+onClick={() => copyH3("all", guard.apply(buildH3FullText(h3Lenses, h3VersionLabel)).text)}
 >
 {h3CopyFail === "all"
 ? "复制失败，点此重试"
 : h3Copied === "all"
 ? "✓ 已复制全部"
-: `复制全部（${h3VersionLabel}，共 ${h3Lenses.length} 段）`}
+: `复制全部（${h3VersionLabel}，共 ${h3Shown.length} 段）`}
 </button>
 </div>
 <div className="mt-3 space-y-3">
-{h3Lenses.map((l) => {
+{h3Shown.map((l) => {
 const key = `lens-${l.lensIndex}`;
 return (
 <div
@@ -19044,6 +19104,11 @@ onClick={() => copyH3(key, l.text)}
 {l.text}
 </pre>
 </details>
+{guard.enabled && (
+<p className="mt-2 text-xs leading-5 text-[var(--dim)]">
+{formatGuardHits(l.hits)}
+</p>
+)}
 </div>
 );
 })}
@@ -19083,13 +19148,13 @@ onClick={() => setSdVersion("duration")}
 type="button"
 className="btn btn-sm"
 aria-label={`复制${sdVersionLabel}全部 Seedance 提示词`}
-onClick={() => copySeedance("all", buildSeedanceFullText(sdLenses, sdVersionLabel))}
+onClick={() => copySeedance("all", guard.apply(buildSeedanceFullText(sdLenses, sdVersionLabel)).text)}
 >
 {sdCopyFail === "all"
 ? "复制失败，点此重试"
 : sdCopied === "all"
 ? "✓ 已复制全部"
-: `复制全部（${sdVersionLabel}，共 ${sdLenses.length} 段）`}
+: `复制全部（${sdVersionLabel}，共 ${sdShown.length} 段）`}
 </button>
 <span className="flex shrink-0 items-center gap-1.5">
 <label
@@ -19115,7 +19180,7 @@ style={{ background: "var(--surface)", border: "1px solid var(--border)", minHei
 </span>
 </div>
 <div className="mt-3 space-y-3">
-{sdLenses.map((l) => {
+{sdShown.map((l) => {
 const key = `lens-${l.lensIndex}`;
 return (
 <div
@@ -19151,6 +19216,11 @@ onClick={() => copySeedance(key, l.text)}
 {l.text}
 </pre>
 </details>
+{guard.enabled && (
+<p className="mt-2 text-xs leading-5 text-[var(--dim)]">
+{formatGuardHits(l.hits)}
+</p>
+)}
 </div>
 );
 })}
@@ -19159,6 +19229,7 @@ onClick={() => copySeedance(key, l.text)}
 )}
 </div>
 </div>
+</>
 )}
 
 <DocSection title="后期叠加清单">

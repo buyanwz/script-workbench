@@ -591,6 +591,8 @@ export function CoverBench({
       : 0;
   const submitPromptLen = effectiveSubmitLen(ratio);
   const submitPromptOver = submitPromptLen > SUBMIT_PROMPT_BUDGET;
+  // v5.81：封面页不再做防版权拦截（用户定：封面页不用做防拦截）——
+  // v5.80 在此算的「将提交那一版替换清单」已下线，提交按原文走。
   const batchPromptLen = Math.max(
     ...ALL_COVER_RATIOS.map((r) => effectiveSubmitLen(r)),
   );
@@ -2722,6 +2724,9 @@ export function CoverBench({
         `提醒（已自动降级、本次照常按纯文字提交）：${reason}，已自动去掉提交词里的「外貌与服装以随附的人物资产图为准」约束（页面上的提示词原文没动）——不带图硬提这句约束，上游只会回「请上传参考图」按失败处理。封面人物这次只能按文字画；想与资产图一致，勾上参考图区的同意、选好参考图后再生成。`,
       );
     }
+    // v5.81：封面页不再做防版权拦截——v5.80 在此对最终提交副本
+    // （中英两版）过替换表 + 原创声明的逻辑已下线，finalPromptZh /
+    // finalPromptEn / finalPrompt 按原文提交、原文存进记录。
     // 部分缺失：还有图能交，但方案里有人没带上（没勾选 / 本人没
     // 有资产图 / 送达失败）——不拦，但在提交前亮黄色提醒点名缺
     // 谁，不再静默提交让用户事后才发现封面里的人对不上。
@@ -3964,6 +3969,8 @@ export function CoverBench({
         aria-label="第三步 · 提示词与生成（提示词与生成、封面记录）"
       >
         <p className="text-sm font-bold">第三步 · 提示词与生成</p>
+        {/* v5.81：封面页不做防版权拦截（用户定），v5.80 放在这里的
+            开关已下线；防拦截只在分镜页管分镜提示词。 */}
         {/* v5.14：聊天分析草稿自动填入时亮明来源（草稿存在才出
             现；当前风格没草稿时不显示）。 */}
         {draftSourceNote && (
@@ -4070,6 +4077,8 @@ export function CoverBench({
             。
           </p>
         )}
+        {/* v5.81：封面页不做防版权拦截，v5.80 的「提交时生效替换
+            清单」一行已下线。 */}
         {/* v5.18：选中版为空、另一版有内容时常显点名——不点生成
             也先看得见，不会以为会提交另一版。 */}
         {!submitPromptText && (promptZh.trim() || promptEn.trim()) && (
