@@ -86,7 +86,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $f = Get-Item release/ScriptWorkbench-Setup-1.0.0.exe
+          $f = Get-Item release/ScriptWorkbench-Setup-1.0.1.exe
           Write-Output "installer size: $($f.Length) bytes"
           Write-Output "installer SHA-256: $((Get-FileHash $f -Algorithm SHA256).Hash)"
           # 真实安装包约 242MB；未完成的 NSIS 壳只有约 161KB。200MB 下限既能拦住未完成品，又不会误杀正常包。
@@ -95,8 +95,8 @@ jobs:
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ScriptWorkbench-Setup-1.0.0
-          path: release/ScriptWorkbench-Setup-1.0.0.exe
+          name: ScriptWorkbench-Setup-1.0.1
+          path: release/ScriptWorkbench-Setup-1.0.1.exe
           if-no-files-found: error
 
       - name: Publish to Releases
@@ -104,5 +104,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.0.0 release/ScriptWorkbench-Setup-1.0.0.exe --title 'ScriptWorkbench 1.0.0' --notes 'Windows 安装包（NSIS，per-user 一键安装，无需管理员权限）。' --target main
-          if ($LASTEXITCODE -ne 0) { gh release upload v1.0.0 release/ScriptWorkbench-Setup-1.0.0.exe --clobber }
+          gh release create v1.0.1 release/ScriptWorkbench-Setup-1.0.1.exe --title 'ScriptWorkbench 1.0.1' --notes 'Windows 安装包（NSIS，per-user 一键安装，无需管理员权限）。' --target main
+          if ($LASTEXITCODE -ne 0) { gh release upload v1.0.1 release/ScriptWorkbench-Setup-1.0.1.exe --clobber }
