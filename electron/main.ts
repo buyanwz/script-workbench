@@ -24,7 +24,9 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { autoUpdater } from "electron-updater";
+import type { UpdateInfo } from "electron-updater";
 
 // 编译产物所在目录（electron/dist/）；import.meta.url 在 Node 与 Bun 下都可用。
 const DIST_DIR = dirname(fileURLToPath(import.meta.url));
@@ -33,6 +35,21 @@ const DEFAULT_PORT = 3000;
 const HEALTH_TIMEOUT_MS = 30_000;
 const HEALTH_POLL_MS = 250;
 const SHUTDOWN_TIMEOUT_MS = 5_000;
+
+// 自动更新（v1.1.0）：electron-updater，更新源 = GitHub Releases
+// （见 electron-builder.yml 的 publish 配置，owner buyanwz / repo script-workbench）。
+//   - 仅打包版启用（开发态不检查；沙箱 Linux dir / AppImage 构建是打包态，
+//     会检查——这正是端到端测试要用的形态）。
+//   - 启动后 20 秒检查一次，之后每 6 小时检查一次；设置页可手动检查。
+//   - 自动下载；下载完弹原生提示：立即重启更新 / 下次打开时更新（退出时自动装）。
+//   - 更新只换程序文件：数据目录（%APPDATA%\ScriptWorkbench 或
+//     ~/.local/share/ScriptWorkbench）不在安装包里，卸载重装都不动，更新更不会动。
+//   - UPDATE_FEED_URL（沙箱测试专用）：设了就改走通用更新源（本地搭的更新服务器），
+//     用于端到端测试；正式发布包里没人设这个变量，走 GitHub Releases。
+//   - E2E_UPDATE_TEST=1（沙箱测试专用）：下载完不等用户点提示，直接自动重启安装，
+//     用于无人值守的端到端测试；正式使用时不设，走提示框。
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const UPDATE_FIRST_CHECK_DELAY_MS = 20_000;
 
 let serverChild: ChildProcess | null = null;
 let serverPort = DEFAULT_PORT;
@@ -298,8 +315,84 @@ function createErrorWindow(): void {
   showServerDownPage();
 }
 
+/** 下载完弹的提示：立即重启更新 / 下次打开时更新。 */
+async function showUpdateDownloadedDialog(version: string): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "新版本已下载好",
+    message: `剧本创作工作台 ${version} 已下载好`,
+    detail:
+      "现在重启就换成新版本；选“下次打开时更新”，下次退出软件时自动装上。你的项目数据不受影响。",
+    buttons: ["立即重启更新", "下次打开时更新"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response === 0) {
+    autoUpdater.quitAndInstall(false, true);
+  }
+  // response === 1：什么都不做，退出时自动装（autoInstallOnAppQuit）。
+}
+
+/** 自动更新总开关：仅打包版启用；后台检查出错只记日志，不弹框打扰。 */
+function setupAutoUpdater(): void {
+  if (!app.isPackaged) {
+    log("auto-update disabled (not packaged)");
+    return;
+  }
+  // 沙箱测试专用：改走本地更新源（正式发布包里没人设这个变量）。
+  const feedUrl = process.env.UPDATE_FEED_URL?.trim();
+  if (feedUrl) {
+    log("auto-update test feed:", feedUrl);
+    autoUpdater.setFeedURL({ provider: "generic", url: feedUrl });
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.allowDowngrade = false;
+  autoUpdater.logger = {
+    info: (msg: unknown) => log("[updater]", msg),
+    warn: (msg: unknown) => log("[updater:warn]", msg),
+    error: (msg: unknown) => log("[updater:error]", msg),
+    debug: (msg: unknown) => log("[updater:debug]", msg),
+  };
+  autoUpdater.on("checking-for-update", () => log("[updater] checking for update"));
+  autoUpdater.on("update-available", (info: UpdateInfo) => {
+    log("[updater] update available:", info.version);
+  });
+  autoUpdater.on("update-not-available", (info: UpdateInfo) => {
+    log("[updater] up to date:", info.version);
+  });
+  autoUpdater.on("download-progress", (p) => {
+    log(`[updater] download ${Math.round(p.percent)}% (${p.transferred}/${p.total})`);
+  });
+  autoUpdater.on("update-downloaded", (info: UpdateInfo) => {
+    log("[updater] update downloaded:", info.version);
+    if (process.env.E2E_UPDATE_TEST === "1") {
+      // 沙箱无人值守测试：模拟用户点“立即重启更新”。
+      log("[updater] E2E test: auto quitAndInstall");
+      setTimeout(() => autoUpdater.quitAndInstall(false, true), 2000);
+      return;
+    }
+    void showUpdateDownloadedDialog(info.version);
+  });
+  autoUpdater.on("error", (err: Error) => {
+    // 后台检查出错（断网、更新源 404 等）：只记日志；
+    // 手动检查的错误由 check-for-updates 的返回值带回设置页显示。
+    log("[updater] error:", err?.message ?? err);
+  });
+  const check = () => {
+    void autoUpdater.checkForUpdates().catch((err: unknown) => {
+      log("[updater] check failed:", err instanceof Error ? err.message : err);
+    });
+  };
+  setTimeout(check, UPDATE_FIRST_CHECK_DELAY_MS);
+  const timer = setInterval(check, UPDATE_CHECK_INTERVAL_MS);
+  app.on("before-quit", () => clearInterval(timer));
+}
+
 async function boot(): Promise<void> {
   await app.whenReady();
+  setupAutoUpdater();
   serverPort = await findFreePort(
     Number(process.env.PORT ?? DEFAULT_PORT),
   );
@@ -324,6 +417,28 @@ ipcMain.handle("restart-service", async () => {
   await restartService();
   return { ok: !serverCrashed };
 });
+
+// 自动更新（v1.1.0）：设置页手动检查；结果回设置页显示，下载完由
+// update-downloaded 事件弹原生提示（见 setupAutoUpdater）。
+ipcMain.handle("check-for-updates", async () => {
+  if (!app.isPackaged) return { status: "not-packaged" as const };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    const latest = result?.updateInfo?.version ?? "";
+    const current = app.getVersion();
+    if (latest && latest !== current) {
+      return { status: "available" as const, version: latest };
+    }
+    return { status: "up-to-date" as const, version: current };
+  } catch (err) {
+    return {
+      status: "error" as const,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+});
+
+ipcMain.handle("get-app-version", () => app.getVersion());
 
 app.on("window-all-closed", () => {
   // 本应用只有一个窗口：窗口关了就退出（macOS 也不留后台）。

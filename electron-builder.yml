@@ -12,6 +12,16 @@ appId: com.scriptworkbench.app
 productName: 剧本创作工作台
 copyright: Copyright © 2026
 
+# v1.1.0 自动更新：更新源 = GitHub Releases（buyanwz/script-workbench）。
+# electron-builder 打包时按此配置生成 latest.yml（放 release/，由工作流
+# 随安装包一起传到 Releases）与 app-update.yml（放程序 resources/ 内，
+# 供 electron-updater 运行时读更新源）；--publish never 只跳过上传，
+# 不影响这两个文件的生成（沙箱 Linux 构建已实测，见 github-actions-report §十三）。
+publish:
+  provider: github
+  owner: buyanwz
+  repo: script-workbench
+
 directories:
   output: release
 

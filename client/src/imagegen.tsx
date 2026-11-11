@@ -820,6 +820,46 @@ function ImageGenPanel({
   const [apiProbeBad, setApiProbeBad] = useState(false);
   const [apiProbing, setApiProbing] = useState(false);
   const [apiClearAsk, setApiClearAsk] = useState(false);
+  // v1.1.0 软件更新（仅 exe 打包版：window.electronAPI 由主进程注入；
+  // 网页版 / Muse 版没有它，入口不显示）。
+  const hasElectronAPI =
+    typeof window !== "undefined" &&
+    typeof window.electronAPI?.checkForUpdates === "function";
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+  useEffect(() => {
+    if (!hasElectronAPI) return;
+    void window.electronAPI
+      ?.getAppVersion()
+      .then((v) => setAppVersion(v))
+      .catch(() => undefined);
+  }, [hasElectronAPI]);
+  const runUpdateCheck = async (): Promise<void> => {
+    if (!window.electronAPI) return;
+    setUpdateChecking(true);
+    setUpdateMsg("正在检查更新…");
+    try {
+      const res = await window.electronAPI.checkForUpdates();
+      if (res.status === "available") {
+        setUpdateMsg(
+          `发现新版本 ${res.version}，正在后台下载；下载完会提示你重启更新。`,
+        );
+      } else if (res.status === "up-to-date") {
+        setUpdateMsg(`已是最新版本（${res.version}）。`);
+      } else if (res.status === "not-packaged") {
+        setUpdateMsg("当前不是安装版，无法检查更新。");
+      } else {
+        setUpdateMsg(`检查失败：${res.error}（可能是网络问题，稍后再试）。`);
+      }
+    } catch (e) {
+      setUpdateMsg(
+        `检查失败：${e instanceof Error ? e.message : String(e)}。`,
+      );
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
   const imgResolved = resolveImageApiConfig(apiSettings);
   const imgCfgRef = useRef(imgResolved);
   imgCfgRef.current = imgResolved;
@@ -2468,6 +2508,39 @@ function ImageGenPanel({
             </p>
           )}
         </div>
+
+        {/* v1.1.0 软件更新：仅 exe 打包版显示（window.electronAPI 由主进程注入）；
+            网页版 / Muse 版没有这个入口。更新只换程序文件，项目数据不动。 */}
+        {hasElectronAPI && (
+          <div
+            className="mt-3 rounded-[var(--radius)] border p-3"
+            style={{
+              borderColor: "var(--border)",
+              background: "var(--surface-alt)",
+            }}
+          >
+            <p className="text-sm font-bold">软件更新</p>
+            <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
+              当前版本：{appVersion ?? "…"}。新版本发布后，打开软件会自动检查、后台下载，下载完提示你重启更新；也可以点下面手动检查。更新只换程序文件，你的项目、图片和设置都不动。
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={updateChecking}
+                aria-label="手动检查软件更新"
+                onClick={() => void runUpdateCheck()}
+              >
+                {updateChecking ? "检查中…" : "检查更新"}
+              </button>
+            </div>
+            {updateMsg && (
+              <p className="mt-2 text-xs leading-5" role="status">
+                {updateMsg}
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="mt-3">
           <label className={labelCls} htmlFor="imagegen-family">
