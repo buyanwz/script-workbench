@@ -11,8 +11,9 @@
 //      超时 5 秒未退则强制杀整个进程树（Windows 上 taskkill /T /F），
 //      不残留占端口。
 //
-// 本机 Linux 沙箱验证用 `bun server.ts` 子进程（SERVER_EXE 未设时）；
-// 打包形态（SERVER_EXE 指向编译产物）同样已实测，见 p1-report.md。
+// 本机 Linux 沙箱验证用 `bun server.ts` 子进程（SERVER_EXE 未设且未打包时）；
+// 打包形态默认用 resources/ 下的编译产物（SERVER_EXE 可覆盖），见 p1-report.md。
+// v1.0.1 修：打包后默认走内置 exe，不再回落到 spawn("bun")（用户电脑无 Bun 会 ENOENT crash）。
 // 数据目录（P2）：默认 %APPDATA%\ScriptWorkbench（Windows）或
 // ~/.local/share/ScriptWorkbench（Linux/macOS），与服务端直接跑
 // `bun server.ts` 的默认口径一致；DATA_DIR 环境变量可覆盖。
@@ -90,26 +91,47 @@ function startServer(port: number): ChildProcess {
     CLIENT_DIST: process.env.CLIENT_DIST ?? CLIENT_DIST_DIR,
     DATA_DIR: process.env.DATA_DIR?.trim() || resolveDefaultDataDir(),
   };
-  const packaged = process.env.SERVER_EXE;
+  // 打包后默认用随安装包一起装好的服务端 exe（resources/script-workbench-server.exe）；
+  // SERVER_EXE 环境变量仍保留作覆盖（测试用）。未打包时保持原行为（bun server.ts）。
+  // v1.0.0 的 bug：这里只认 SERVER_EXE，安装包里没人设它，于是回落到 spawn("bun")，
+  // 用户电脑没装 Bun 就 ENOENT、未捕获异常直接 crash。
+  const packaged =
+    process.env.SERVER_EXE?.trim() ||
+    (app.isPackaged ? join(process.resourcesPath, "script-workbench-server.exe") : "");
   let child: ChildProcess;
-  if (packaged) {
-    log("starting packaged server:", packaged, "port", port);
-    child = spawn(packaged, [], {
-      env,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } else {
-    const serverTs = join(BASE_DIR, "server.ts");
-    log("starting dev server: bun", serverTs, "port", port);
-    child = spawn("bun", [serverTs], {
-      env,
-      detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+  try {
+    if (packaged) {
+      log("starting packaged server:", packaged, "port", port);
+      child = spawn(packaged, [], {
+        env,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } else {
+      const serverTs = join(BASE_DIR, "server.ts");
+      log("starting dev server: bun", serverTs, "port", port);
+      child = spawn("bun", [serverTs], {
+        env,
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    }
+  } catch (err) {
+    // spawn 失败（如 exe 缺失、或开发机无 Bun）：抛给调用方走“服务掉了”页面，不要 crash。
+    log("failed to spawn server:", err);
+    throw err;
   }
   child.stdout?.on("data", (d: Buffer) => process.stdout.write(`[server] ${d}`));
   child.stderr?.on("data", (d: Buffer) => process.stderr.write(`[server:err] ${d}`));
+  child.once("error", (err) => {
+    // 异步拉起失败：同样走“服务掉了”页面。
+    log("server process error:", err);
+    serverChild = null;
+    if (!shuttingDown && mainWindow && !mainWindow.isDestroyed()) {
+      serverCrashed = true;
+      showServerDownPage();
+    }
+  });
   child.once("exit", (code, signal) => {
     log(`server exited code=${code} signal=${signal} shuttingDown=${shuttingDown}`);
     serverChild = null;
@@ -245,7 +267,13 @@ async function restartService(): Promise<void> {
   log("restarting server on user request");
   await stopServer();
   serverCrashed = false;
-  serverChild = startServer(serverPort);
+  try {
+    serverChild = startServer(serverPort);
+  } catch (err) {
+    log("server failed to restart:", err);
+    if (mainWindow && !mainWindow.isDestroyed()) showServerDownPage();
+    return;
+  }
   const ok = await waitForHealth(serverPort);
   if (ok && mainWindow && !mainWindow.isDestroyed()) {
     await mainWindow.loadURL(`http://127.0.0.1:${serverPort}/`);
@@ -254,27 +282,39 @@ async function restartService(): Promise<void> {
   }
 }
 
+/** “服务掉了”窗口（服务端拉不起或健康检查超时时用，可点重启）。 */
+function createErrorWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 800,
+    height: 500,
+    title: "剧本创作工作台",
+    webPreferences: {
+      preload: join(DIST_DIR, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  showServerDownPage();
+}
+
 async function boot(): Promise<void> {
   await app.whenReady();
   serverPort = await findFreePort(
     Number(process.env.PORT ?? DEFAULT_PORT),
   );
-  serverChild = startServer(serverPort);
+  try {
+    serverChild = startServer(serverPort);
+  } catch (err) {
+    // 服务根本拉不起来：直接开“服务掉了”窗口（可点重启），不要 crash。
+    log("server failed to start:", err);
+    createErrorWindow();
+    return;
+  }
   const ok = await waitForHealth(serverPort);
   if (!ok) {
     log("server did not become healthy in time; showing error page");
-    mainWindow = new BrowserWindow({
-      width: 800,
-      height: 500,
-      title: "剧本创作工作台",
-      webPreferences: {
-        preload: join(DIST_DIR, "preload.cjs"),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-      },
-    });
-    showServerDownPage();
+    createErrorWindow();
     return;
   }
   await createWindow();

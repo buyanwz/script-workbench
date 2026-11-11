@@ -23,6 +23,11 @@ extraResources:
   # 服务端编译产物（P1 已验证 bun build --compile；P6 打包时由构建脚本生成后放这里）
   - from: resources/script-workbench-server.exe
     to: script-workbench-server.exe
+  # 数据库迁移（P2）：服务端启动时按 drizzle/meta/_journal.json 跑 40 个迁移；
+  # 打包后 exe 在 resources/ 下，drizzle/ 必须随包放在 resources/drizzle/，
+  # 否则服务端一启动就 fatal 停服（v1.0.1 沙箱验证发现：v1.0.0 的包里就没有它）。
+  - from: drizzle
+    to: drizzle
   # 前端构建产物（P1 已验证 client/dist 同源托管）
   - from: client/dist
     to: client/dist
@@ -33,6 +38,9 @@ extraResources:
     to: ffmpeg
 
 win:
+  # v1.0.1：正式图标（build/icon.ico，暖纸底＋场记板）；之前没配 icon，构建日志
+  # 明确写了 "default Electron icon is used"，安装包和程序都用的 Electron 默认图标。
+  icon: build/icon.ico
   target:
     - target: nsis
       arch: [x64]
@@ -41,6 +49,8 @@ win:
 nsis:
   oneClick: true
   perMachine: false
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
   # allowToChangeInstallationDirectory 只能用于非 oneClick（assisted）安装器；
   # oneClick 安装器无目录选择页，P1 原稿的 true 会被 electron-builder 校验拒绝，
   # 故删除该行（P6 实测结论）。
