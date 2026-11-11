@@ -12466,7 +12466,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v5.69";
+const WORKSPACE_VERSION = "v5.70";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12478,9 +12478,15 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
-    version: "v5.69",
+    version: "v5.70",
     date: "2026-11-10",
     current: true,
+    text: "这一版只加一件事：生图面板顶上多了「生图接口总设置」——API 地址和密钥只填一次，全站通用：生图面板和封面生成都用它。先生效封面页单次填的，再是这个总设置，最后才用已连接的凭证；地址和 Key 可以分开填，只填一个、另一个用已有的。只存在你自己电脑上，刷新还在、换电脑要重填，不进备份、不进记录、日志里也没有；Key 在界面里只走密码框、永不明文。填错地址（比如 example.com 或者没加 https 的）在发请求之前就拦住。还带一个只读预检：不建任务、不花钱，先验一下 Key 和地址通不通；不想要了点「清除」，清掉就找不回来。封面记录没动，没有自动生图。",
+    features: "生图接口总设置（v5.70，exe 移植版 P5 搬入，client/src/imageapi.ts 与 space-4 逐字节一致；入口在生图面板顶部，全站只一份，填一次生图面板与封面生成都用；生效顺序：封面页单次输入（v3.83，原样保留、只存页面内存）＞总设置＞已连接 Geeknow 凭证；地址与 Key 逐项解析，只填地址用填的地址＋已连接 Key、只填 Key 用默认地址 https://api.geeknow.top＋填的 Key、两项都空回落已连接凭证；只存本机 localStorage（键 imagegen.apiSettings.v1），不进数据库/备份/记录/日志，Key 永不明文；带只读预检（不建任务不计费）与带确认的「清除」（明说 Key 清掉找不回）；生图面板与封面页各一行「当前用：…」来源行；example.com 与 http 地址护栏在发请求前拦截。探针：假 Key 预检回 401（证明真发到 api.geeknow.top 鉴权）、刷新后仍在、清除后回落、封面页单次覆盖优先。封面记录 id 43 未动；无新 migration、无服务端改动；未提交任何真实生图。本版只改客户端版本号与更新日志条目，未动服务端与 replication 基线。",
+  },
+  {
+    version: "v5.69",
+    date: "2026-11-10",
     text: "这一版按你 01:08 截图定的，只改监控页「存云端结果」悬浮窗的弹窗规矩，外加顺手堵上一个重复计数的口子。以前每次打开监控账号页面，这个结果窗都会自己弹出来（就是你截图里「成功 2 条，失败 0 条」那个），关掉下次打开还弹——原因是旧规矩靠浏览器里一份「已经弹过」的记录拦着，页面一打开读到上次的存云端结果、记录又对不上，就当新结果补弹一次。现在改成：这个窗只在你刚点完「存云端」或刚点了重试、这一轮在本页眼皮底下刚跑完时，弹一次给你看结果；点关闭就结束，之后刷新、切走再切回、重新打开监控页，都不会再自己弹。页面上方那条常驻的「后台存入完成：成功 N 条，失败 M 条」还在，随时点「看清单」就能把结果窗手动打开看，入口没丢。顺带核对了你问的那件事：上次结果里两行同名的《当你家在景区报了个旅游团回家》（夕颜）不是两条不同的视频撞名，而是同一条视频（同一个视频 ID）在第一批还没下载完时被又勾选入队了一次，队列里记了两遍、两遍都算成功（云端文件本身只存了一份，没多占地方）。这一版在入队的地方加了去重：同一个视频 ID 已经在这一批里（排队中、存入中、已成功、已失败都算）或者同一轮勾选里重复出现，只留一条，重复的自动跳过；已存好的云端视频一个没删。存云端功能本身、3 天留存清理、监控页其他功能、封面记录都没动，没有自动生图，没改任何已有数据。",
     features: "存云端结果窗不再每次打开监控页自动弹＋入队按 videoId 去重（v5.69，用户 2026-11-10 01:08 截图亲口定；客户端 monitorbench.tsx CloudQueueStatus 触发逻辑 + 特权层 privileged.ts cloudQueueEnqueue 去重 + actions.ts enqueueCloudVideos 描述同步 + App 版本/日志 + replication 基线；无 DB schema 变更、无 migration；NO real image generation submitted）：【根因】v4.69 自动弹窗靠 localStorage 键 cloud-queue-result-seen-v1 按 batch_id|finished_at 记已弹、挂载时读到已完成批次且本地没记过就补弹；实际运行环境里这份记录跨打开留不住（用户实证：每次打开都弹、关掉下次还弹）。【改法·弹窗】整段触发逻辑换成纯本页会话内状态机（autoPopRef：baselineBatch / armedBatch / poppedKey）：挂载见到的第一批只作基线、永不自动弹；只有本页亲眼看到该批 running（用户刚入队/刚重试）或该批是本页打开后才出现的新批次时才武装，武装批次跑完（!running 且 finished_at 到齐、total>0）弹一次并记 poppedKey，重试后再完成（finished_at 变）再弹新一轮；localStorage 结果窗触发整段删除（常量 CLOUD_QUEUE_RESULT_SEEN_KEY 一并下线），触发状态只活在本页 ref 里，关窗即了、刷新/切回不再触发。完成 toast 的 cloud-queue-toasted-batch-v1 口径未动；状态条本体与点开看清单（手动 setResultOpen）未动。【顺带核对·重复计数】查实队列当前批次（batch-1794129468118-znxa7r）两条成功均为同一 videoId 3x43wzfgn5pbck9（《当你家在景区报了个旅游团回家》夕颜，size_bytes 同为 10851612，条目 id 时间戳相差约 14 秒）——同一视频在第一批未下载完时被第二次入队追加进同一批次，不是两条不同 videoId 撞名；云端 state.json 按 videoId upsert、文件只存一份。【改法·去重】cloudQueueEnqueue 落盘前按 videoId 去重：保留条目（含运行中批次原有条目）已有的 videoId 跳过、本次清单内部重复只取第一条，返回 queued 改为实际入队条数（原为请求条数）；不删任何已有云端视频与队列数据。【不改】存云端批量功能本身、状态条常驻行、3 天留存清理、监控页其他功能、封面记录 id 43；不自动生图；不改任何已有数据。【删除清单】localStorage 结果窗触发逻辑与 CLOUD_QUEUE_RESULT_SEEN_KEY 常量下线；数据零删除。基线升 v5.69。【沙箱证据】见本版回执。",
   },

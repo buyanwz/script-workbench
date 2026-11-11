@@ -61,6 +61,11 @@ nsis:
   perMachine: false
   installerIcon: build/icon.ico
   uninstallerIcon: build/icon.ico
+  # v1.1.1：安装程序界面改中文（原来默认英文）：installerLanguages 只留
+  # 简体中文（electron-builder 认 zh_CN → NSIS SimpChinese），language 2052
+  # 是简体中文的 LCID（版本信息语言）；单语言不弹语言选择框。
+  installerLanguages: ["zh_CN"]
+  language: "2052"
   # allowToChangeInstallationDirectory 只能用于非 oneClick（assisted）安装器；
   # oneClick 安装器无目录选择页，P1 原稿的 true 会被 electron-builder 校验拒绝，
   # 故删除该行（P6 实测结论）。

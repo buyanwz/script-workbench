@@ -24,7 +24,8 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
+import type { MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import type { UpdateInfo } from "electron-updater";
 
@@ -390,8 +391,84 @@ function setupAutoUpdater(): void {
   app.on("before-quit", () => clearInterval(timer));
 }
 
+/** 中文应用菜单（v1.1.1）：Electron 默认菜单是英文 File / Edit / View / Window，
+ *  这里全部换成中文。编辑／视图／窗口里的操作直接用 Electron 内置 role
+ *  （行为与快捷键都原样保留，只改显示文字）；「检查更新」走与设置页
+ *  同一套检查逻辑，「关于」弹中文对话框。 */
+function setupApplicationMenu(): void {
+  const template: MenuItemConstructorOptions[] = [
+    {
+      label: "文件",
+      submenu: [{ label: "退出", role: "quit" }],
+    },
+    {
+      label: "编辑",
+      submenu: [
+        { label: "撤销", role: "undo" },
+        { label: "重做", role: "redo" },
+        { type: "separator" },
+        { label: "剪切", role: "cut" },
+        { label: "复制", role: "copy" },
+        { label: "粘贴", role: "paste" },
+        { label: "全选", role: "selectAll" },
+      ],
+    },
+    {
+      label: "视图",
+      submenu: [
+        { label: "重新加载", role: "reload" },
+        { label: "强制重新加载", role: "forceReload" },
+        { label: "切换开发者工具", role: "toggleDevTools" },
+        { type: "separator" },
+        { label: "放大", role: "zoomIn" },
+        { label: "缩小", role: "zoomOut" },
+        { label: "实际大小", role: "resetZoom" },
+        { type: "separator" },
+        { label: "切换全屏", role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "窗口",
+      submenu: [
+        { label: "最小化", role: "minimize" },
+        { label: "关闭", role: "close" },
+      ],
+    },
+    {
+      label: "帮助",
+      submenu: [
+        {
+          label: "检查更新",
+          click: () => {
+            void checkForUpdatesManually();
+          },
+        },
+        { type: "separator" },
+        {
+          label: "关于",
+          click: () => {
+            if (!mainWindow || mainWindow.isDestroyed()) return;
+            void dialog.showMessageBox(mainWindow, {
+              type: "info",
+              title: "关于",
+              message: "剧本创作工作台",
+              detail: `版本 ${app.getVersion()}\n本地运行的 AI 短剧剧本工作台。`,
+            });
+          },
+        },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  log(
+    "application menu:",
+    template.map((item) => item.label).join(" / "),
+  );
+}
+
 async function boot(): Promise<void> {
   await app.whenReady();
+  setupApplicationMenu();
   setupAutoUpdater();
   serverPort = await findFreePort(
     Number(process.env.PORT ?? DEFAULT_PORT),
@@ -420,23 +497,74 @@ ipcMain.handle("restart-service", async () => {
 
 // 自动更新（v1.1.0）：设置页手动检查；结果回设置页显示，下载完由
 // update-downloaded 事件弹原生提示（见 setupAutoUpdater）。
-ipcMain.handle("check-for-updates", async () => {
-  if (!app.isPackaged) return { status: "not-packaged" as const };
+type UpdateCheckOutcome =
+  | { status: "available"; version: string }
+  | { status: "up-to-date"; version: string }
+  | { status: "error"; error: string }
+  | { status: "not-packaged" };
+
+/** 查一次更新（设置页手动检查与菜单「检查更新」共用；只查不弹框）。 */
+async function checkForUpdatesOnce(): Promise<UpdateCheckOutcome> {
+  if (!app.isPackaged) return { status: "not-packaged" };
   try {
     const result = await autoUpdater.checkForUpdates();
     const latest = result?.updateInfo?.version ?? "";
     const current = app.getVersion();
     if (latest && latest !== current) {
-      return { status: "available" as const, version: latest };
+      return { status: "available", version: latest };
     }
-    return { status: "up-to-date" as const, version: current };
+    return { status: "up-to-date", version: current };
   } catch (err) {
     return {
-      status: "error" as const,
+      status: "error",
       error: err instanceof Error ? err.message : String(err),
     };
   }
-});
+}
+
+/** 菜单「帮助 → 检查更新」：查完用中文对话框告诉用户结果。 */
+async function checkForUpdatesManually(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const outcome = await checkForUpdatesOnce();
+  if (outcome.status === "not-packaged") {
+    await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: "检查更新",
+      message: "当前是开发版，无法检查更新。",
+      buttons: ["知道了"],
+    });
+    return;
+  }
+  if (outcome.status === "available") {
+    await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: "发现新版本",
+      message: `发现新版本 ${outcome.version}，正在后台下载`,
+      detail:
+        "下载完会提示你重启更新；也可以下次退出软件时自动装上。你的项目数据不受影响。",
+      buttons: ["知道了"],
+    });
+    return;
+  }
+  if (outcome.status === "up-to-date") {
+    await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: "检查更新",
+      message: `已经是最新版本（当前版本 ${outcome.version}）。`,
+      buttons: ["知道了"],
+    });
+    return;
+  }
+  await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    title: "检查更新失败",
+    message: "检查更新失败",
+    detail: `${outcome.error}。请检查网络后重试，也可以在生图面板的「软件更新」里再试一次。`,
+    buttons: ["知道了"],
+  });
+}
+
+ipcMain.handle("check-for-updates", async () => checkForUpdatesOnce());
 
 ipcMain.handle("get-app-version", () => app.getVersion());
 
