@@ -2,7 +2,7 @@
 //
 // 路由（单进程 Bun.serve，见 port-plan.md §保留-6）：
 //   GET  /health               健康检查（Electron 主进程等它通了再开窗口）
-//   POST /api/actions/:name    171 个服务端动作（Actions 对象遍历 key 自动注册）
+//   POST /api/actions/:name    172 个服务端动作（Actions 对象遍历 key 自动注册）
 //   GET  /blobs/:key           blob 直出（P2 走磁盘文件 + Range 支持）
 //   GET  / 与前端静态资源      client/dist/ 同源托管
 //   其余                     404 JSON

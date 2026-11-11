@@ -16,6 +16,7 @@ import { api, type ApiResponse } from "./api";
 import { CharacterBench, type CharWindow } from "./charbench";
 import { MonitorBench } from "./monitorbench";
 import { ArchiveBench } from "./archivebench";
+import { AssistantBench } from "./assistantbench";
 import { AnalysisBench, type AnalysisPrefill } from "./analysisbench";
 import { ModeSection } from "./modebench";
 import { ConfirmDialog } from "./confirm";
@@ -96,6 +97,7 @@ parseScript,
 rawLensIndexByFlat,
 resolveCharacterInfo,
 scriptContentHash,
+projectCharacterAliasReport,
 swapGenderWords,
 STRICT_CATEGORY_LABELS,
 storyboardScript,
@@ -213,7 +215,7 @@ export const tiltCardHandlers = {
   onMouseLeave: (_e: ReactMouseEvent<HTMLElement>) => {},
 };
 
-type Bench = "script" | "character" | "monitor" | "archive";
+type Bench = "script" | "character" | "monitor" | "archive" | "assistant";
 type ScriptWindow =
   | "mode"
   | "characters"
@@ -1309,6 +1311,13 @@ export function App() {
             >
               储存箱{archivedCount > 0 ? `（${archivedCount}）` : ""}
             </button>
+            <button
+              type="button"
+              aria-pressed={bench === "assistant"}
+              onClick={() => switchBench("assistant")}
+            >
+              AI助手
+            </button>
           </div>
           <div className="flex min-w-0 items-center">
             <label className="sr-only" htmlFor="topbar-project-select">
@@ -1340,7 +1349,9 @@ export function App() {
                   ? "人物资产储存库窗口列表"
                   : bench === "archive"
                     ? "储存箱窗口列表"
-                    : "监控账号窗口列表"
+                    : bench === "assistant"
+                      ? "AI助手窗口列表"
+                      : "监控账号窗口列表"
             }
           >
             {bench === "script"
@@ -1371,7 +1382,15 @@ export function App() {
                       () => {},
                       "当前窗口：项目储存箱",
                     )
-                  : MONITOR_WINDOWS.map((w) =>
+                  : bench === "assistant"
+                    ? navBtn(
+                        true,
+                        "AI助手",
+                        "能查项目、查模式、做封面分析",
+                        () => {},
+                        "当前窗口：AI助手",
+                      )
+                    : MONITOR_WINDOWS.map((w) =>
                       navBtn(
                         monitorWindow === w.id,
                         w.label,
@@ -1680,6 +1699,15 @@ export function App() {
                 requestAnimationFrame(scrollMainTop);
               }}
             />
+          </div>
+          )}
+
+          {/* AI助手（v5.74，原型 v0.1）：顶栏新页，聊天界面；对话
+              只存本页内存、刷新即没，挂载后不卸载保住当前对话。
+              v5.13 口径同其他台：首次切到才挂载。 */}
+          {mountedBenches.has("assistant") && (
+          <div hidden={bench !== "assistant"}>
+            <AssistantBench />
           </div>
           )}
 
@@ -9397,6 +9425,27 @@ function StepThree({
     void withWriteRetry(() => saveMut.mutateAsync(json)).catch(() => {});
   };
 
+  // v5.72 人物别名手动钉死 / 恢复自动（分镜页「人物称呼对照」面
+  // 板）：写 scriptDraft.aliasOverrides 并整份保存，保存通道与
+  // updateVoice 同口径。alias 为 null = 删掉这一位的钉死、恢复
+  // 自动推导；字符串（含空串）= 钉死为这个别名（空串 = 钉死为
+  // 无别名）。钉死值仍过 scriptlib 出口校验：填了别人的专名会
+  // 被拦下、面板标红说明，不会带着错名发出去。
+  const updateAliasOverride = (code: string, alias: string | null) => {
+    if (!scriptDraft) return;
+    const aliasOverrides = { ...(scriptDraft.aliasOverrides ?? {}) };
+    if (alias === null) {
+      delete aliasOverrides[code];
+    } else {
+      aliasOverrides[code] = alias;
+    }
+    const next: ScriptData = { ...scriptDraft, aliasOverrides };
+    const json = JSON.stringify(next);
+    syncScriptJson(json);
+    setScriptDraft(next);
+    void withWriteRetry(() => saveMut.mutateAsync(json)).catch(() => {});
+  };
+
   // v3.57 确认分镜 / 重新生成分镜共用进度条状态（GenProgress）：两步
   // ——①服务端校验并打包镜头 ②保存确认结果。服务端拦截或网络失败时
   // 停在当前步写清原因；超长弹三选一不是失败，进度条直接收起。
@@ -11281,6 +11330,7 @@ function StepThree({
                 onUpdateVoice={updateVoice}
                 onSyncCharBasics={syncCharBasics}
                 onUpdateFilmStyle={updateFilmStyle}
+                onSetAliasOverride={updateAliasOverride}
                 projectId={project.id}
                 charCards={project.characters}
               />
@@ -12466,7 +12516,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v5.70";
+const WORKSPACE_VERSION = "v5.74";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12478,9 +12528,33 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
+    version: "v5.74",
+    date: "2026-11-11",
+    current: true,
+    text: "这一版在顶栏加了一个新页「AI助手」（和剧本工作台、人物资产储存库并列），是先做出来让你亲手试效果的原型 v0.1：一个聊天框，接的是 Geeknow（文字模型 deepseek-v4-flash，用的是你已经连好的那份凭证 / 生图总设置里填的 Key，不用再填一遍）。它不只是聊天，还能真动手查工作台：你问它有哪些项目、某个项目里写了什么、几个模式各是什么状态、有哪些封面风格，它会去查了再回答，查过什么会在它的话下面用小灰字写出来（如「查了项目列表（3 个）」）。最要紧的是封面分析也能交给它：把一段剧本摘要发给它、说清项目和风格，它按老规矩只定三样（人物站位、标题位置、标题风格，人物只按代号绑参考图、不写长相穿搭），写好中英文提示词后会直接存进工作台对应项目 + 风格的草稿里，封面页第三步就能读到，不用再手动粘贴。它能碰的东西只有这几样：查项目、读项目、查模式、查封面风格、读和存封面草稿；删项目、改剧本、提交生图这些它一律做不了（工具就没给它）。先说清原型的边界：对话只存在这个页面里，刷新就没了（存下来以后再做）；聊天框只收文字、不能贴图；一轮对话里它最多查 8 次，到上限会停下来把已查到的先给你；Geeknow 那边报错（比如 Key 不对、模型不可用、超时）会把中文原因原样摆出来，不会假装成功。没动任何项目数据、封面记录，也没有自动生图。",
+    features: "AI助手聊天原型 v0.1（v5.74，用户 2026-11-11 定「先做一个接 Geeknow 跑一个助手看效果」、P7 一期暂停非取消；客户端新增 assistantbench.tsx 独立模块 + App.tsx 顶栏接线（Bench 加 assistant、新页签按钮、窗口标签与渲染区）+ 服务端 actions.ts 新动作 runAssistantChat + 特权层新契约 geeknowChatCompletion（GEEKNOW_PY 加 chat 模式）+ 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration——助手不存任何聊天记录（无状态），唯一写库是经工具存封面草稿（复用 cover_prompt_drafts 同口径）；NO real image/video generation submitted）：【入口与界面】顶栏 seg 加「AI助手」页签（Bench = assistant，v5.13 首次切到才挂载、挂载后 hidden 常驻保对话）；页面 = 消息列表 + 输入框 + 发送 + 清空对话，消息左右分（用户右 accent 底、助手左 surface-alt），助手工具轨迹在消息内以小灰字逐行显示（服务端 trace 原文），发送中禁用输入并显示「思考中…」，Enter 发送 / Shift+Enter 换行；提示行写明能查项目、查模式、做封面分析、解释功能、v0.1 是原型、对话只在页面内存刷新即没、只收文字不贴图。【服务端 agent 循环】runAssistantChat{messages（user/assistant 历史，≤40 条）, apiKey?, apiBase?}：系统提示词按定稿逐字写死（服务端 ASSISTANT_SYSTEM_PROMPT 四段）；循环 = 拼 system + 历史 → 特权层调 Geeknow /v1/chat/completions（tools + tool_choice auto）→ 有 tool_calls 逐个执行白名单工具、结果以 tool 角色喂回 → 无 tool_calls 即最终回答；工具调用总数上限 8 次（超限的调用回 tool 错误说明、再让模型基于已查信息作答并在回复前加注到上限），轮次保险丝 10 轮；每次模型调用超时 120 秒（timeoutSec 钳制、契约 timeoutMs 360s 容纳整轮）。【模型】文字用 deepseek-v4-flash（不用 deepseek-chat：实测 Geeknow 上 3 次全 503 model_not_found、/v1/models 无此 id；v4-flash 实测调通、实际跑 v4.1-flash 中转映射、原生 function calling 已实测返回 tool_calls）；模型名动作层常量 ASSISTANT_TEXT_MODEL，特权层 handler 允许宿主机环境变量 GEEKNOW_ASSISTANT_MODEL 覆盖；v0.1 不贴图、不走视觉模型。【工具白名单 6 个，ASSISTANT_TOOLS 注册表集中一处】list_projects（同 listProjects 口径查 projects + 人物数）、get_project{id}（loadProjectDetail，结果截断 24000 字喂回并注明）、get_cover_draft{projectId, styleId}、save_cover_draft{projectId, styleId, promptZh, promptEn}（与 saveCoverPromptDraft 同口径 upsert cover_prompt_drafts + invalidateQueries）、list_modes（ensureModes + loadModeSummary 同 listModeSummaries 口径）、list_cover_styles{styleId?}（直读 COVER_STYLES：不传回 11 个摘要 id/短名/说明、传了回完整规则）；白名单外工具名一律拒绝并回错误给模型；工具执行异常回错误结果不中断循环。【凭证与安全】与生图同口径：客户端发送时经 resolveImageApiConfig(loadImageApiSettings()) 读生图总设置（封面单次输入不参与），apiKey/apiBase 当次透传特权层，填 Key 用 Bearer、没填只对 geeknow 主机走已连接代理凭证（apply_auth 既有护栏）；不新增填 Key 入口；无 Key / 模型不存在 / 超时由特权层原样回中文错、动作回 ok:false + error、页面红字展示，绝不假装成功；Key 不进日志 / 记录 / 返回值（trace 只含工具轨迹文本）。【删除清单】零删除（纯新增：1 客户端模块 + 1 服务端动作 + 1 特权契约与 chat 模式 + 顶栏一处接线）。【不动】项目 / 剧本 / 模式 / 封面数据与全部既有动作、封面记录 id 43、生图禁令（助手无生图工具、验证不提交真实生图）、30 秒软顶、人物锁定、P7 服务器 / 登录 / 同步（暂停非取消，未动）。基线升 v5.74（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 一条）。真机待核：顶栏点「AI助手」能打开聊天页；问「有哪些项目」回真实列表且小灰字轨迹在；给一段剧本摘要 + 项目 + 风格做封面分析，助手回话并说存好了，去封面页对应风格第三步能读到草稿；无 Key 环境下发消息应原样报中文错。",
+  },
+  {
+    version: "v5.73",
+    date: "2026-11-11",
+    text: "这一版只改「人物称呼对照（别名）」这块面板的长相，你说它面积占比太大了——确实，上一版每个人占一整行、还带一个占满整行的大输入框，7 个人能占大半屏。这次重新设计成两态：平时收起，只剩标题下面一小条——一行小字说明，加一排小标签横着排（A → 短发男孩、F → 老奶奶、G → 钢铁胖……），每个标签后面带一个极小的来源标注（钉死过的标「钉死」），整块从大半屏缩到几行高；那段长说明收进了折叠里，点「别名是怎么认的、钉死是什么意思」才展开看。要改名字时点「改别名」，才展开成紧凑的双列小格子（手机上单列），每人一格：代号、窄输入框、「钉死」按钮一行排完，来源小字在格子里；改完点「收起」回到小条。被拦下过的别名照样优先露出来：小条里那个标签描红、原因用一行红字写在下面，不用展开也能看见，展开后格子里也有一份。认名的方法、出口校验、钉死存的位置全没动，项目 43 还是 F=老奶奶、G=钢铁胖，数据一个字没改，封面记录没动，也没有自动生图。",
+    features: "人物称呼对照面板紧凑化重设计（v5.73，用户 2026-11-11 实报「面积占比太大了，重新设计」；纯客户端 App.tsx AliasMappingPanel 单组件重写 + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无数据变更；NO real image/video generation submitted）：【旧版问题】v5.72 面板逐人一行：长说明段 + 每人「代号 → 全宽输入框 + 钉死按钮 + 来源」纵向堆叠，.field 的 width:100% 又盖过 w-36 工具类，输入框实际占满整行，7 人项目（43）占大半屏。【新版两态】收起态（默认）：一行 13px 说明 + flex-wrap 小标签排（rounded-full、代号 → 别名 + 11px 来源标注，钉死标「钉死」、无别名标「无别名」只用代号）+ 长说明进 help-fold 折叠（summary「别名是怎么认的、钉死是什么意思」）；展开编辑态：grid 双列（sm 以下单列）紧凑格，每格一行内代号 + 110px 窄输入框（行内 style 定宽，避开 .field 全宽覆盖）+「钉死」+ 钉死后「恢复自动」，来源 11px 小字同格；「改别名 / 收起」按钮带 aria-expanded。【校验提示不降级】report.issues 在收起态也完整露出：对应标签描红（border + 别名红字）、原因逐条一行红字 role=alert 并提示可点「改别名」改掉；展开态格内同样标红一份。【行为零变更】别名推导 projectCharacterAliasReport、来源文案、钉死/恢复自动走 onSetAliasOverride（aliasOverrides 落 scriptJson）、输入框与按钮的 aria-label 逐字保留（「X的别名」「钉死X的别名」「恢复X的别名自动推导」），只读态只有小条无展开按钮；草稿 drafts 逻辑不变。【删除清单】被取代的只有旧面板的纵向列表排版与长说明段（说明文字改写后进折叠，未删信息）。【不动】scriptlib 别名五层推导与出口校验、全部提示词出口、项目数据、封面记录 id 43、伴生造型错配问题（另立一案）、30 秒软顶、16:9、无字幕、人物锁定。基线升 v5.73（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 一条）。真机待核：项目 43 分镜页对照面板默认只占一小条、7 个标签齐（F 老奶奶、G 钢铁胖）；点「改别名」展开双列格、改一位钉死后收起，标签跟着变且刷新仍在。",
+  },
+  {
+    version: "v5.72",
+    date: "2026-11-11",
+    text: "这一版从根上修了项目 43 那个错位：人物表里 G 是钢铁胖，分镜提示词里 F 却被写成钢铁胖。根子在工作台认名字的方法——它看谁说话的镜头画面里反复出现某个名字，就把名字判给谁；F 训斥钢铁胖的镜头里全是「钢铁胖」，就这么把 G 的名字抢走了，而 G 身份开头那个「钢铁胖，」它以前根本不认。这次三层一起修：①认名方法改了——身份开头就是绰号的（比如「钢铁胖，」），直接认作这个人自己的专名、优先级最高；画面里提到别人的名字（喊话、训斥、群像里顺带提到的）再也不算数，登记在别人名下的名字永远不会判错人；职务词表补上老奶奶、导游这些词，F 现在认到的是「老奶奶」。②所有提示词出口（四档 Seedance、MiniMax H3 两版、通用版、Markdown、生成清单、复制）共用同一把校验锁：每次拼提示词前都断言一遍——别名不能是另一个人的专名、不能两个人共用一个名字；万一算错，那个名字会被拦下来、只发光秃秃的代号，绝不带着错名发出去。③分镜页人物表下面多了一块「人物称呼对照（别名）」：每个人认到的名字和认名的来源都列出来，你觉得哪个认错了可以直接改，点「钉死」以后就以你填的为准、不会再被自动改掉；要拦下过的名字会在那一行下面标红写清原因。项目 37 到 43 全部逐个验过：43 现在是 F=老奶奶、G=钢铁胖；38、39 的老结果（小帅、校长爸爸、校长这些）一个没变；40 的导游这次也认到了自己的称呼「导游」。项目数据一个字没改（别名本来就是打开时现算的），封面记录没动，也没有自动生图。说明一句：这次一起提过的那个造型错配问题（个别人的造型被资产库盖错）是另一套机制、不在这版里，另立一案处理。",
+    features: "别名错位根源修复：专名登记 + 出口校验 + 对照面板钉死（v5.72，用户 2026-11-11 报障并拍板五步稳健方案；纯客户端 scriptlib.ts 别名推导层与出口校验 + App.tsx 对照面板与保存接线 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更——别名钉死值存 scriptJson.aliasOverrides 随整份剧本 JSON 落库；存量数据一字未改；NO real image/video generation submitted）：【根因（函数级实证，解剖记录 id 12 本身正确）】别名第③层 aliasFromAddress 按「候选名在本人节拍画面出现次数 ≥2」对位：F 训斥 G 的两拍画面都写「钢铁胖」得 2 分、G 本人特写也 2 分打平，按代号序 F 先占名、G 落空；第①层不认身份首段裸绰号（G 的「钢铁胖，」）、第②/④层词表缺老奶奶等词致 F 拿不到自己的名字，三缺陷叠加。【改法①推导层】新增专名登记 claimedAliasNames：身份第一段专名（2–4 字、剥人口/机构泛称后仍有独特内容才登记，「学校校长」「青年男性」这类泛称＋职务短语不登记、回归旧口径）+ 本人台词自报（我是/我叫X）；新增第⓪层 aliasFromIdentityHead 最高优先（钢铁胖 = G）；第③层 aliasFromAddress 跳过登记在别人名下的候选（喊话/训斥/群像提及永不算分）；ALIAS_TITLE_WORDS 补老奶奶/老爷爷/奶奶/爷爷/大爷/大妈/导游/村民（长词在前），F 经职务层得「老奶奶」、项目 40 的 C 经同层得「导游」。【改法②出口校验】projectCharacterAliases 内部拆为 projectCharacterAliasReport（pairs + issues）：全部拼装出口（buildSingleGroupText / buildSingleGroupTextForModel 四档 / H3 两版 / buildMarkdown / buildGenChecklist / 镜头包 / 封面对位）都经它取别名，结果先过 aliasGateCheck——别名等于他人专名（登记表命中）、两 人共用同一别名、别名等于自己代号，任一命中整条拦下退回裸代号并记 issue；手动钉死值同样过校验。【改法③钉死与面板】ScriptData 新增可选 aliasOverrides（键在 = 以用户值为准、空串 = 钉死无别名；源头数据变化不自动清、面板「恢复自动」才删键）；StepThree 新增 updateAliasOverride（同 updateVoice 保存通道）；ScriptDocument 人物表下方新增「人物称呼对照（别名）」节（AliasMappingPanel）：逐人列代号 → 别名 + 来源（身份首段专名 / 身份现成称呼 / 亲属关系链 / 昵称特征对位 / 身份提炼 / 台词称呼对位 / 职务称呼 / 手动钉死），可编辑态给输入框 + 「钉死」+ 钉死后「恢复自动」，被拦项行下标红原因；只读态只展示。【回归（沙箱真实数据 37–43 + 合成夹具）】bun 直调改后 scriptlib + 沙箱隔离库：43 = A 短发男孩、B 短发女孩、C 白须爷爷、D 导游、E 骑车大爷、F 老奶奶、G 钢铁胖（断言 F≠钢铁胖、G=钢铁胖、F=老奶奶全过，Markdown / 清单 / Seedance 2.5 镜头 1 均含 G（钢铁胖）、不含 F（钢铁胖））；38 = 小帅/窦老师/校长爸爸/长发女孩/眼镜男孩、39 = 小帅/妈妈/小胖/短发女孩/校长，与 v4.96 / v5.21 定稿逐字一致；40 = 小帅/长发女孩/导游（新增）/老板娘/大伯，其余与 v5.26 定稿一致；37 E 回落校医（首段泛称收紧后与旧口径一致）；全库断言无别名等于他人专名、无两人共用别名；合成夹具：把 F 钉死为「钢铁胖」被校验拦下（F 退裸代号、issue 1 条）、G 本人钉死不受影响、F 钉死为「甘蔗林奶奶」正常生效。【删除清单】零删除（被取代的只有 projectCharacterAliases 内部实现与 aliasFromAddress 的入参）。【不动】解剖记录 id 12、项目 43 人物卡与剧本数据、封面记录 id 43、伴生造型错配问题（C/D/E 造型被一键匹配盖错、F 锁脸参考图错卡——另一套机制，本版未动、另立一案）、30 秒软顶、16:9、无字幕、人物锁定。基线升 v5.72（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 别名规则补 v5.72 口径、DATA-PLAN 一条）。真机待核：项目 43 分镜页对照面板 F 显示老奶奶、G 显示钢铁胖且来源为「身份首段专名」；改一位别名点钉死后刷新仍在、复制文本跟随；把 F 钉成钢铁胖应被标红拦下。",
+  },
+  {
+    version: "v5.71",
+    date: "2026-11-10",
+    text: "这一版在顶栏「生图」按钮旁边加了一个「同步到 GitHub」小按钮（只在 Muse 内部的工作台里有，大家用的程序里没有这个按钮）。以前工作台改了新版，要等每天晚上 10 点的定时同步、或者你在聊天里开口才推；现在你想什么时候推就点一下：点了先弹确认框说清——同步要十来分钟，推上去会自动出新版，大家的程序会自己升上来；工作台今天没改的话会告诉你不用同步。确认后同步任务就提交了，完成后会在聊天里告诉你结果和新版本号。按钮下面有一行小字写着上次同步的情况：成功了显示同步到的版本和时间，失败了显示失败原因，没更新时显示「上次检查：今天没改，不用同步」，还没同步过就写「还没同步过」。同步的是工作台的代码，不动你的项目数据；重复点也不会重复派任务。这个按钮和它背后的动作只在 Muse 内部存在，移植成大家用的程序时不带过去，程序里也不会显示。其他功能、数据（含封面记录）都没动，没有自动生图。",
+    features: "顶栏「同步到 GitHub」按钮（v5.71，用户 2026-11-10 亲口定；客户端新增 githubsync.tsx 独立模块 + App.tsx 顶栏接线一条 import 与一处渲染 + 服务端 actions.ts 三新动作 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration——同步状态复用 monitor_meta 键值表（键 github_sync_last_result、值 JSON）；NO real image generation submitted）：【仅 Muse 内部】GithubSyncButton 运行时判定 window.location.hostname 为 localhost / 127.0.0.1 时不渲染（exe 服务端跑本地、Muse 工作台不是 localhost）；按钮逻辑独立成模块 githubsync.tsx，移植时连同三动作一并排除、不进 exe。【顶栏】右侧按钮组「生图」旁加 btn btn-sm「同步到 GitHub」，按钮下方一行小字显示上次同步状态（成功「上次同步：{exe版本} · {月-日 时:分}」/ 失败「上次同步失败：{原因}」/ 无更新「上次检查：今天没改，不用同步」/ 无记录「还没同步过」），只在顶栏一处、不在其他页重复。【点按】点按先 ConfirmDialog 二次确认（大白话：同步要十来分钟、推上去自动出新版大家的程序自己升上来、今天没改会告诉你不用同步）→ 确认调 requestGithubSync → 成功 toast「同步任务已提交，完成后会在聊天里告诉你」，失败 toast 带真实原因不伪装成功；按钮忙碌态只在调动作的几秒（「正在提交…」），同步进行中的进度由聊天汇报、工作台只显示上次结果。【服务端三动作】requestGithubSync{dryRun?}：dryRun=true 只回 {ok:true, wouldSpawn:true, briefPath, dedupeKey} 不派生任务（沙箱验证专用）；正常调用 ctx.agent.spawnTask 派生同步任务（dedupeKey=github-sync 单飞、任务活跃或刚结束时重复点按不重复派生，expectsAction=recordGithubSyncResult，消息指向同步流程正本 ~/workspace/goals/goal-3/hidden_files/sync-brief.md——每日 22:00 定时任务与按钮点按执行同一份流程、不得各写一份），回 {ok:true, taskId}，派生失败回 ok:false + 真实原因。recordGithubSyncResult{status: success|failed|no-change, version?, message, syncedAtMs}：同步任务收尾回调，把最近一次结果写 monitor_meta 并 invalidateQueries 刷顶栏状态。getGithubSyncStatus：只读回最近一次记录、无记录回 null、值损坏按无记录。【不动】其他全部功能与数据、封面记录 id 43；不自动生图；同步的是代码、不同步用户项目数据。【删除清单】零删除（纯新增：1 模块 + 3 动作 + 顶栏按钮与状态行）。基线升 v5.71（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + shell 描述补句 + 新增功能规则「顶栏同步到 GitHub（v5.71）」、DATA-PLAN 一条）。【沙箱证据】见本版回执。",
+  },
+  {
     version: "v5.70",
     date: "2026-11-10",
-    current: true,
     text: "这一版只加一件事：生图面板顶上多了「生图接口总设置」——API 地址和密钥只填一次，全站通用：生图面板和封面生成都用它。先生效封面页单次填的，再是这个总设置，最后才用已连接的凭证；地址和 Key 可以分开填，只填一个、另一个用已有的。只存在你自己电脑上，刷新还在、换电脑要重填，不进备份、不进记录、日志里也没有；Key 在界面里只走密码框、永不明文。填错地址（比如 example.com 或者没加 https 的）在发请求之前就拦住。还带一个只读预检：不建任务、不花钱，先验一下 Key 和地址通不通；不想要了点「清除」，清掉就找不回来。封面记录没动，没有自动生图。",
     features: "生图接口总设置（v5.70，exe 移植版 P5 搬入，client/src/imageapi.ts 与 space-4 逐字节一致；入口在生图面板顶部，全站只一份，填一次生图面板与封面生成都用；生效顺序：封面页单次输入（v3.83，原样保留、只存页面内存）＞总设置＞已连接 Geeknow 凭证；地址与 Key 逐项解析，只填地址用填的地址＋已连接 Key、只填 Key 用默认地址 https://api.geeknow.top＋填的 Key、两项都空回落已连接凭证；只存本机 localStorage（键 imagegen.apiSettings.v1），不进数据库/备份/记录/日志，Key 永不明文；带只读预检（不建任务不计费）与带确认的「清除」（明说 Key 清掉找不回）；生图面板与封面页各一行「当前用：…」来源行；example.com 与 http 地址护栏在发请求前拦截。探针：假 Key 预检回 401（证明真发到 api.geeknow.top 鉴权）、刷新后仍在、清除后回落、封面页单次覆盖优先。封面记录 id 43 未动；无新 migration、无服务端改动；未提交任何真实生图。本版只改客户端版本号与更新日志条目，未动服务端与 replication 基线。",
   },
@@ -16149,12 +16223,196 @@ function StoryboardCharImageActions({
   );
 }
 
+/**
+ * v5.73 人物称呼对照面板（分镜页，人物表下方）——v5.72 初版逐人
+ * 一行大输入框，7 个人能占大半屏；本版改紧凑两态：
+ *   默认收起态：一行小字说明 + 一排可换行的小标签（代号 → 别名，
+ *   带极小的来源标注；钉死过的标「钉死」；被出口校验拦下过的标
+ *   签描红、原因在标签排下方用一行红字写清），整块高度只剩
+ *   标题下一小条。长说明收进 help-fold 折叠，点开才看。
+ *   展开编辑态：点「改别名」才展开——双列紧凑网格（手机单列），
+ *   每人一格：代号 + 窄输入框 + 「钉死」（钉死后多「恢复自动」）
+ *   一行排完，来源小字在格内第二行。改完点「收起」回到小条。
+ * 数据与行为不变：别名来源 projectCharacterAliasReport；钉死 /
+ * 恢复自动仍走 onSetAliasOverride（scriptJson.aliasOverrides）；
+ * 只读态（没有 onSetAliasOverride）只有小条、没有展开按钮。
+ */
+function AliasMappingPanel({
+script,
+mappingCtx,
+onSetAliasOverride,
+}: {
+script: ScriptData;
+mappingCtx?: LensMappingContext;
+onSetAliasOverride?: (code: string, alias: string | null) => void;
+}) {
+const report = projectCharacterAliasReport(script, mappingCtx);
+const codePairs = report.pairs.filter((p) =>
+/^[A-Za-z]{1,2}$/.test(p.code),
+);
+const [drafts, setDrafts] = useState<Record<string, string>>({});
+const [editing, setEditing] = useState(false);
+if (codePairs.length === 0) return null;
+const issueByCode = new Map(report.issues.map((i) => [i.code, i]));
+const isPinned = (code: string) =>
+Object.prototype.hasOwnProperty.call(script.aliasOverrides ?? {}, code);
+const sourceLabel = (p: (typeof codePairs)[number]) =>
+isPinned(p.code)
+? "钉死"
+: p.alias
+  ? (p.source ?? "自动")
+  : "无别名";
+return (
+<div aria-label="人物称呼对照">
+<div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+<p className="text-[13px] leading-5 text-[var(--dim)]">
+提示词里每个代号用的名字，工作台自动认的。
+</p>
+{onSetAliasOverride && (
+<button
+type="button"
+className="btn btn-sm"
+aria-expanded={editing}
+aria-label={editing ? "收起别名编辑" : "展开改别名"}
+onClick={() => setEditing((v) => !v)}
+>
+{editing ? "收起" : "改别名"}
+</button>
+)}
+</div>
+{!editing && (
+<ul className="mt-2 flex flex-wrap gap-1.5" aria-label="别名对照小条">
+{codePairs.map((p) => {
+const issue = issueByCode.get(p.code);
+return (
+<li
+key={p.code}
+className="inline-flex items-baseline gap-1.5 rounded-full border px-2.5 py-1 text-[13px] leading-5"
+style={{
+borderColor: issue ? "var(--bad)" : "var(--border)",
+background: "var(--surface-alt)",
+}}
+>
+<strong className="font-display">{p.code}</strong>
+<span aria-hidden="true" className="text-[var(--dim)]">
+→
+</span>
+<span style={issue ? { color: "var(--bad)" } : undefined}>
+{p.alias || "（只用代号）"}
+</span>
+<span className="text-[11px] text-[var(--dim)]">
+{sourceLabel(p)}
+</span>
+</li>
+);
+})}
+</ul>
+)}
+{!editing &&
+report.issues.map((i) => (
+<p
+key={i.code}
+className="mt-1.5 text-[13px] leading-5"
+style={{ color: "var(--bad)" }}
+role="alert"
+>
+{i.code} 的别名「{i.alias}」已被拦下：{i.reason}
+{onSetAliasOverride && !editing ? " 点「改别名」可以改掉。" : ""}
+</p>
+))}
+{editing && onSetAliasOverride && (
+<ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+{codePairs.map((p) => {
+const issue = issueByCode.get(p.code);
+const pinned = isPinned(p.code);
+const draft = drafts[p.code] ?? p.alias;
+return (
+<li
+key={p.code}
+className="rounded-[var(--radius)] border px-2.5 py-2"
+style={{
+borderColor: issue ? "var(--bad)" : "var(--border)",
+background: "var(--surface-alt)",
+}}
+>
+<div className="flex flex-wrap items-center gap-1.5">
+<strong className="font-display text-sm">{p.code}</strong>
+<span aria-hidden="true" className="text-[var(--dim)]">
+→
+</span>
+<input
+className="field field-sm"
+style={{ width: 110, flex: "0 1 110px" }}
+aria-label={`${p.code}的别名`}
+value={draft}
+onChange={(e) =>
+setDrafts((d) => ({ ...d, [p.code]: e.target.value }))
+}
+/>
+<button
+type="button"
+className="btn btn-sm"
+aria-label={`钉死${p.code}的别名`}
+disabled={draft.trim() === p.alias && pinned}
+onClick={() => onSetAliasOverride(p.code, draft.trim())}
+>
+钉死
+</button>
+{pinned && (
+<button
+type="button"
+className="btn btn-sm"
+aria-label={`恢复${p.code}的别名自动推导`}
+onClick={() => {
+onSetAliasOverride(p.code, null);
+setDrafts((d) => {
+const next = { ...d };
+delete next[p.code];
+return next;
+});
+}}
+>
+恢复自动
+</button>
+)}
+<span className="text-[11px] text-[var(--dim)]">
+{pinned
+? "手动钉死"
+: p.alias
+  ? `来源：${p.source ?? "自动推导"}`
+  : "没认出名字，只用代号"}
+</span>
+</div>
+{issue && (
+<p
+className="mt-1 text-[13px] leading-5"
+style={{ color: "var(--bad)" }}
+role="alert"
+>
+{issue.code} 的别名「{issue.alias}」已被拦下：{issue.reason}
+</p>
+)}
+</li>
+);
+})}
+</ul>
+)}
+<details className="help-fold">
+<summary>别名是怎么认的、钉死是什么意思</summary>
+<div className="help-fold-body">
+名字是工作台按每格标的来源自动认的；认错了可以在框里改，点「钉死」以后就以你填的为准、不会再被自动改掉（清空后钉死 = 钉死为无别名，只发裸代号）；点「恢复自动」回到自动认。名字要是撞上别人的专名会被出口校验拦下来，只发裸代号，原因会标红写在上面。
+</div>
+</details>
+</div>
+);
+}
 function ScriptDocument({
 script,
 mappingCtx,
 onUpdateVoice,
 onSyncCharBasics,
 onUpdateFilmStyle,
+onSetAliasOverride,
 projectId,
 charCards,
 }: {
@@ -16179,6 +16437,9 @@ pendingSnapshot?: CharPendingMap,
 ) => Promise<{ ok: boolean; message: string }>;
 /** v4.93：项目级「全片风格」设置保存（改一处全片镜头一起变）。 */
 onUpdateFilmStyle?: (text: string) => void;
+/** v5.72：人物别名手动钉死 / 恢复自动（人物称呼对照面板）；
+ * 不传时面板只读展示。 */
+onSetAliasOverride?: (code: string, alias: string | null) => void;
 /** v4.19：分镜页人物表条目末端的人物图操作（上传 / 生成）需要项目
  * id 与项目人物卡（按名对卡）；不传则人物表保持纯只读文档。 */
 projectId?: number;
@@ -18645,6 +18906,14 @@ aria-label="一键AI分析结果"
 )}
 </div>
 )}
+</DocSection>
+
+<DocSection title="人物称呼对照（别名）">
+<AliasMappingPanel
+script={script}
+mappingCtx={mappingCtx}
+onSetAliasOverride={onSetAliasOverride}
+/>
 </DocSection>
 
 {tempForDoc.length > 0 && (

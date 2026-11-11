@@ -147,6 +147,37 @@ export const privileged = definePrivilegedContracts({
     }),
     timeoutMs: 120_000,
   },
+  // v5.74 AI助手聊天：POST /v1/chat/completions（OpenAI 兼容口径，
+  // 原生 function calling）。凭证口径与生图提交完全相同：可选自填
+  // Key / 地址（生图总设置那份，客户端当次透传），不填走已连接的
+  // custom.geeknow 凭证；Key 只用于当次请求头，绝不落库、不进日
+  // 志与任何返回字段。对话与工具结果以 JSON 字符串整份透传（动
+  // 作层拼装、特权层只转发），单次模型调用超时由 timeoutSec 决定
+  // （动作层钳 120 秒），契约超时放宽到容纳一轮多次串行调用。
+  geeknowChatCompletion: {
+    request: z.object({
+      model: z.string().min(1).max(120),
+      messagesJson: z.string().min(2).max(600_000),
+      toolsJson: z.string().max(60_000),
+      timeoutSec: z.number().int().min(10).max(300),
+      apiKey: z.string().min(1).max(400).optional(),
+      apiBase: z.string().min(1).max(300).optional(),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      content: z.string().nullable(),
+      toolCalls: z.array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          arguments: z.string(),
+        }),
+      ),
+      finishReason: z.string().nullable(),
+      error: z.string().nullable(),
+    }),
+    timeoutMs: 360_000,
+  },
   geeknowPollImageTask: {
     request: z.object({
       taskId: z.string().min(1).max(300),
@@ -915,6 +946,69 @@ def main():
             return
         emit({"ok": True, "status": "pending", "imageBase64": None, "mimeType": None, "error": None})
         return
+    if mode == "chat":
+        # v5.74 AI助手：POST /v1/chat/completions，原生 function
+        # calling（tools + tool_choice auto）。凭证口径与 submit /
+        # probe 相同（effective_base + apply_auth）：填了 Key 用
+        # Key、没填只对 geeknow 主机走已连接代理凭证；Key 绝不打
+        # 印、绝不拼进任何错误文案。模型报错（没 Key / 模型不存
+        # 在 / 超时）原样带回中文错，绝不假装成功。
+        base, berr = effective_base(req_in)
+        if berr:
+            emit({"ok": False, "content": None, "toolCalls": [], "finishReason": None, "error": berr})
+            return
+        host = urllib.parse.urlparse(base).hostname or ""
+        try:
+            messages = json.loads(req_in.get("messagesJson") or "[]")
+            tools = json.loads(req_in.get("toolsJson") or "[]")
+        except Exception:
+            emit({"ok": False, "content": None, "toolCalls": [], "finishReason": None, "error": "对话内容格式不对，没能发给模型"})
+            return
+        payload = {"model": req_in.get("model") or "deepseek-v4-flash", "messages": messages}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        timeout = float(req_in.get("timeoutSec") or 120)
+        try:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            r = urllib.request.Request(base + "/v1/chat/completions", data=data, method="POST")
+            r.add_header("Content-Type", "application/json")
+            aerr = apply_auth(r, req_in, host)
+            if aerr:
+                emit({"ok": False, "content": None, "toolCalls": [], "finishReason": None, "error": aerr})
+                return
+            with opener().open(r, timeout=timeout) as resp:
+                body = read_json_response(resp)
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")[:400]
+            except Exception:
+                detail = ""
+            emit({"ok": False, "content": None, "toolCalls": [], "finishReason": None, "error": "Geeknow 接口返回 HTTP " + str(e.code) + ("：" + detail if detail else "")})
+            return
+        except Exception as e:
+            emit({"ok": False, "content": None, "toolCalls": [], "finishReason": None, "error": "调用 Geeknow 失败：" + type(e).__name__ + ": " + str(e)[:300]})
+            return
+        choices = body.get("choices") if isinstance(body, dict) else None
+        if not choices or not isinstance(choices[0], dict):
+            emit({"ok": False, "content": None, "toolCalls": [], "finishReason": None, "error": "Geeknow 没有返回回答：" + json.dumps(body, ensure_ascii=False)[:300]})
+            return
+        first = choices[0]
+        msg = first.get("message") if isinstance(first.get("message"), dict) else {}
+        content = msg.get("content")
+        if not isinstance(content, str):
+            content = None
+        tcs = []
+        raw_tcs = msg.get("tool_calls")
+        if isinstance(raw_tcs, list):
+            for tc in raw_tcs:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                tcs.append({"id": tc.get("id") or "", "name": fn.get("name") or "", "arguments": fn.get("arguments") or ""})
+        emit({"ok": True, "content": content, "toolCalls": tcs, "finishReason": first.get("finish_reason"), "error": None})
+        return
     if mode == "probe":
         # v3.84 只读鉴权预检：不存在的模型名提交到异步端点。鉴权
         # 先于选路：401/403 = 生效凭证被拒；其余 HTTP 错误（503
@@ -1618,6 +1712,10 @@ type GeeknowRaw = {
   secondDeltaE?: unknown;
   clusterShare?: unknown;
   confidence?: unknown;
+  // v5.74 AI助手 chat 模式的回传字段。
+  content?: unknown;
+  toolCalls?: unknown;
+  finishReason?: unknown;
   // v4.75 场景检测小助手（SCENE_DETECT_PY）的回传字段。
   method?: unknown;
   durationSec?: unknown;
@@ -1970,8 +2068,45 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
       error: typeof raw.error === "string" ? raw.error : null,
     };
   },
-  async geeknowPollImageTask(args, auth) {
+  async geeknowChatCompletion(args) {
     const raw = await runPythonHelper(GEEKNOW_PY, {
+      mode: "chat",
+      // 模型名可由宿主机环境变量覆盖（与既有口径一致：默认由动
+      // 作层给 deepseek-v4-flash，部署侧要换模型改环境变量即可）。
+      model: process.env.GEEKNOW_ASSISTANT_MODEL || args.model,
+      messagesJson: args.messagesJson,
+      toolsJson: args.toolsJson,
+      timeoutSec: args.timeoutSec,
+      apiKey: args.apiKey,
+      apiBase: args.apiBase,
+    });
+    const toolCalls = Array.isArray(raw.toolCalls)
+      ? raw.toolCalls
+          .filter(
+            (t): t is Record<string, unknown> =>
+              typeof t === "object" && t !== null,
+          )
+          .map((t) => ({
+            id: typeof t.id === "string" ? t.id : "",
+            name: typeof t.name === "string" ? t.name : "",
+            arguments: typeof t.arguments === "string" ? t.arguments : "",
+          }))
+      : [];
+    return {
+      ok: raw.ok === true,
+      content: typeof raw.content === "string" ? raw.content : null,
+      toolCalls,
+      finishReason:
+        typeof raw.finishReason === "string" ? raw.finishReason : null,
+      error:
+        typeof raw.error === "string"
+          ? raw.error
+          : raw.ok === true
+            ? null
+            : "Geeknow 对话调用失败",
+    };
+  },
+  async geeknowPollImageTask(args, auth) {    const raw = await runPythonHelper(GEEKNOW_PY, {
       mode: "poll",
       taskId: args.taskId,
       downloadTimeoutSec: args.downloadTimeoutSec,

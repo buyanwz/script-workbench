@@ -45,6 +45,7 @@ type ViralIssue
 } from "./rules";
 import {
 buildCoverPrompts,
+COVER_STYLES,
 coverStyleById,
 GEEKNOW_PROMPT_HARD_LIMIT, SUBMIT_PROMPT_BUDGET,
 type CoverPlan
@@ -1620,6 +1621,9 @@ confirmedAt: z.string().optional(),
 // name. The base voice is extracted client-side from the character's
 // note / line emotions; this map only stores user overrides.
 voiceMap: z.record(z.string(), z.string().max(300)).optional(),
+// v5.72 人物别名手动钉死（分镜页「人物称呼对照」面板），keyed by
+// 人物代号：键在 = 别名以用户填的值为准（空串 = 钉死为无别名）。
+aliasOverrides: z.record(z.string(), z.string().max(40)).optional(),
 // 临时人物表处理状态（转正之外的处置：群演 / 已删除 / 已映射，及手填的
 // 造型/音色/语气线索），keyed by 临时人物名。是剧本数据的一部分，随
 // 保存一起存、随快照一起恢复。转正不写这里——转正直接进人物表行。
@@ -6092,6 +6096,343 @@ function parseStoredImageLook(json: string): ImageLookData | null {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// v5.74 AI助手（原型 v0.1）：顶栏新页「AI助手」的服务端 agent 循环。
+// 客户端把对话历史整份发来（无状态，服务端不存聊天记录），这里跑
+// 「系统提示词 + 工具定义 → 调 Geeknow → 有 tool_calls 就执行白
+// 名单工具 → 结果喂回模型 → 直到模型给最终回答」的循环，回最终
+// 回答 + 工具调用轨迹（页面在助手消息里用小灰字展示）。
+// 模型：deepseek-v4-flash（实测 deepseek-chat 在 Geeknow 上 503
+// model_not_found、/v1/models 里也没有，故不用；v4-flash 实测能
+// 调通且原生 function calling 可用）。每次模型调用超时 120 秒。
+// 工具白名单只有 6 个（只读 5 + 封面草稿写 1），注册表集中在
+// ASSISTANT_TOOLS 一处：以后加工具 = 加一条定义 + 一个执行分支。
+// 每轮对话工具调用上限 8 次，超了就停，把已查到的先给用户。
+// 凭证与既有 AI / 生图动作同口径：客户端透传生图总设置的 Key /
+// 地址（可空），不填走已连接的 Geeknow 凭证，不新增填 Key 入
+// 口；无 Key / 模型不存在 / 超时一律原样报中文错，绝不假装成
+// 功；Key 绝不写进日志、记录与返回值。
+// ---------------------------------------------------------------------------
+
+const ASSISTANT_SYSTEM_PROMPT = [
+  "你是剧本工作台的 AI 助手。你面前是用户的剧本工作台（写 AI 短剧剧本、分镜、封面）。你只能通过工具查数据、做事；没有工具结果支撑的事不要编，不知道就直说不知道。回答用中文，简短直接，只回答用户问的事。",
+  "工具调用规则：需要查数据或存东西时，调对应的工具；一次可以调多个工具；工具结果回来后继续回答，直到能给用户最终答复；不要自己编项目、人物、数字。",
+  "封面分析规则（重要）：只定三样——人物站位、标题位置、标题风格；标题文字从主梗里提炼；人物只按「代号（称呼）= 参考图 #N」绑定，不写任何人物的长相、造型、穿搭文字（形象以用户的资产图为准）；写好中英文提示词后，必须调存封面草稿工具按项目 + 风格存进工作台，然后告诉用户存好了。",
+  "不许做的事：不许删项目、改剧本、提交生图（这些工具不在你的白名单里）；不许把 Key、凭证写进回答。",
+].join("\n");
+
+const ASSISTANT_TEXT_MODEL = "deepseek-v4-flash";
+const ASSISTANT_MAX_TOOL_CALLS = 8;
+const ASSISTANT_MODEL_TIMEOUT_SEC = 120;
+/** 工具结果喂回模型前的截断线：项目详情可能很长，截断只影响模型
+ * 这次能看到的量，轨迹与回答里会如实说明，不假装看全了。 */
+const ASSISTANT_TOOL_RESULT_LIMIT = 24_000;
+
+const ASSISTANT_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "list_projects",
+      description:
+        "列出工作台里的全部剧本项目（id、名称、人物数、是否有剧本、是否有大纲）。用户问有哪些项目，或需要先知道项目 id 时调用。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_project",
+      description:
+        "读取一个项目的完整详情（基础设置、人物卡、故事大纲与剧本）。需要看某项目内容时调用。",
+      parameters: {
+        type: "object",
+        properties: { id: { type: "integer", description: "项目 id" } },
+        required: ["id"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_cover_draft",
+      description:
+        "读取某项目某风格已存的封面提示词草稿（中文 + 英文）。styleId 用 list_cover_styles 返回的风格 id。",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "integer", description: "项目 id" },
+          styleId: { type: "string", description: "封面风格 id" },
+        },
+        required: ["projectId", "styleId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_cover_draft",
+      description:
+        "把封面提示词草稿按项目 + 风格存进工作台（封面页第三步会读到）。做完封面分析、写好中英文提示词后必须调用。",
+      parameters: {
+        type: "object",
+        properties: {
+          projectId: { type: "integer", description: "项目 id" },
+          styleId: { type: "string", description: "封面风格 id" },
+          promptZh: { type: "string", description: "中文封面提示词" },
+          promptEn: { type: "string", description: "英文封面提示词" },
+        },
+        required: ["projectId", "styleId", "promptZh", "promptEn"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_modes",
+      description: "列出 5 个模式的摘要（名称、状态、稳定度、进度、基因标签）。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_cover_styles",
+      description:
+        "列出封面风格：不传 styleId 返回全部风格的摘要（id、短名、说明）；传 styleId 返回该风格的完整规则。",
+      parameters: {
+        type: "object",
+        properties: {
+          styleId: { type: "string", description: "封面风格 id（可选）" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+] as const;
+
+type AssistantToolOutcome = { resultText: string; trace: string };
+
+function truncateToolResult(text: string): string {
+  if (text.length <= ASSISTANT_TOOL_RESULT_LIMIT) return text;
+  return `${text.slice(0, ASSISTANT_TOOL_RESULT_LIMIT)}\n…（内容太长已截断，只给了前 ${ASSISTANT_TOOL_RESULT_LIMIT} 字）`;
+}
+
+/** AI助手工具执行：与对应既有动作同口径读写同一批表，绝不越过
+ * 白名单（删项目 / 改剧本 / 提交生图 / 改设置一律没有分支）。 */
+async function executeAssistantTool(
+  ctx: Ctx,
+  name: string,
+  rawArgs: Record<string, unknown>,
+): Promise<AssistantToolOutcome> {
+  const db = ctx.db<typeof schema>();
+  const intArg = (v: unknown): number | null =>
+    typeof v === "number" && Number.isInteger(v) ? v : null;
+  const strArg = (v: unknown): string =>
+    typeof v === "string" ? v.trim() : "";
+  switch (name) {
+    case "list_projects": {
+      const rows = await db
+        .select()
+        .from(schema.projects)
+        .orderBy(desc(schema.projects.updatedAt));
+      const charRows = await db
+        .select({ projectId: schema.characters.projectId })
+        .from(schema.characters);
+      const charCounts = new Map<number, number>();
+      for (const r of charRows) {
+        charCounts.set(r.projectId, (charCounts.get(r.projectId) ?? 0) + 1);
+      }
+      const projects = rows.map((p) => ({
+        id: p.id,
+        name: p.name,
+        characterCount: charCounts.get(p.id) ?? 0,
+        hasScript: p.scriptJson != null,
+        hasOutline: p.outline.trim().length > 0,
+        archived: p.archived === 1,
+      }));
+      return {
+        resultText: JSON.stringify({ projects }),
+        trace: `查了项目列表（${projects.length} 个）`,
+      };
+    }
+    case "get_project": {
+      const id = intArg(rawArgs.id);
+      if (id == null) {
+        return {
+          resultText: JSON.stringify({ error: "参数 id 必须是整数" }),
+          trace: "读项目详情失败（参数不对）",
+        };
+      }
+      const detail = await loadProjectDetail(ctx, id);
+      if (!detail) {
+        return {
+          resultText: JSON.stringify({ error: `项目 ${id} 不存在` }),
+          trace: `读了项目详情（#${id}，不存在）`,
+        };
+      }
+      return {
+        resultText: truncateToolResult(JSON.stringify({ project: detail })),
+        trace: `读了项目详情（#${id}）`,
+      };
+    }
+    case "get_cover_draft": {
+      const projectId = intArg(rawArgs.projectId);
+      const styleId = strArg(rawArgs.styleId);
+      if (projectId == null || !styleId) {
+        return {
+          resultText: JSON.stringify({ error: "参数 projectId / styleId 不对" }),
+          trace: "读封面草稿失败（参数不对）",
+        };
+      }
+      const rows = await db
+        .select()
+        .from(schema.coverPromptDrafts)
+        .where(
+          and(
+            eq(schema.coverPromptDrafts.projectId, projectId),
+            eq(schema.coverPromptDrafts.styleId, styleId),
+          ),
+        )
+        .limit(1);
+      const row = rows[0];
+      return {
+        resultText: JSON.stringify(
+          row
+            ? { found: true, promptZh: row.promptZh, promptEn: row.promptEn }
+            : { found: false, promptZh: "", promptEn: "" },
+        ),
+        trace: `读了封面草稿（项目 ${projectId} · 风格 ${styleId}${row ? "" : "，暂无草稿"}）`,
+      };
+    }
+    case "save_cover_draft": {
+      const projectId = intArg(rawArgs.projectId);
+      const styleId = strArg(rawArgs.styleId);
+      const promptZh = typeof rawArgs.promptZh === "string" ? rawArgs.promptZh : "";
+      const promptEn = typeof rawArgs.promptEn === "string" ? rawArgs.promptEn : "";
+      if (projectId == null || !styleId) {
+        return {
+          resultText: JSON.stringify({ error: "参数 projectId / styleId 不对" }),
+          trace: "存封面草稿失败（参数不对）",
+        };
+      }
+      const proj = await db
+        .select()
+        .from(schema.projects)
+        .where(eq(schema.projects.id, projectId))
+        .limit(1);
+      if (!proj[0]) {
+        return {
+          resultText: JSON.stringify({ error: `项目 ${projectId} 不存在，没存` }),
+          trace: `存封面草稿失败（项目 ${projectId} 不存在）`,
+        };
+      }
+      const existing = await db
+        .select()
+        .from(schema.coverPromptDrafts)
+        .where(
+          and(
+            eq(schema.coverPromptDrafts.projectId, projectId),
+            eq(schema.coverPromptDrafts.styleId, styleId),
+          ),
+        )
+        .limit(1);
+      if (existing[0]) {
+        await db
+          .update(schema.coverPromptDrafts)
+          .set({ promptZh, promptEn, updatedAt: new Date() })
+          .where(eq(schema.coverPromptDrafts.id, existing[0].id));
+      } else {
+        await db.insert(schema.coverPromptDrafts).values({
+          projectId,
+          styleId,
+          promptZh,
+          promptEn,
+        });
+      }
+      ctx.invalidateQueries();
+      return {
+        resultText: JSON.stringify({ ok: true, saved: true }),
+        trace: `存了封面草稿（项目 ${projectId} · 风格 ${styleId}）`,
+      };
+    }
+    case "list_modes": {
+      await ensureModes(ctx);
+      const modes: ModeSummary[] = [];
+      for (const seed of MODE_SEEDS) {
+        const s = await loadModeSummary(ctx, seed.id);
+        if (s) modes.push(s);
+      }
+      return {
+        resultText: JSON.stringify({ modes }),
+        trace: `查了模式列表（${modes.length} 个）`,
+      };
+    }
+    case "list_cover_styles": {
+      const styleId = strArg(rawArgs.styleId);
+      if (!styleId) {
+        const styles = COVER_STYLES.map((s) => ({
+          id: s.id,
+          shortName: s.shortNameZh,
+          label: s.label,
+          desc: s.shortDesc,
+        }));
+        return {
+          resultText: JSON.stringify({ styles }),
+          trace: `查了封面风格列表（${styles.length} 个）`,
+        };
+      }
+      const style = COVER_STYLES.find((s) => s.id === styleId);
+      if (!style) {
+        return {
+          resultText: JSON.stringify({
+            error: `没有这个风格 id：${styleId}。可用 id：${COVER_STYLES.map((s) => s.id).join("、")}`,
+          }),
+          trace: `查封面风格失败（没有 ${styleId}）`,
+        };
+      }
+      return {
+        resultText: truncateToolResult(
+          JSON.stringify({
+            style: {
+              id: style.id,
+              label: style.label,
+              shortName: style.shortNameZh,
+              desc: style.shortDesc,
+              analysisSummary: style.analysisSummary,
+              traits: style.traits,
+              rulesZh: style.rulesZh,
+              rulesEn: style.rulesEn,
+              negativeZh: style.negativeZh,
+              negativeEn: style.negativeEn,
+              digestZh: style.digestZh,
+              paletteZh: style.paletteZh,
+            },
+          }),
+        ),
+        trace: `读了封面风格「${style.label}」的完整规则`,
+      };
+    }
+    default:
+      return {
+        resultText: JSON.stringify({ error: `工具 ${name} 不在白名单里，不能调用` }),
+        trace: `拒绝了白名单外的工具（${name}）`,
+      };
+  }
+}
+
+const assistantChatResponse = z.object({
+  ok: z.boolean(),
+  error: z.string().nullable(),
+  reply: z.string(),
+  trace: z.array(z.string()),
+});
+
+type AssistantChatResult = z.infer<typeof assistantChatResponse>;
+
 
 export const Actions = {
 listProjects: defineAction({
@@ -17698,6 +18039,133 @@ description: "读取封面提示词草稿：按项目 + 风格回中英文提示
       promptEn: row.promptEn,
       updatedAtMs: row.updatedAt ? row.updatedAt.getTime() : null,
     };
+  },
+}),
+
+runAssistantChat: defineAction({
+  description:
+    "AI助手聊天（原型 v0.1）：无状态 agent 循环——客户端发对话历史，服务端用 deepseek-v4-flash + 6 个白名单工具（查项目/项目详情/封面草稿读写/模式/封面风格）跑到最终回答，回回答与工具轨迹；服务端不存聊天记录。",
+  request: z.object({
+    messages: z
+      .array(
+        z.object({
+          role: z.enum(["user", "assistant"]),
+          content: z.string().min(1).max(20_000),
+        }),
+      )
+      .min(1)
+      .max(40),
+    // 生图总设置那份凭证（可空）：填了用它、没填走已连接凭证；
+    // 只当次透传，绝不落库、不进返回值。
+    apiKey: z.string().min(1).max(400).optional(),
+    apiBase: z.string().min(1).max(300).optional(),
+  }),
+  response: assistantChatResponse,
+  privileged: [privileged.geeknowChatCompletion],
+  async handler(ctx, args): Promise<AssistantChatResult> {
+    const fail = (error: string): AssistantChatResult => ({
+      ok: false,
+      error,
+      reply: "",
+      trace: [],
+    });
+    type WireMessage = Record<string, unknown>;
+    const wire: WireMessage[] = [
+      { role: "system", content: ASSISTANT_SYSTEM_PROMPT },
+      ...args.messages.map((m) => ({ role: m.role, content: m.content })),
+    ];
+    const toolsJson = JSON.stringify(ASSISTANT_TOOLS);
+    const trace: string[] = [];
+    let toolCallsUsed = 0;
+    let hitLimit = false;
+    // 循环保险丝：工具轮次最多 10 轮（每轮可多个调用，总数另有
+    // 8 次上限），防模型反复要工具把请求拖死。
+    for (let round = 0; round < 10; round++) {
+      let r;
+      try {
+        r = await ctx.executePrivileged(privileged.geeknowChatCompletion, {
+          model: ASSISTANT_TEXT_MODEL,
+          messagesJson: JSON.stringify(wire),
+          toolsJson: hitLimit ? "[]" : toolsJson,
+          timeoutSec: ASSISTANT_MODEL_TIMEOUT_SEC,
+          apiKey: args.apiKey,
+          apiBase: args.apiBase,
+        });
+      } catch (e) {
+        return fail(
+          `AI助手调用失败：${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      if (!r.ok) {
+        return fail(r.error ?? "Geeknow 调用失败，没有更多说明");
+      }
+      if (r.toolCalls.length === 0 || hitLimit) {
+        const reply = (r.content ?? "").trim();
+        if (!reply) {
+          return fail("模型这次没有给出回答，请再发一次试试。");
+        }
+        return {
+          ok: true,
+          error: null,
+          reply: hitLimit
+            ? `这次查的东西比较多，工具调用到上限了（${ASSISTANT_MAX_TOOL_CALLS} 次），先把已查到的给你：\n${reply}`
+            : reply,
+          trace,
+        };
+      }
+      // 有 tool_calls：先把助手这条带调用的消息原样放回对话，再逐
+      // 个执行并把结果以 tool 角色喂回。
+      wire.push({
+        role: "assistant",
+        content: r.content ?? "",
+        tool_calls: r.toolCalls.map((t) => ({
+          id: t.id,
+          type: "function",
+          function: { name: t.name, arguments: t.arguments },
+        })),
+      });
+      for (const call of r.toolCalls) {
+        toolCallsUsed += 1;
+        if (toolCallsUsed > ASSISTANT_MAX_TOOL_CALLS) {
+          hitLimit = true;
+          wire.push({
+            role: "tool",
+            tool_call_id: call.id,
+            content: JSON.stringify({
+              error: `工具调用已到上限（${ASSISTANT_MAX_TOOL_CALLS} 次），这次没有执行，请基于已查到的信息直接回答用户`,
+            }),
+          });
+          continue;
+        }
+        let parsed: Record<string, unknown> = {};
+        try {
+          const p: unknown = JSON.parse(call.arguments || "{}");
+          if (typeof p === "object" && p !== null) {
+            parsed = p as Record<string, unknown>;
+          }
+        } catch {
+          parsed = {};
+        }
+        let outcome: AssistantToolOutcome;
+        try {
+          outcome = await executeAssistantTool(ctx, call.name, parsed);
+        } catch (e) {
+          outcome = {
+            resultText: JSON.stringify({
+              error: `工具执行失败：${e instanceof Error ? e.message : String(e)}`,
+            }),
+            trace: `工具 ${call.name} 执行失败`,
+          };
+        }
+        trace.push(outcome.trace);
+        wire.push({
+          role: "tool",
+          tool_call_id: call.id,
+          content: outcome.resultText,
+        });
+      }
+    }
+    return fail("这轮对话工具调用太多次了，已停下；把问题拆小一点再问我。");
   },
 }),
 

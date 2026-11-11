@@ -575,6 +575,14 @@ export interface ScriptData {
    */
   voiceMap?: Record<string, string>;
   /**
+   * v5.72 人物别名手动钉死（分镜页「人物称呼对照」面板）：keyed by
+   * 人物代号。键存在 = 别名以用户填的值为准（空字符串 = 钉死为无
+   * 别名），自动推导不再覆盖这一位；键不存在 = 继续自动推导。用
+   * 户改人物的身份 / 台词等源头数据不会自动清掉钉死值——要恢复
+   * 自动，在面板里点「恢复自动」。旧稿没有这个键 = 全部自动推导。
+   */
+  aliasOverrides?: Record<string, string>;
+  /**
    * v4.83 道具资产映射（AI解剖一键套用写入）：解剖结果里的物品
    * 资产清单（名称 / 描述 / 中文生图提示词）。分镜输出的「道具
    * 映射」块从这里取（经 LensMappingContext.props 或直接读本字段）；
@@ -2300,6 +2308,108 @@ function aliasVisualMentions(visual: string, cand: string): boolean {
 }
 
 /**
+ * v5.72 专名登记：每个人物「自己的名字」——①身份第一段就是绰号 /
+ * 专名本名时整段就是（如 G 的身份「钢铁胖，穿钢铁侠铠甲…」第一
+ * 段「钢铁胖」）；②本人在自己台词里自报的名字（「我是X」「我叫
+ * X」）。登记过的名字只属于登记人：第③层对位永远不许把它判给别
+ * 人，出口校验（aliasGateCheck）也按这份登记拦截。这是项目 43
+ * 错位的根源修复——旧口径里「钢铁胖」没有任何一层认作 G 的专
+ * 名，F 训斥 G 的两拍画面里都写了「钢铁胖」，第③层按出现次数
+ * 把它判给了先到先得的 F。
+ */
+const ALIAS_HEAD_GENERIC = new Set([
+  "村民", "女性", "男性", "青年", "少年", "少女", "老人", "老奶奶",
+  "老爷爷", "奶奶", "爷爷", "大爷", "大妈", "导游", "学生", "老师",
+  "孩子", "小孩", "男人", "女人", "主角", "村民组", "路人",
+]);
+
+/** 身份第一段（顿号 / 逗号 / 分号切分的第一段）原文。 */
+function aliasIdentityHead(identity: string): string {
+  return (identity ?? "").split(/[，,、；;。]/)[0]?.trim() ?? "";
+}
+
+/** 身份第一段是不是一个可登记的专名（2–4 字纯汉字、无「的」、
+ * 不是泛称、不是停用词）。v5.72 回归收紧：首段是「泛称＋职务 /
+ * 人口词」的描述短语时不是专名——先剥掉人口 / 机构类泛称词
+ * （学校 / 青年 / 男性…），剥完为空、或只剩一个职务词（如「学
+ * 校校长」剥完剩「校长」、「青年男性」剥完为空）就不登记，交
+ * 给后面的提炼 / 职务层按旧口径取名（项目 38 的 C 仍是校长爸
+ * 爸、项目 39 的 E 仍是校长）；「钢铁胖」「白须爷爷」「骑车大
+ * 爷」这类带独特修饰的首段剥完仍有独特内容，照常登记。 */
+const ALIAS_HEAD_GENERIC_TOKENS = [
+  "学校", "青年", "成年", "中年", "老年", "少年", "男性", "女性",
+  "男人", "女人", "男孩", "女孩", "男生", "女生", "小学生",
+  "中学生", "大学生", "儿童",
+];
+
+function aliasHeadProperName(info: LensMappingCharInfo): string {
+  const head = aliasIdentityHead(info.role ?? "");
+  if (head.length < 2 || head.length > 4) return "";
+  if (!/^[一-龥]+$/.test(head)) return "";
+  if (head.includes("的")) return "";
+  if (ALIAS_HEAD_GENERIC.has(head)) return "";
+  if (ALIAS_ADDRESS_STOPWORDS.has(head)) return "";
+  if (/老师$/.test(head)) return "";
+  let rest = head;
+  for (const t of ALIAS_HEAD_GENERIC_TOKENS) {
+    rest = rest.split(t).join("");
+  }
+  if (!rest) return "";
+  if (rest !== head && ALIAS_TITLE_WORDS.includes(rest)) return "";
+  // 职务词表在本函数之后才声明，运行时调用时已完成模块求值。
+  return head;
+}
+
+/** 全片专名登记表：名字 → 拥有者代号。先登记者优先，撞名时后
+ * 来者不登记（出口校验会再拦一道）。 */
+export function claimedAliasNames(
+  script: ScriptData,
+  chars: LensMappingCharInfo[],
+): Map<string, string> {
+  const claimed = new Map<string, string>();
+  const claim = (name: string, code: string) => {
+    const t = (name ?? "").trim();
+    if (t && !claimed.has(t)) claimed.set(t, code);
+  };
+  for (const c of chars) {
+    const head = aliasHeadProperName(c);
+    if (head) claim(head, c.name);
+    if (!isCodeCharacterName(c.name)) claim(c.name, c.name);
+  }
+  // 本人台词自报（「我是X / 我叫X」）：只认说话人本人的节拍。
+  const groups = storyboardScript(script).groups;
+  for (const c of chars) {
+    for (const g of groups) {
+      for (const b of g.beats) {
+        if ((b.speaker ?? "").trim() !== c.name) continue;
+        for (const m of (b.line ?? "").matchAll(
+          /(?:我是|我叫|俺是|咱是)([一-龥]{2,4})/g,
+        )) {
+          const cand = (m[1] ?? "").trim();
+          if (cand && !ALIAS_ADDRESS_STOPWORDS.has(cand)) {
+            claim(cand, c.name);
+          }
+        }
+      }
+    }
+  }
+  return claimed;
+}
+
+/** 第⓪层（v5.72 最高优先）：身份第一段就是本人的绰号 / 专名时
+ * 直接认作本人的别名（如「钢铁胖，…」→ 钢铁胖 = G）。 */
+function aliasFromIdentityHead(
+  info: LensMappingCharInfo,
+  claimed: Map<string, string>,
+): string {
+  const head = aliasHeadProperName(info);
+  if (!head) return "";
+  const owner = claimed.get(head);
+  if (owner && owner !== info.name) return "";
+  return head;
+}
+
+/**
  * 第③层对位：候选名归给「自己的节拍画面里最常出现这个名字」的人
  * （解剖分镜的画面描述用真名写人，如「小帅特写」）。至少出现 2 次
  * 才算数，单次出现不猜；已被别人占用的名字跳过。
@@ -2307,18 +2417,24 @@ function aliasVisualMentions(visual: string, cand: string): boolean {
  * 把 groups 与 storyboardGroups 拼起来数，同一拍算两遍——项目 40
  * 里导游只有 1 拍画面带「老板」（还是「老板娘」的子串误命中），
  * 双算凑够 2 次把 D 的称呼误占了。
+ * v5.72 专名排除：候选名只要登记在别人名下（身份第一段专名 /
+ * 本人台词自报），本层直接跳过——画面里出现别人的名字（喊话、
+ * 训斥、群像顺带提到）永远不算把这个名字判给当前人的证据。
  */
 function aliasFromAddress(
   script: ScriptData,
   info: LensMappingCharInfo,
   candidates: string[],
   taken: Set<string>,
+  claimed: Map<string, string>,
 ): string {
   const groups = storyboardScript(script).groups;
   let best = "";
   let bestScore = 0;
   for (const cand of candidates) {
     if (taken.has(cand)) continue;
+    const owner = claimed.get(cand);
+    if (owner && owner !== info.name) continue;
     let score = 0;
     for (const g of groups) {
       for (const b of g.beats) {
@@ -2343,6 +2459,10 @@ const ALIAS_TITLE_WORDS = [
   "园长", "主任", "班长", "学习委员", "体育委员", "组长", "队长",
   "医生", "护士", "老师", "保安", "门卫", "警察", "村长", "老板娘",
   "老板", "店长", "教练", "服务员", "司机", "厨师",
+  // v5.72 补词：长词在前（「老奶奶」先于「奶奶」），让甘蔗林老奶
+  // 奶这类人物在职务层就能拿到自己的称呼，不必掉进第③层称呼对
+  // 位里跟别人抢名字（项目 43 的 F）。
+  "老奶奶", "老爷爷", "奶奶", "爷爷", "大爷", "大妈", "导游", "村民",
 ];
 
 /** 第④层：回落身份里的职务称呼（整段命中优先，其次文中命中）。
@@ -2367,22 +2487,104 @@ function aliasFromTitle(info: LensMappingCharInfo): string {
 export interface CharacterAliasPair {
   code: string;
   alias: string;
+  /** v5.72：这个别名是哪一步定下来的（面板展示用）。 */
+  source?: string;
+}
+
+/** v5.72 出口校验拦下的一条：哪位人物的哪个别名因为什么被拦。 */
+export interface AliasGateIssue {
+  code: string;
+  alias: string;
+  reason: string;
+}
+
+export interface CharacterAliasReport {
+  pairs: CharacterAliasPair[];
+  issues: AliasGateIssue[];
 }
 
 /**
- * 全项目人物的真名绑定（代号序＝人物卡序＋人物表序）：逐人按四层
- * 优先级取别名，同一别名只绑给第一个取到的人（后面的人退回无别
- * 名，不抢名）。非代号式人物名 alias 恒为空字符串。
+ * v5.72 出口校验（守门员）：所有提示词出口共用 projectCharacter-
+ * Aliases 这一把锁——别名在离开推导层之前逐条断言：
+ *   ① 别名不得等于另一位人物的专名（身份第一段专名 / 台词自报
+ *      名 / 非代号人物的本名）；
+ *   ② 同一个别名不得绑给两个人（先到者保留，后来者拦下）；
+ *   ③ 别名不得等于人物自己的代号。
+ * 断言不过的别名整条拦下、该人物退回裸代号输出，并记一条 issue
+ * 供分镜页标红提示——宁可不带别名，也绝不发错别名。手动钉死的
+ * 别名同样过这道校验（钉死的是「以我填的为准」，不是「错的也
+ * 发」）。
  */
-export function projectCharacterAliases(
+function aliasGateCheck(
+  pairs: CharacterAliasPair[],
+  claimed: Map<string, string>,
+): AliasGateIssue[] {
+  const issues: AliasGateIssue[] = [];
+  const seen = new Map<string, string>();
+  for (const p of pairs) {
+    if (!p.alias) continue;
+    const owner = claimed.get(p.alias);
+    if (owner && owner !== p.code) {
+      issues.push({
+        code: p.code,
+        alias: p.alias,
+        reason: `这个名字是 ${owner} 的专名（身份 / 台词自报），不能绑给 ${p.code}，已拦下、只发裸代号。`,
+      });
+      p.alias = "";
+      continue;
+    }
+    if (p.alias === p.code) {
+      issues.push({
+        code: p.code,
+        alias: p.alias,
+        reason: "别名和代号相同，已拦下。",
+      });
+      p.alias = "";
+      continue;
+    }
+    const first = seen.get(p.alias);
+    if (first && first !== p.code) {
+      issues.push({
+        code: p.code,
+        alias: p.alias,
+        reason: `这个别名已经绑给 ${first}，两个人不能共用一个名字，已拦下、只发裸代号。`,
+      });
+      p.alias = "";
+      continue;
+    }
+    seen.set(p.alias, p.code);
+  }
+  return issues;
+}
+
+/**
+ * 全项目人物的真名绑定（代号序＝人物卡序＋人物表序）：逐人按层
+ * 级优先级取别名，同一别名只绑给第一个取到的人（后面的人退回无
+ * 别名，不抢名）。非代号式人物名 alias 恒为空字符串。
+ * v5.72：新增第⓪层「身份首段专名」最高优先；第③层排除他人专
+ * 名；全部结果最后过 aliasGateCheck 出口校验；script.aliasOver-
+ * rides 里手动钉死的人物跳过推导直接用钉死值（仍过校验）。
+ */
+export function projectCharacterAliasReport(
   script: ScriptData,
   ctx?: LensMappingContext,
-): CharacterAliasPair[] {
+): CharacterAliasReport {
   const chars = collectAllCharacters(script, ctx);
   const candidates = aliasAddressCandidates(script);
+  const claimed = claimedAliasNames(script, chars);
   const taken = new Set<string>();
-  return chars.map((c) => {
+  const overrides = script.aliasOverrides ?? {};
+  const pairs: CharacterAliasPair[] = chars.map((c) => {
+    if (
+      isCodeCharacterName(c.name) &&
+      Object.prototype.hasOwnProperty.call(overrides, c.name)
+    ) {
+      const pinned = (overrides[c.name] ?? "").trim();
+      if (pinned) taken.add(pinned);
+      return { code: c.name, alias: pinned, source: "手动钉死" };
+    }
     let alias = "";
+    let source = "";
     if (isCodeCharacterName(c.name)) {
       // v5.21：逐层往下试，某层取到的名字已被别人占用时不再整人
       // 清空、继续试下一层（旧口径：A 先占「短发男孩」后，C 在特
@@ -2391,25 +2593,40 @@ export function projectCharacterAliases(
       // 关系链（小帅 = A）、①.6「小X」昵称特征对位（小胖 = C）——
       // 真名 / 昵称优先于「短发男孩」这类描述性提炼，描述撞名时
       // 后来者继续往下找自己的真名。
-      const layers: (() => string)[] = [
-        () => aliasFromIdentity(c),
-        () => aliasFromRelation(script, c, chars),
-        () => aliasFromNickname(c, candidates, chars),
-        () => aliasFromCompose(c),
-        () => aliasFromAddress(script, c, candidates, taken),
-        () => aliasFromTitle(c),
+      // v5.72：第⓪层「身份首段专名」排在所有层之前（钢铁胖 = G）。
+      const layers: { name: string; run: () => string }[] = [
+        { name: "身份首段专名", run: () => aliasFromIdentityHead(c, claimed) },
+        { name: "身份现成称呼", run: () => aliasFromIdentity(c) },
+        { name: "亲属关系链", run: () => aliasFromRelation(script, c, chars) },
+        { name: "昵称特征对位", run: () => aliasFromNickname(c, candidates, chars) },
+        { name: "身份提炼", run: () => aliasFromCompose(c) },
+        {
+          name: "台词称呼对位",
+          run: () => aliasFromAddress(script, c, candidates, taken, claimed),
+        },
+        { name: "职务称呼", run: () => aliasFromTitle(c) },
       ];
       for (const layer of layers) {
-        const cand = layer();
+        const cand = layer.run();
         if (cand && cand !== c.name && !taken.has(cand)) {
           alias = cand;
+          source = layer.name;
           break;
         }
       }
       if (alias) taken.add(alias);
     }
-    return { code: c.name, alias };
+    return { code: c.name, alias, source };
   });
+  const issues = aliasGateCheck(pairs, claimed);
+  return { pairs, issues };
+}
+
+export function projectCharacterAliases(
+  script: ScriptData,
+  ctx?: LensMappingContext,
+): CharacterAliasPair[] {
+  return projectCharacterAliasReport(script, ctx).pairs;
 }
 
 /**
