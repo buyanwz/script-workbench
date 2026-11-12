@@ -13,6 +13,16 @@
 // 两套新风格的构图 / 标题不是左右对峙，拼装走 CoverStyleDef 上的
 // 专属钩子（composition / titleLine / shortExtra 等），风格 1 不设
 // 钩子、产出逐字不变。
+//
+// v5.89 删除五款一次没用过的封面风格（用户 2026-11-11 亲口定删：
+// 按封面生成记录 / 分析任务 / 提示词草稿三处核对，五款均零使用）：
+// 风格 2「怼脸梗贴纸」（face_meme）、风格 4「全景故事感」
+// （panorama_story）、风格 5「单人半身大标题」（solo_half_title）、
+// 风格 6「海报式贴纸轰炸」（poster_sticker_bomb）、风格 10「烟火气
+// 纸条金句」（market_note_quote），连同各自的 traits / rules 常量与
+// 封面页参照图一并删除。保留风格编号不重排（2 / 4 / 5 / 6 / 10 留
+// 空号），历史封面记录与已存草稿一条不动——旧记录里的 styleId 找
+// 不到对应风格时 coverStyleById 仍回落风格 1，不报错。
 // ---------------------------------------------------------------------------
 
 export interface CoverCharacterPosition {
@@ -32,7 +42,7 @@ export interface CoverPlan {
   sideA: string;
   /** vs 右阵营短名（2–6 字，进标题右半）。 */
   sideB: string;
-  /** 两层标题类风格（风格 9/10）的副标题文字（木牌 / 纸条上的那句，属
+  /** 两层标题类风格（风格 9）的副标题文字（木牌上的那句，属
    * 标题本身的一部分）；其他风格为空。 */
   subtitle: string;
   /** 上封面的主要人物名（按重要性排序）。 */
@@ -82,7 +92,7 @@ paletteEn: string;
 negativeShortZh: string;
 negativeShortEn: string;
 /** v3.93 风格专属拼装钩子（风格1 全部不设、走默认 VS/slogan 口径，
- * 逐字不变；风格2/3 的构图与标题不是左右对峙，必须换掉默认句，
+ * 逐字不变；风格3 等非对峙风格的构图与标题不是左右对峙，必须换掉默认句，
  * 否则提示词会串味）。 */
 /** 锁定版式：设了之后分析与页面都固定这个 layoutType。 */
 forceLayout?: "slogan";
@@ -191,59 +201,6 @@ const EXPLOSIVE_VS_RULES_EN = [
 ].join("\n");
 
 // ---------------------------------------------------------------------------
-// 风格 2：怼脸梗贴纸（用户 2026-10-30 给的 11 张认可封面里第 2 类：
-// 《送给朋友的祝福》《上课时唱网络热梗》《爱慕杰的爸爸叫爱建国》
-// 《方便面哲学》——单集梗 / 人物向封面共用这一版式）
-// ---------------------------------------------------------------------------
-
-const FACE_MEME_TRAITS: { title: string; body: string}[] = [
-{
-title: "怼脸特写：夸张表情占满画面一半以上",
-body: "单人或双人的面部特写怼满画面主体，人物占画面约二分之一以上，脸是第一视觉焦点。表情必须是情绪峰值——哭、喊、笑、震惊做到极致（瞪眼、张口、龇牙），再配一个指向性动作（指镜头、举道具、捂脸）。没有平静脸、没有定妆照。",
-},
-{
-title: "标题规范：黄底黑边 + 彩色投影 + 3D 倾斜 + 爆炸底衬",
-body: "主标题超大字号，占据顶部约三分之一：黄字（或黄底）黑描边、带彩色投影、3D 倾斜，背后垫一层爆炸形底衬，缩略图下也要一眼读出。文案是口语梗化的短标题，不端着、不写书面语。",
-},
-{
-title: "梗贴纸环绕人物：3–6 个，与标题梗点呼应",
-body: "人物四周贴 3–6 个梗元素贴纸：红 X 标记、对话气泡框、音符、星星、闪电、表情包式小人。贴纸不是随便撒的装饰——每一个都和标题的梗点呼应（唱歌梗配音符、说错话配红 X），帮观众 0.5 秒看懂笑点在哪。",
-},
-{
-title: "高饱和波普漫画风：黄红蓝 + 粗描边",
-body: "色彩是高饱和的黄、红、蓝对撞，人物与贴纸都带粗描边，波普漫画感。背景是剧情里的真实场景、退后虚化，只交代环境，不和脸抢焦点；禁止低饱和、灰调、莫兰迪。",
-},
-{
-title: "适用：单集梗、人物向封面",
-body: "这一版式不讲对抗、讲一个人一个梗：一张脸 + 一句梗标题 + 一圈呼应贴纸。适合单集爆点、人物名场面、口语梗标题的封面；有明确对立两方时用风格1，回忆合集用风格3。",
-},
-];
-
-const FACE_MEME_RULES_ZH = [
-"严格按以下规则设计，不要自由发挥成其他风格：",
-"1. 怼脸构图：一位或两位主角的面部特写占据画面中下部主体，人物占画面二分之一以上，脸是第一视觉焦点；背景是与剧情呼应的真实场景、虚化退后，不抢焦点。",
-"2. 巨型主标题占顶部约三分之一：超大号中文综艺美术粗体，黄字黑描边加彩色投影、3D 倾斜，背后垫爆炸形底衬，横向撑满，缩略图下也要一眼可读；标题文字逐字准确，不得改字、漏字、多字、错字。",
-"3. 表情夸张到情绪峰值：哭、喊、笑、震惊做到极致（瞪眼、张口大喊、龇牙、捂脸），配一个指向性动作（指镜头、举道具、护住道具）；绝不平静表情、绝不定妆照式站姿。",
-"4. 人物用真人照片感呈现（外貌与服装以随附的人物资产图为准，同一个人同一张脸同一套衣服），带粗描边贴纸感，与漫画风背景统一。",
-"5. 人物四周贴 3–6 个梗元素贴纸：红 X 标记、对话气泡框、音符、星星、闪电、表情包式小人，贴纸内容与标题的梗点严格呼应；贴纸只做第二层，不盖住脸、不抢主标题。",
-"6. 配色高饱和波普漫画风：黄、红、蓝为主色，粗黑描边；禁止低饱和、灰调、莫兰迪色。",
-"7. 气泡小字最多 2 句，放在对应人物旁，字号远小于主标题，文字逐字准确。",
-"8. 整体气质：短视频爆款梗封面，一张脸一个梗，0.5 秒内让观众看懂「谁、什么表情、笑点在哪」。",
-].join("\n");
-
-const FACE_MEME_RULES_EN = [
-"[Cover style: Face Meme Stickers] Follow strictly; do not drift into another style:",
-"1. In-your-face composition: one or two leads in extreme facial close-up filling the middle-lower frame, characters taking at least half the frame, the face is the first focal point; background is the story's real scene, blurred back, never competing with the face.",
-"2. Giant main title across the top third: extra-bold Chinese variety-show lettering, yellow letters with thick black outline and colored drop shadow, 3D tilt, explosion-shaped backing, full width, readable at thumbnail size; title text character-for-character exact — no altered, missing, extra or wrong characters.",
-"3. Peak exaggerated expression: crying, shouting, laughing or shocked pushed to the extreme (wide eyes, open mouth, gritted teeth, hands on face), plus one pointing gesture (point at camera, raise the prop, guard the prop); never calm expressions, never ID-photo poses.",
-"4. Characters in live-action photo look (faces and outfits must match the attached character asset images — same person, same face, same outfit), thick sticker outline, unified with the comic-style background.",
-"5. 3-6 meme stickers around the characters: red X marks, speech-bubble frames, music notes, stars, lightning bolts, meme figures — sticker content strictly echoing the title's gag; stickers are second layer only, never covering the face, never outshouting the title.",
-"6. High-saturation pop-comic colors: yellow, red and blue leads, thick black outlines; no desaturated, gray or Morandi tones.",
-"7. At most 2 speech bubbles with short lines next to the speaker, far smaller than the title, also character-exact.",
-"8. Viral meme cover: one face, one gag — 'who, what expression, where is the joke' readable in half a second.",
-].join("\n");
-
-// ---------------------------------------------------------------------------
 // 风格 3：拼贴回忆（11 张认可封面里第 3 类：《小时候我以为的那些事》
 // 《小时候以为的事》《小时候开智前做过的事》——「小时候」回忆
 // 系列 / 合集类封面共用这一版式）
@@ -268,7 +225,7 @@ body: "底色是暖色怀旧调（暖黄、旧纸色、土色），像翻开一�
 },
 {
 title: "适用：「小时候」回忆系列、合集类封面",
-body: "这一版式讲的是一组回忆而不是一个瞬间：多格拼贴天然带合集感。适合回忆系列、童年迷惑行为合集、多段并列的集锦封面；单集单梗用风格2，有明确对立两方用风格1。",
+body: "这一版式讲的是一组回忆而不是一个瞬间：多格拼贴天然带合集感。适合回忆系列、童年迷惑行为合集、多段并列的集锦封面；有明确对立两方用风格1。",
 },
 ];
 
@@ -302,93 +259,8 @@ const COLLAGE_MEMORY_RULES_EN = [
 // 4 / 5 是全新版式，风格 6 是风格 2 的细化，风格 7 是风格 3 的推
 // 广，风格 8 是风格 1 的变体扩展。五款的中英文提示词模板按用户定
 // 稿原文收录，【】是待分析方案填充的占位符、不编造具体画面内容；
-// 拼装走与风格 2 / 3 相同的专属钩子口径（构图 / 标题行 / 标签）。
+// 拼装走与风格 3 相同的专属钩子口径（构图 / 标题行 / 标签）。
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// 风格 4：全景故事感（分类 2，全新；单集梗、有明确场景 + 2 人以上
-// 群像）
-// ---------------------------------------------------------------------------
-
-const PANORAMA_STORY_TRAITS: { title: string; body: string }[] = [
-  {
-    title: "全景构图：一整个场景里的一群人，正在干一件荒诞事",
-    body: "封面就是剧里最有戏的一幕全景：一个明确场景（教室 / 食堂 / 医院 / 户外）铺满画面，2 人以上人物在场景里同框，人物和场景一起讲故事，不是把人抠出来贴在背景上。",
-  },
-  {
-    title: "大标题压顶或压底，占画面上部约三分之一",
-    body: "大标题压在顶部或底部，占画面上部约三分之一，缩略图下也要一眼读出；先读标题、再看全景里这群人在干什么。",
-  },
-  {
-    title: "标题配色：关键词着色、其余白色、黑色粗描边",
-    body: "标题关键词用醒目颜色，其余字白色，全字黑色粗描边；画面走超写实真人实拍、电影质感、自然光，不堆贴纸特效。",
-  },
-  {
-    title: "适用条件",
-    body: "单集梗、有明确场景（教室/食堂/医院/户外）+ 2 人以上群像；不适合单人独白、回忆拼贴。",
-  },
-];
-
-const PANORAMA_STORY_RULES_ZH =
-  "竖版 9:16，超写实真人实拍，电影质感，自然光；全景【场景】，【人物群像】，【正在做的荒诞事】；顶部（或底部）大标题「【主标题】」，【关键词】用【颜色】，其余白色，黑色粗描边；标题占画面上部约三分之一；无水印，无平台 UI。";
-
-const PANORAMA_STORY_RULES_EN =
-  "Vertical 9:16, hyper-realistic live-action, cinematic, natural light; wide shot of【Scene】,【Group of characters】,【The absurd thing they are doing】; large title text at the top (or bottom): \"【Main title】\", keyword【Keyword】 in【Color】, rest in white, thick black outline; title occupies about one third of the frame; no watermark, no platform UI.";
-
-// ---------------------------------------------------------------------------
-// 风格 5：单人半身大标题（分类 3，全新；单主角单集梗）
-// ---------------------------------------------------------------------------
-
-const SOLO_HALF_TITLE_TRAITS: { title: string; body: string }[] = [
-  {
-    title: "单人半身：主角居中偏下，表情动作就是笑点",
-    body: "一位主角半身出镜、居中偏下，表情夸张、动作明确——主角的表情和动作本身就是这一集的梗；背景虚化退后，只交代环境，不和人抢焦点。",
-  },
-  {
-    title: "大标题压顶，占上部约三分之一到四成",
-    body: "顶部一句大标题，关键词用特大字、其余白色、黑色粗描边，占画面上部约三分之一到四成，干净利落、一眼读完。",
-  },
-  {
-    title: "适用条件",
-    body: "单主角单集梗；主角表情/动作本身就是笑点；不适合多人对峙、多线叙事。",
-  },
-];
-
-const SOLO_HALF_TITLE_RULES_ZH =
-  "竖版 9:16，超写实真人实拍；半身【人物】，居中偏下，【夸张表情/动作】；顶部大标题「【主标题】」，【关键词】用特大字，其余白色，黑色粗描边；标题占画面上部约三分之一到四成；背景虚化；无水印，无平台 UI。";
-
-const SOLO_HALF_TITLE_RULES_EN =
-  "Vertical 9:16, hyper-realistic live-action;【Character】, half-body, lower center,【Exaggerated expression / action】; large title text at the top: \"【Main title】\", keyword【Keyword】 in extra large, rest in white, thick black outline; title occupies about one third to two fifths of the frame; background blurred; no watermark, no platform UI.";
-
-// ---------------------------------------------------------------------------
-// 风格 6：海报式贴纸轰炸（分类 1，对风格 2 的细化；梗密、标志性道
-// 具 / 多方反应）
-// ---------------------------------------------------------------------------
-
-const POSTER_STICKER_BOMB_TRAITS: { title: string; body: string }[] = [
-  {
-    title: "顶部超大标题打头，标题本身就是梗",
-    body: "超大标题占据顶部打头，关键词着色、其余白色、黑色粗描边；这款的标题不只是说明，标题本身就是笑点的一部分。",
-  },
-  {
-    title: "中部堆满：人物、道具、多方反应全上",
-    body: "画面中部把人物、标志性道具和多方反应都堆上去，信息密度拉满，热闹得像一张手绘海报。",
-  },
-  {
-    title: "漫画贴纸轰炸：气泡、贴纸、放射线叠加",
-    body: "在实拍画面上叠加漫画贴纸元素：对话气泡、梗贴纸、放射线，贴纸与标题的梗点呼应，主色调鲜明。是风格2「怼脸梗贴纸」的细化款：梗更密、东西更多时用这款。",
-  },
-  {
-    title: "适用条件",
-    body: "单集梗里有标志性道具或多方反应；标题本身就是梗；不适合严肃/悬念/温情题材。",
-  },
-];
-
-const POSTER_STICKER_BOMB_RULES_ZH =
-  "竖版 9:16，超写实真人实拍；顶部超大标题「【主标题】」，【关键词】用【颜色】，其余白色，黑色粗描边，【标题装饰】；中部【人物/道具/多方反应画面】；叠加漫画贴纸元素：对话气泡「【气泡台词】」、【贴纸元素】、放射线；主色调【主色】+【辅色】；无水印，无平台 UI。";
-
-const POSTER_STICKER_BOMB_RULES_EN =
-  "Vertical 9:16, hyper-realistic live-action; extra-large title text at the top: \"【Main title】\", keyword【Keyword】 in【Color】, rest in white, thick black outline,【Title decoration】; center:【Characters / props / reactions scene】; overlaid comic sticker elements: speech bubble \"【Bubble line】\",【Sticker elements】, radiating lines; dominant colors【Main color】 and【Accent color】; no watermark, no platform UI.";
 
 // ---------------------------------------------------------------------------
 // 风格 7：多格故事拼贴（分类 4，对风格 3 的推广；单集 2–3 个名场
@@ -481,67 +353,39 @@ const SPECTACLE_EFFECT_TITLE_RULES_EN =
   "Vertical 9:16, hyper-realistic live-action, cinematic, natural light; extra-large two-line title at the top: \"【title line 1】\" \"【title line 2】\", in 【color 1】 and 【color 2】, letters with 【thematic material effect, e.g. frost crystals, snow, icicles】, surrounded by 【decorative elements】; below the title a 【wooden sign / board description】 carrying the subtitle \"【subtitle text】\"; center: 【absurd spectacle element description】; foreground: 【characters seen from behind description】; wide shot of 【scene description】; no watermark, no platform UI.";
 
 // ---------------------------------------------------------------------------
-// 风格 10：烟火气纸条金句（市井摊位 / 小店单集；涂鸦大标题 + 撕
-// 纸条金句 + 前景招牌商品特写）
-// ---------------------------------------------------------------------------
-
-const MARKET_NOTE_QUOTE_TRAITS: { title: string; body: string }[] = [
-  {
-    title: "涂鸦大标题：两行大字加几笔小涂鸦",
-    body: "顶部两行超大标题，双色对撞，标题旁画几笔小涂鸦（纸飞机、爱心、星星等手绘感装饰），标题不端着、带市井烟火气的活泼感。",
-  },
-  {
-    title: "撕纸条金句：标题下面贴一张纸条写一句金句",
-    body: "标题下方贴一张撕纸条，上写一句副标题金句，关键词用红色下划线标出；纸条是画面里的一张实物纸，和摊位环境融为一体。",
-  },
-  {
-    title: "前景招牌商品特写当视觉锚 + 一侧背影",
-    body: "画面中部是摊位或小店场景，前景摆一盘招牌商品或食物特写当视觉锚；一侧有人物背影背对镜头，背景是招牌或菜单，超写实真人实拍、电影质感、自然光。",
-  },
-  {
-    title: "适用条件",
-    body: "单集场景在市井摊位/小店/校门口，有招牌商品或食物可拍特写；不适合荒诞奇观、严肃悬念题材。",
-  },
-];
-
-const MARKET_NOTE_QUOTE_RULES_ZH =
-  "竖版 9:16，超写实真人实拍，电影质感，自然光；顶部两行超大标题「【标题第一行】」「【标题第二行】」，【标题颜色1】+【标题颜色2】，配【涂鸦装饰描述，如纸飞机、爱心、星星】；标题下方贴一张撕纸条，上写副标题「【副标题文字】」，【关键词】用红色下划线标出；中部【摊位/小店场景描述】，前景【招牌商品特写描述】；一侧【背影人物描述】背对镜头；背景【招牌/菜单描述】；无水印，无平台 UI。";
-
-const MARKET_NOTE_QUOTE_RULES_EN =
-  "Vertical 9:16, hyper-realistic live-action, cinematic, natural light; extra-large two-line title at the top: \"【title line 1】\" \"【title line 2】\", in 【color 1】 and 【color 2】, decorated with 【doodle descriptions, e.g. paper plane, heart, sparkles】; below the title a torn paper note carrying the subtitle \"【subtitle text】\", keyword underlined in red; center: 【street stall / shop scene description】, foreground close-up of 【signature product description】; on one side 【character seen from behind description】; background 【sign / menu description】; no watermark, no platform UI.";
-
-// ---------------------------------------------------------------------------
-// 风格 11：证物揭晓（v5.15，用户 2026-11-06 拍板落地）。不学外部爆款
-// 封面：从用户自己的三单精修解剖机制提炼（萝卜头=灵参、爸爸=校长、
-// 规则字面执行）——中央证物特写 + 表面/真相双标签 + 揭晓式大标题 +
-// 人物两侧当证人 + 档案红章封条。参照图暂无：等用户生成第一张风格
-// 11 封面后替换，绝不用其他风格的图冒充（STYLE_REFERENCES 不加本款）。
+// 风格 11：证物揭晓（v5.15 入库；v5.99 按用户批准的设计稿改成独一无二的
+// 招牌风格——「证物档案」：画框、标题格式、双标签、证物框、红章的位
+// 置与配色全部钉死，每张只换证物、标题文字与出场人物，发到平台主页
+// 一排拼起来整齐统一）。不学外部爆款封面：从用户自己的三单精修解剖
+// 机制提炼（萝卜头=灵参、爸爸=校长、规则字面执行）。参照图暂无：等
+// 用户生成第一张新版风格 11 封面后替换，绝不用其他风格的图冒充
+// （STYLE_REFERENCES 不加本款）。
 // ---------------------------------------------------------------------------
 
 const EVIDENCE_REVEAL_TRAITS: { title: string; body: string }[] = [
   {
-    title: "证物居中放大：超写实特写占中央四到五成",
-    body: "本集最关键的一样道具（或一个人）超写实特写，占画面中央四到五成，聚光灯打亮，带白色描边或证物框。证物就是笑点本身，观众先看证物再看标题就懂一半。",
+    title: "固定画框：米纸底 + 红封条 + 藏青底条，每张一模一样",
+    body: "整张底色为档案米纸 #F5EDDC；顶部一条红色斜纹封条横贯全宽（档案红 #C0392B）；底部一条藏青色条 #1F2A44，上面四个字「证物档案」居中、米纸色字、字距拉开。画框的位置、大小、颜色每张完全一致，是主页拼图整齐的根。",
   },
   {
-    title: "表面和真相双标签：真相必须压过表面",
-    body: "证物上方贴一张表面身份标签（小字、白底灰字：它看起来是什么），下方贴一张真实身份标签（大字、红底或金底：它实际是什么），两张标签之间一条红色撕裂线。真相标签的字号、颜色、底色必须压过表面标签。",
+    title: "揭晓式标题：永远两行压顶，表面名 = 真实名",
+    body: "标题永远两行、顶部居中、整体微倾斜（约 -2 度）：上行表面名小字、白字黑边；下行真相名大一号，金黄渐变 #F7C948 大字配红色描边；中间的「=」做成红色爆炸形徽章，斜贴在标题正中、白色描边。标题文字逐字准确，不得改字、漏字、多字、错字。",
   },
   {
-    title: "揭晓式大标题压顶：表面名 = 真实名",
-    body: "顶部一句大标题，格式固定为表面名 = 真实名。真实名比表面名大一号，金黄渐变配红描边；表面名白字黑边，字号小于真实名。标题占顶部四分之一到三分之一。",
+    title: "表面/真相双标签：灰在左、红在右，位置钉死",
+    body: "灰标签（#E8E0CC 底、深灰字）贴在证物左侧写表面名、微左倾；红标签（#C0392B 底、白字）贴在证物右侧写真实名、微右倾。两张标签的位置、大小、颜色每张固定，标签文字逐字准确。",
   },
   {
-    title: "人物退居两侧当证人",
-    body: "1 到 2 位主角分列证物左右两侧、半身、缩小到画面四分之一以下，表情是发现真相的震惊或被打脸的傻眼，手指证物。人物绝不抢证物中心位，脸不怼满画面。",
+    title: "证物居中特写：正中央固定方框，藏青描边",
+    body: "本集最关键的一样道具（或一个人）超写实特写，放在画面正中央固定大小的方框里、藏青 #1F2A44 描边；方框位置与大小每张固定，框内主色调随证物本身走。证物就是笑点本身，观众先看证物再看标题就懂一半。",
   },
   {
-    title: "档案证物风第二层：红章、编号、封条",
-    body: "深灰或牛皮纸档案底色（或暗色场景虚化）；证物角上贴一张红色证物编号签（证物 001）；画面边缘压一条黄色封条；标题旁盖一枚红色真相印章；小字气泡最多一句，放在发现者旁边。",
+    title: "人物两侧当证人：左右对称，造型以资产图为准",
+    body: "人物分列证物左右两侧、左右对称，半身，表情是发现真相的震惊或被打脸的傻眼，手指证物，绝不抢证物中心位。必须使用随附的人物资产图、人物必须同时出现在画面上缺一不可，面部与整体造型绝不改、必须跟资产图一致。",
   },
   {
-    title: "配色：暗底 + 金黄真相 + 红章 + 白表面标签",
-    body: "暗底加金黄真相字加红色印章封条加白色表面标签。高对比但克制，拒绝十个风格那种全屏高饱和对撞。冷静的底色加一处滚烫的真相，是这个风格的识别点。",
+    title: "右下角红章「已验真」+ 配色钉死 5 色",
+    body: "右下角固定同一位置盖一枚红章，文字固定为「已验真」三个字，档案红 #C0392B、微倾斜、半透明白底。全图配色钉死 5 个色：#F5EDDC 档案米纸、#C0392B 档案红、#1F2A44 藏青、#F7C948 金黄、#E8E0CC 标签灰，不许模型自己换色、换底色、换标题位置。",
   },
   {
     title: "适用条件",
@@ -550,27 +394,31 @@ const EVIDENCE_REVEAL_TRAITS: { title: string; body: string }[] = [
 ];
 
 const EVIDENCE_REVEAL_RULES_ZH = [
-  "【封面风格】证物揭晓（风格11），竖版，一份证物档案。",
+  "【封面风格】证物揭晓（风格11），竖版，一份证物档案。每张封面都是一份「证物档案」：画框、标题、标签、证物框、红章的位置与配色永远固定不变，每集只换证物、标题文字与出场人物。",
+  "【画框】整张底色为档案米纸色 #F5EDDC；顶部一条红色斜纹封条横贯全宽，档案红 #C0392B；底部一条藏青色条 #1F2A44，上面四个字「证物档案」居中、米纸色字、字距拉开。画框的位置、大小、颜色每张完全一致，不得更改。",
   "【标题】表面名 = 真实名",
-  "标题位置：顶部居中，横跨全宽，压在证物上方。",
-  "标题风格：标题占画面宽度九成以上，整体微倾斜。主标题超大加粗白字、黑色粗描边；「=」做成红色爆炸形徽章，斜贴在标题正中，白色描边、黄色星芒点缀；真实名比表面名大一号，金黄渐变大字配红色描边，像真相标签一样醒目；表面名白字黑边，字号小于真实名。",
-  "【证物】画面中央一样关键道具超写实特写，占画面中央四到五成，聚光灯打亮，带白色描边或证物框；证物就是笑点本身。",
-  "【表面/真相双标签】证物上方贴一张表面身份标签（小字、白底灰字：它看起来是什么），下方贴一张真实身份标签（大字、红底或金底：它实际是什么），两张标签之间一条红色撕裂线；真相标签的字号、颜色、底色必须压过表面标签。",
+  "标题位置：顶部居中，横跨全宽，压在证物上方，位置每张固定，不得移动。",
+  "标题风格：永远两行，整体微倾斜（约 -2 度）；上行表面名小字、白字黑边；下行真相名大一号，金黄渐变 #F7C948 大字配红色描边；「=」做成红色爆炸形徽章，斜贴在两行标题正中，白色描边。标题文字必须逐字准确，不得改字、漏字、多字、错字。",
+  "【证物】画面正中央一样关键道具（或一个人）超写实特写，放在固定大小的方框里，藏青色 #1F2A44 描边；方框的位置与大小每张固定，框内主色调随证物本身走。证物就是笑点本身。",
+  "【表面/真相双标签】证物左侧贴一张灰标签（#E8E0CC 底、深灰字）写表面名，微微左倾；证物右侧贴一张红标签（#C0392B 底、白字）写真实名，微微右倾；两张标签的位置、大小、颜色每张固定。标签文字必须逐字准确，不得改字、漏字、多字、错字。",
   "【人物站位】本封面必须使用随附的人物资产图，人物必须同时出现在画面上，分列证物两侧，缺一不可；面部特征与整体造型严格以人物资产图为准、绝不更改，绝不凭空画人、绝不换脸；穿搭默认以资产图为准，场景需要时可以调整。",
-  "1-2 位主角分列证物左右两侧、半身、缩小到画面四分之一以下，表情是发现真相的震惊或被打脸的傻眼，手指证物；人物绝不抢证物中心位，脸不怼满画面。",
-  "【档案元素】深灰或牛皮纸档案底色；证物角上贴一张红色证物编号签（证物 001）；画面边缘压一条黄色封条；标题旁盖一枚红色「真相」印章；小字气泡最多一句，放在发现者旁边。",
+  "人物分列证物左右两侧、左右对称，半身，表情是发现真相的震惊或被打脸的傻眼，手指证物；人物绝不抢证物中心位，脸不怼满画面。",
+  "【红章】右下角固定位置盖一枚红章，文字固定为「已验真」三个字，档案红 #C0392B，微微倾斜，半透明白底；位置每张固定，不得移动、不得改字。",
+  "【配色钉死】全图只用这 5 个颜色：档案米纸 #F5EDDC、档案红 #C0392B、藏青 #1F2A44、金黄 #F7C948、标签灰 #E8E0CC（证物本身与人物按实物原色除外）；不许换底色、不许自己换配色、不许改标题、标签与红章的位置。",
 ].join("\n");
 
 const EVIDENCE_REVEAL_RULES_EN = [
-  "【Cover style】Evidence Reveal (Style 11), vertical, a piece of evidence file.",
+  "【Cover style】Evidence Reveal (Style 11), vertical, an evidence file. Every cover is an \"evidence file\": the frame, title, labels, evidence box and red stamp stay in exactly the same positions and colors on every cover; only the evidence item, the title words and the characters change per episode.",
+  "【Frame】The whole background is archive cream paper #F5EDDC; across the very top a red diagonally striped sealing tape in archive red #C0392B spanning the full width; at the bottom a navy bar #1F2A44 carrying the four Chinese characters 「证物档案」 centered, in cream-paper letters with wide letter spacing. The frame's position, size and colors are identical on every cover — never change them.",
   "【Title】Surface Name = True Name",
-  "Title position: top center, spanning the full width, above the evidence.",
-  "Title style: title spans over 90% of the width, slightly tilted. Main title in huge bold white letters with thick black outline; \"=\" as a red starburst badge slanted in the middle, white outline with yellow star sparkles; the true name one size larger than the surface name, in gold gradient letters with red outline, like a truth label; the surface name in white with black outline, smaller than the true name.",
-  "【Evidence】One key prop in hyper-realistic close-up at the center, taking 40-50% of the frame, lit by a spotlight, with white outline or evidence frame.",
-  "【Surface / Truth labels】Above the evidence a surface-identity label (small text, white background, gray text: what it looks like); below it a true-identity label (large text, red or gold background: what it really is), separated by a red torn line; the truth label must outrank the surface label in size, color and background.",
+  "Title position: top center, spanning the full width, above the evidence; the position is fixed on every cover — never move it.",
+  "Title style: always two lines, the whole title tilted slightly (about -2 degrees); the upper line is the surface name in smaller white letters with black outline; the lower line is the true name one size larger, in big gold-gradient #F7C948 letters with red outline; \"=\" as a red starburst badge slanted in the exact middle of the two-line title, white outline. The title text must be rendered character-for-character exactly — no changed, missing, extra or wrong characters.",
+  "【Evidence】One key prop (or person) in hyper-realistic close-up at the exact center, inside a fixed-size square frame with a navy #1F2A44 outline; the frame's position and size are identical on every cover; the dominant color inside the frame follows the evidence item itself. The evidence is the joke itself.",
+  "【Surface / Truth labels】On the left of the evidence a gray label (#E8E0CC background, dark gray text) carrying the surface name, tilted slightly left; on the right of the evidence a red label (#C0392B background, white text) carrying the true name, tilted slightly right; the labels' positions, sizes and colors are fixed on every cover. The label text must be rendered character-for-character exactly — no changed, missing, extra or wrong characters.",
   "【Character positions】This cover must use the attached character asset images. The characters must all appear in the frame, standing on either side of the evidence — none may be missing. Faces and overall styling must strictly match the character asset images, never change; never invent a person, never swap faces; outfits follow the asset images by default, adjustable if the scene needs.",
-  "1-2 leads stand on either side of the evidence, half-body, under a quarter of the frame, shocked at the reveal or dumbfounded, pointing at the evidence; never take the center, never fill the frame with a face.",
-  "【File elements】Dark gray or kraft-paper file background; a red evidence tag on the corner (Evidence 001); a yellow seal tape along the edge; a red \"TRUTH\" stamp next to the title; at most one small speech bubble next to the discoverer.",
+  "The characters stand on either side of the evidence, left-right symmetric, half-body, shocked at the reveal or dumbfounded, pointing at the evidence; never take the center, never fill the frame with a face.",
+  "【Red stamp】A red stamp fixed at the bottom-right corner, in the same position on every cover, carrying exactly the three Chinese characters 「已验真」, archive red #C0392B, slightly tilted, on a semi-transparent white backing; never move it, never change its text.",
+  "【Locked palette】Use only these 5 colors: archive cream #F5EDDC, archive red #C0392B, navy #1F2A44, gold #F7C948, label gray #E8E0CC (the evidence item and the characters keep their real-world colors); never change the background color, never invent a different palette, never move the title, the labels or the stamp.",
 ].join("\n");
 
 export const COVER_STYLES: CoverStyleDef[] = [
@@ -602,60 +450,6 @@ negativeShortZh:
 "极简留白、低饱和灰调、平静表情、单人定妆照、小字标题、水印、乱码文字",
 negativeShortEn:
 "minimalism, grays, calm faces, ID-photo poses, small title, watermarks, garbled text",
-},
-{
-id: "face_meme",
-label: "风格2 · 怼脸梗贴纸",
-shortDesc:
-"面部夸张表情特写怼满画面 + 巨型梗标题占顶三分之一 + 3–6 个梗贴纸环绕（单集梗 / 人物向）",
-analysisSummary:
-"来自你认可的 11 张封面里的第 2 类（《送给朋友的祝福》《上课时唱网络热梗》《爱慕杰的爸爸叫爱建国》《方便面哲学》）：不讲对抗、讲一个人一个梗——一张夸张的脸怼满画面，梗标题压顶，贴纸把笑点直接贴在人物周围，观众不用读剧情就先笑出来。",
-traits: FACE_MEME_TRAITS,
-rulesZh: FACE_MEME_RULES_ZH,
-rulesEn: FACE_MEME_RULES_EN,
-negativeZh:
-"不要：平静表情、证件照站姿、小字号标题、低饱和灰调、极简留白、人物太小、贴纸盖住脸、水印、无关文字与乱码文字。",
-negativeEn:
-"Avoid: calm expressions, ID-photo poses, small title text, desaturated gray tones, minimalism and negative space, tiny characters, stickers covering the face, watermarks, unrelated or garbled text.",
-shortNameZh: "怼脸梗贴纸",
-shortNameEn: "Face Meme Stickers",
-digestZh:
-"面部夸张表情特写怼满画面、人物占一半以上、标题黄底黑边3D倾斜加爆炸底衬、四周贴3–6个梗贴纸、高饱和波普漫画风",
-digestEn:
-"extreme close-up exaggerated face filling half the frame, giant yellow black-outlined 3D title on an explosion backing, 3-6 meme stickers around the face, high-saturation pop-comic colors",
-paletteZh:
-"高饱和黄红蓝，粗黑描边，波普漫画配色",
-paletteEn:
-"high-saturation yellow/red/blue, thick black outlines, pop-comic palette",
-negativeShortZh:
-"平静表情、小字标题、低饱和灰调、人物太小、贴纸盖脸、水印、乱码文字",
-negativeShortEn:
-"calm faces, small title, grays, tiny characters, stickers over the face, watermarks, garbled text",
-forceLayout: "slogan",
-analysisGuideZh:
-"本风格固定用 slogan 版式（layoutType 必须填 slogan，sideA / sideB 留空）：mainTitle 写一句口语梗化的短标题（从剧本最抓人的梗来，尽量 10 字以内）；mainCharacters 只选 1–2 位表情最有戏的主角；characterPoses 只写面部夸张表情特写（哭 / 喊 / 笑 / 震惊做到峰值）加一个指向性动作，不写左右对峙；keyProp 写最能代表这个梗的一件道具或物件，并写清它在人物旁的动势；effectTheme 写人物四周的贴纸元素（红 X、气泡框、音符、星星、闪电、表情包小人，要与标题梗点呼应）；hookLine 与 bubbleLines 照常从真实台词里挑。签名版照常先定：effects 写贴纸元素（最多 2 个），propAnchor 写核心道具，backgroundKeyword 只给场景一个词。",
-compositionZh:
-"通用构图（同一份提示词适用于 16:9 横版、3:4 竖版、4:3 横版，不为单一画幅写死）：主标题横贯画面顶部约三分之一；一位或两位主角的面部夸张表情特写占据标题下方主体区域、人物占画面二分之一以上，脸是第一视觉焦点；3–6 个梗元素贴纸环绕人物分布、不盖脸；背景是剧情场景、虚化退后。无论横竖画幅，标题与人物脸都不得被裁切、不得被挤到角落。",
-compositionEn:
-"Universal composition (one prompt works for 16:9 landscape, 3:4 portrait and 4:3 landscape — never hard-coded to a single frame): the main title spans the top third; one or two leads in extreme facial close-up fill the area below it, characters taking at least half the frame, the face as the first focal point; 3-6 meme stickers spread around the characters, never covering the face; background is the story's scene, blurred back. In any orientation the title and the faces must never be cropped or pushed into a corner.",
-titleLineZh: (plan) =>
-`主标题（必须逐字出现在画面顶部约三分之一）：「${plan.mainTitle}」——超大字号，黄字黑描边加彩色投影、3D 倾斜，背后垫爆炸形底衬，关键词可用红色突出。`,
-titleLineEn: (plan) =>
-`Main title (must appear across the top third, exact Chinese characters): "${plan.mainTitle}" — extra-large yellow letters, thick black outline, colored drop shadow, 3D tilt, explosion-shaped backing, keyword may be highlighted in red.`,
-shortTitleLineZh: (_plan, title) =>
-`主标题「${title}」置顶约三分之一全宽、超大字号、黄底黑边加彩色投影、3D 倾斜、背后爆炸形底衬、逐字准确；标题下方是面部夸张表情特写，人物占画面一半以上。`,
-shortTitleLineEn: (_plan, title) =>
-`Title "${title}" (exact Chinese characters) across the top third, extra-large yellow letters, black outline, colored shadow, 3D tilt, explosion backing; below it an extreme close-up exaggerated face filling at least half the frame.`,
-shortExtraZh:
-"贴纸：人物四周贴 3–6 个梗元素贴纸（红X标记、气泡框、音符星星闪电、表情包式小人），与标题梗点呼应，不盖脸。",
-shortExtraEn:
-"Stickers: 3-6 meme stickers around the face (red X marks, speech bubbles, music notes, stars, lightning, meme figures) echoing the title's gag, never covering the face.",
-propShortHintZh: "在人物旁放大呈现",
-propShortHintEn: "shown enlarged beside the face",
-propLabelZh: "核心道具（人物旁放大，或最能代表梗点的物件）",
-propLabelEn: "Key prop (enlarged beside the character, or the object that best carries the gag)",
-effectsLabelZh: "贴纸与特效（人物四周 3–6 个，与标题梗点呼应）",
-effectsLabelEn: "Stickers and effects (3-6 around the characters, echoing the title's gag)",
 },
 {
 id: "collage_memory",
@@ -710,160 +504,6 @@ propLabelZh: "代表性回忆物（出现在对应小格里）",
 propLabelEn: "Signature memory object (appears inside its collage cell)",
 effectsLabelZh: "拼贴点缀（撕纸边缘、星星问号等小贴纸）",
 effectsLabelEn: "Collage dressing (torn-paper edges, small stickers like stars and question marks)",
-},
-{
-id: "panorama_story",
-label: "风格4 · 全景故事感",
-shortDesc:
-"一个场景的全景群像、最有戏的一幕 + 大标题压顶或压底（单集梗 · 明确场景 + 2 人以上群像）",
-analysisSummary:
-"适合\"一个场景里好几个人正在干一件荒诞事\"的单集，封面就是剧里最有戏的一幕全景，人物在场景里、标题压在顶部或底部。学自 1000+ 赞封面的版式：21 张点赞 1000+ 的采集封面亲眼分析分类里的「全景场景+人物」一类（6 张）。",
-traits: PANORAMA_STORY_TRAITS,
-rulesZh: PANORAMA_STORY_RULES_ZH,
-rulesEn: PANORAMA_STORY_RULES_EN,
-negativeZh:
-"不要：水印、平台 UI、单人独白式特写、拼贴分格、标题缺失或字号过小、人物抠图贴纸感、无关文字与乱码文字。",
-negativeEn:
-"Avoid: watermarks, platform UI, single-person monologue close-ups, collage panels, missing or small title text, cutout-sticker look, unrelated or garbled text.",
-shortNameZh: "全景故事感",
-shortNameEn: "Panorama Story",
-digestZh:
-"场景全景群像、人物在场景里干一件荒诞事、大标题压顶或压底、超写实真人实拍电影质感自然光",
-digestEn:
-"wide-shot group scene, characters inside the scene doing one absurd thing, large title at top or bottom, hyper-realistic cinematic natural light",
-paletteZh:
-"标题关键词着色、其余白色、黑色粗描边；画面自然光色调",
-paletteEn:
-"title keyword in color, rest white, thick black outline; natural-light tones",
-negativeShortZh:
-"水印、平台 UI、单人特写、拼贴分格、小字标题、乱码文字",
-negativeShortEn:
-"watermarks, platform UI, single-person close-up, collage panels, small title, garbled text",
-forceLayout: "slogan",
-analysisGuideZh:
-"本风格固定用 slogan 版式（layoutType 必须填 slogan，sideA / sideB 留空）：mainTitle 写这一集的大标题（从全剧最有戏的那一幕来）；mainCharacters 选 2–4 位同场人物（全景群像，2 人以上）；characterPoses 写清这群人在同一个场景里正在干的那件事——每人一个动作、表情峰值，不写左右对峙、不写单人特写；backgroundScene 只写一个明确场景（教室 / 食堂 / 医院 / 户外等，与剧情呼应），全景靠它撑满画面；keyProp 写这幕戏里最关键的一件道具或物件及它的动势；effectTheme 写场景的自然光与电影质感氛围，不堆贴纸与爆炸特效；hookLine 与 bubbleLines 照常从真实台词里挑（可少放）。签名版照常先定：backgroundKeyword 只给场景一个词，effects 写氛围元素（最多 2 个），focusLine 写全景里最有戏的那一个点。",
-compositionZh:
-"通用构图（同一份提示词适用于 16:9 横版、3:4 竖版、4:3 横版，不为单一画幅写死）：一个明确场景的全景铺满全幅，2 位以上人物在场景里同框、正在做一件事，人物与场景共同构成画面主体（超写实真人实拍、电影质感、自然光）；大标题压在顶部或底部、占画面上部约三分之一。无论横竖画幅，标题不得被裁切，人物不得被挤出画面。",
-compositionEn:
-"Universal composition (one prompt works for 16:9 landscape, 3:4 portrait and 4:3 landscape — never hard-coded to a single frame): one clear scene in a wide shot filling the whole frame, two or more characters inside the scene doing one thing together, characters and scene sharing the frame (hyper-realistic live-action, cinematic, natural light); the large title sits at the top or bottom, occupying about one third of the frame. In any orientation the title must never be cropped and the characters must never be pushed out of the frame.",
-titleLineZh: (plan) =>
-`主标题（必须逐字出现在画面顶部或底部）：「${plan.mainTitle}」——大字号，关键词可用醒目颜色突出、其余白色，黑色粗描边；标题占画面上部约三分之一。`,
-titleLineEn: (plan) =>
-`Main title (must appear at the top or bottom, exact Chinese characters): "${plan.mainTitle}" — large letters, keyword may be highlighted in a bold color, rest in white, thick black outline; title occupies about one third of the frame.`,
-shortTitleLineZh: (_plan, title) =>
-`主标题「${title}」置于顶部或底部、大字号、关键词着色其余白色、黑色粗描边、逐字准确，占画面约三分之一；画面是一个场景的全景群像。`,
-shortTitleLineEn: (_plan, title) =>
-`Title "${title}" (exact Chinese characters) at the top or bottom, large letters, keyword in color, rest white, thick black outline, about one third of the frame; the image is a wide group scene in one location.`,
-propShortHintZh: "在全景画面里自然呈现",
-propShortHintEn: "shown naturally inside the wide scene",
-propLabelZh: "关键道具（这幕全景里最关键的那件）",
-propLabelEn: "Key prop (the most important object in this scene)",
-effectsLabelZh: "场景氛围（自然光、电影质感的光影）",
-effectsLabelEn: "Scene atmosphere (natural light, cinematic lighting)",
-},
-{
-id: "solo_half_title",
-label: "风格5 · 单人半身大标题",
-shortDesc:
-"单主角半身出镜、表情夸张 + 顶部一句大标题（单主角单集梗）",
-analysisSummary:
-"适合\"一个人一个梗\"的单集，一个人半身出镜、表情夸张，上面压一句大标题，干净利落。学自 1000+ 赞封面的版式：21 张点赞 1000+ 的采集封面亲眼分析分类里的「单人+大标题」一类（3 张）。",
-traits: SOLO_HALF_TITLE_TRAITS,
-rulesZh: SOLO_HALF_TITLE_RULES_ZH,
-rulesEn: SOLO_HALF_TITLE_RULES_EN,
-negativeZh:
-"不要：水印、平台 UI、多人对峙、多线拼贴、标题字号过小、背景不虚化抢焦点、平静表情、无关文字与乱码文字。",
-negativeEn:
-"Avoid: watermarks, platform UI, multi-character face-offs, multi-panel collage, small title text, unblurred busy background, calm expressions, unrelated or garbled text.",
-shortNameZh: "单人半身大标题",
-shortNameEn: "Solo Half-Body Title",
-digestZh:
-"单主角半身居中偏下、表情夸张、顶部大标题占三分之一到四成、背景虚化",
-digestEn:
-"single lead in half-body, lower center, exaggerated expression, large title across the top third to two fifths, blurred background",
-paletteZh:
-"标题关键词特大字、其余白色、黑色粗描边",
-paletteEn:
-"title keyword extra large, rest white, thick black outline",
-negativeShortZh:
-"水印、平台 UI、多人对峙构图、小字标题、背景抢焦点、乱码文字",
-negativeShortEn:
-"watermarks, platform UI, multi-character face-off layout, small title, busy background, garbled text",
-forceLayout: "slogan",
-analysisGuideZh:
-"本风格固定用 slogan 版式（layoutType 必须填 slogan，sideA / sideB 留空）：mainTitle 写一句大标题（从剧本最抓人的梗来，尽量 10 字以内）；mainCharacters 只选 1 位主角；characterPoses 只写这位主角的半身夸张表情（哭 / 喊 / 笑 / 震惊做到峰值）加一个指向性动作——表情动作本身就是笑点，不写多人对峙；backgroundScene 写主角所在的场景（画面里虚化退后，只交代环境）；keyProp 写主角手里或身边最能代表这个梗的一件道具，没有道具时写主角的标志性随身物；effectTheme 写背景虚化与光影氛围，不堆贴纸。签名版照常先定：chars 只写这位主角一人，backgroundKeyword 只给场景一个词。",
-compositionZh:
-"通用构图（同一份提示词适用于 16:9 横版、3:4 竖版、4:3 横版，不为单一画幅写死）：一位主角半身出镜、居中偏下，夸张表情与动作是画面主体；顶部大标题占画面上部约三分之一到四成；背景是剧情场景、虚化退后。无论横竖画幅，标题与主角的脸都不得被裁切。",
-compositionEn:
-"Universal composition (one prompt works for 16:9 landscape, 3:4 portrait and 4:3 landscape — never hard-coded to a single frame): one lead in half-body at lower center, exaggerated expression and gesture as the subject; the large title occupies the top third to two fifths; background is the story's scene, blurred back. In any orientation the title and the lead's face must never be cropped.",
-titleLineZh: (plan) =>
-`主标题（必须逐字出现在画面顶部）：「${plan.mainTitle}」——关键词用特大字、其余白色，黑色粗描边；标题占画面上部约三分之一到四成。`,
-titleLineEn: (plan) =>
-`Main title (must appear across the top, exact Chinese characters): "${plan.mainTitle}" — keyword in extra-large letters, rest in white, thick black outline; title occupies about one third to two fifths of the frame.`,
-shortTitleLineZh: (_plan, title) =>
-`主标题「${title}」置顶、关键词特大字其余白色、黑色粗描边、逐字准确，占画面上部约三分之一到四成；标题下方是单主角半身出镜、表情夸张，背景虚化。`,
-shortTitleLineEn: (_plan, title) =>
-`Title "${title}" (exact Chinese characters) across the top, keyword extra large, rest white, thick black outline, about one third to two fifths of the frame; below it one lead in half-body with an exaggerated expression, background blurred.`,
-propShortHintZh: "在主角手边自然呈现",
-propShortHintEn: "shown naturally beside the lead",
-propLabelZh: "核心道具（主角手里或身边的标志物）",
-propLabelEn: "Key prop (the signature object in the lead's hand or beside them)",
-effectsLabelZh: "背景氛围（虚化背景与光影）",
-effectsLabelEn: "Background atmosphere (blur and lighting)",
-},
-{
-id: "poster_sticker_bomb",
-label: "风格6 · 海报式贴纸轰炸",
-shortDesc:
-"顶部超大标题 + 人物道具气泡贴纸放射线全堆上（梗密单集 · 风格2 的细化）",
-analysisSummary:
-"适合\"梗特别密、东西特别多\"的单集，顶部超大标题打头，人物、道具、气泡、贴纸、放射线全堆上去，热闹得像一张手绘海报。学自 1000+ 赞封面的版式：21 张点赞 1000+ 的采集封面亲眼分析分类里的「竖版海报式大标题」一类（4 张）；是对风格2「怼脸梗贴纸」的细化。",
-traits: POSTER_STICKER_BOMB_TRAITS,
-rulesZh: POSTER_STICKER_BOMB_RULES_ZH,
-rulesEn: POSTER_STICKER_BOMB_RULES_EN,
-negativeZh:
-"不要：水印、平台 UI、极简留白、严肃悬念温情气质、贴纸与标题梗点无关、贴纸盖住人脸、标题字号不够大、无关文字与乱码文字。",
-negativeEn:
-"Avoid: watermarks, platform UI, minimalism and empty space, serious/suspense/warm mood, stickers unrelated to the title's gag, stickers covering faces, undersized title, unrelated or garbled text.",
-shortNameZh: "海报式贴纸轰炸",
-shortNameEn: "Poster Sticker Bomb",
-digestZh:
-"顶部超大标题打头、中部人物道具多方反应堆满、漫画贴纸气泡放射线叠加、海报式热闹",
-digestEn:
-"extra-large title on top, characters props and reactions packed in the center, comic stickers speech bubbles and radiating lines overlaid, poster-like density",
-paletteZh:
-"标题关键词着色、其余白色、黑色粗描边；主色调鲜明高饱和",
-paletteEn:
-"title keyword in color, rest white, thick black outline; bold high-saturation dominant colors",
-negativeShortZh:
-"水印、平台 UI、画面留白空旷、贴纸与梗点无关、小字标题、乱码文字",
-negativeShortEn:
-"watermarks, platform UI, empty negative space, stickers unrelated to the gag, small title, garbled text",
-forceLayout: "slogan",
-analysisGuideZh:
-"本风格固定用 slogan 版式（layoutType 必须填 slogan，sideA / sideB 留空）：mainTitle 写标题本身就是梗的那句大标题（口语梗化、从剧本最密的梗点来）；mainCharacters 选 1–4 位（中部画面的人物与多方反应）；characterPoses 写中部画面里人物、道具与多方反应怎么堆（谁拿着标志性道具、谁在旁边什么反应）；keyProp 写最有标志性的那件道具（梗的视觉锚点）；effectTheme 写叠加的漫画贴纸元素（对话气泡、梗贴纸、放射线，逐项点名并与标题梗点呼应）；bubbleLines 用作贴纸气泡里的台词，从真实台词里挑。签名版照常先定：effects 写贴纸元素（最多 2 个），propAnchor 写标志性道具。",
-compositionZh:
-"通用构图（同一份提示词适用于 16:9 横版、3:4 竖版、4:3 横版，不为单一画幅写死）：顶部超大标题打头；中部把人物、标志性道具与多方反应堆满，像一张手绘海报；漫画贴纸元素（对话气泡、梗贴纸、放射线）叠加在画面上、与标题梗点呼应。无论横竖画幅，标题不得被裁切，贴纸不得盖住人脸。",
-compositionEn:
-"Universal composition (one prompt works for 16:9 landscape, 3:4 portrait and 4:3 landscape — never hard-coded to a single frame): an extra-large title heads the top; the center is packed with characters, the signature prop and multiple reactions, like a hand-drawn poster; comic sticker elements (speech bubbles, gag stickers, radiating lines) are overlaid, echoing the title's gag. In any orientation the title must never be cropped and stickers must never cover faces.",
-titleLineZh: (plan) =>
-`主标题（必须逐字出现在画面顶部）：「${plan.mainTitle}」——超大字号，关键词可用醒目颜色突出、其余白色，黑色粗描边。`,
-titleLineEn: (plan) =>
-`Main title (must appear across the top, exact Chinese characters): "${plan.mainTitle}" — extra-large letters, keyword may be highlighted in a bold color, rest in white, thick black outline.`,
-shortTitleLineZh: (_plan, title) =>
-`主标题「${title}」置顶超大字号、关键词着色其余白色、黑色粗描边、逐字准确；中部人物、道具与多方反应堆满，贴纸气泡放射线叠加。`,
-shortTitleLineEn: (_plan, title) =>
-`Title "${title}" (exact Chinese characters) extra-large across the top, keyword in color, rest white, thick black outline; center packed with characters, props and reactions, stickers, bubbles and radiating lines overlaid.`,
-shortExtraZh:
-"贴纸轰炸：对话气泡、梗贴纸、放射线等漫画贴纸元素叠满画面，与标题梗点呼应，不盖人脸。",
-shortExtraEn:
-"Sticker overload: speech bubbles, gag stickers and radiating lines layered over the image, echoing the title's gag, never covering faces.",
-propShortHintZh: "在中部画面里放大呈现",
-propShortHintEn: "shown enlarged in the center",
-propLabelZh: "标志性道具（中部画面里最抢眼的那件）",
-propLabelEn: "Signature prop (the most eye-catching object in the center)",
-effectsLabelZh: "贴纸元素（对话气泡、梗贴纸、放射线，与标题梗点呼应）",
-effectsLabelEn: "Sticker elements (speech bubbles, gag stickers, radiating lines, echoing the title's gag)",
 },
 {
 id: "multi_panel_story",
@@ -1027,83 +667,33 @@ effectsLabelZh: "主题材质特效（标题字上的材质 + 环绕装饰元素
 effectsLabelEn: "Thematic material effect (material on the title letters + surrounding decorations)",
 },
 {
-id: "market_note_quote",
-label: "风格10 · 烟火气纸条金句",
-shortDesc:
-"涂鸦大标题 + 撕纸条金句副标题 + 前景招牌商品特写（市井摊位/小店单集）",
-analysisSummary:
-"适合\"校门口小摊、小店、市井烟火气\"的单集，大标题上画几笔小涂鸦，标题下面贴一张撕纸条写一句金句，前景再摆一盘招牌商品当视觉锚。学自用户新发的封面《走读生在 / 给我次机会》亲眼分析提炼。",
-traits: MARKET_NOTE_QUOTE_TRAITS,
-rulesZh: MARKET_NOTE_QUOTE_RULES_ZH,
-rulesEn: MARKET_NOTE_QUOTE_RULES_EN,
-negativeZh:
-"不要：水印、平台 UI、荒诞奇观元素、严肃悬念气质、标题无涂鸦、纸条金句缺失、前景无商品特写、无关文字与乱码文字。",
-negativeEn:
-"Avoid: watermarks, platform UI, absurd spectacle elements, serious or suspense mood, title without doodles, missing paper-note subtitle, no foreground product close-up, unrelated or garbled text.",
-shortNameZh: "烟火气纸条金句",
-shortNameEn: "Market Note Quote",
-digestZh:
-"两行涂鸦大标题、撕纸条金句副标题（关键词红线标出）、前景招牌商品特写、一侧背影",
-digestEn:
-"two-line title with doodles, torn paper note subtitle with keyword underlined in red, foreground signature product close-up, character seen from behind on one side",
-paletteZh:
-"标题双色对撞 + 手绘涂鸦色，市井暖调自然光",
-paletteEn:
-"two-color title clash plus hand-drawn doodle colors, warm market natural-light tones",
-negativeShortZh:
-"水印、平台 UI、荒诞奇观、严肃悬念气质、无涂鸦标题、无商品特写、乱码文字",
-negativeShortEn:
-"watermarks, platform UI, absurd spectacle, serious suspense mood, title without doodles, no product close-up, garbled text",
-forceLayout: "slogan",
-analysisGuideZh:
-"本风格固定用 slogan 版式（layoutType 必须填 slogan，sideA / sideB 留空）：mainTitle 写顶部两行超大标题的全文（两行合起来就是主标题，从本集市井梗来）；hookLine 写撕纸条上的副标题金句（一句最有梗的话，关键词在拼词时用红色下划线标出）；mainCharacters 选摊位/小店里的人物 1–3 位（含一侧背对镜头的人物）；characterPoses 写摊位/小店场景里人物在干什么、一侧人物背对镜头的站位，不写荒诞奇观、不写对峙；keyProp 写前景的招牌商品或食物（视觉锚点，要能拍特写的那盘/那件）；effectTheme 写标题旁的涂鸦装饰（纸飞机、爱心、星星等，逐项点名）与市井烟火气氛围；backgroundScene 写摊位/小店场景与背景招牌/菜单；bubbleLines 可少放或不放。签名版照常先定：titleShort 写两行标题短语，propAnchor 写招牌商品，effects 写涂鸦元素（最多 2 个），backgroundKeyword 给摊位场景一个词。",
-compositionZh:
-"通用构图（同一份提示词适用于 16:9 横版、3:4 竖版、4:3 横版，不为单一画幅写死）：顶部两行超大标题配涂鸦装饰；标题下方贴一张撕纸条写副标题金句（关键词红色下划线）；中部是摊位/小店场景，前景招牌商品特写；一侧人物背对镜头；背景是招牌/菜单（超写实真人实拍、电影质感、自然光）。无论横竖画幅，标题、纸条与商品特写都不得被裁切。",
-compositionEn:
-"Universal composition (one prompt works for 16:9 landscape, 3:4 portrait and 4:3 landscape — never hard-coded to a single frame): extra-large two-line title at the top with doodle decorations; below the title a torn paper note carrying the subtitle with the keyword underlined in red; center is a street stall / shop scene with a foreground close-up of the signature product; a character seen from behind on one side; background is a sign / menu (hyper-realistic live-action, cinematic, natural light). In any orientation the title, the note and the product close-up must never be cropped.",
-titleLineZh: (plan) =>
-`主标题（必须逐字出现在画面顶部、两行呈现）：「${plan.mainTitle}」——超大字号、双色，配涂鸦装饰；标题下方撕纸条副标题（逐字准确）：「${plan.subtitle || "副标题"}」，关键词用红色下划线标出。`,
-titleLineEn: (plan) =>
-`Main title (must appear across the top in two lines, exact Chinese characters): "${plan.mainTitle}" — extra-large letters in two colors with doodle decorations; subtitle on the torn paper note below (exact Chinese characters): "${plan.subtitle || "副标题"}", keyword underlined in red.`,
-shortTitleLineZh: (_plan, title) =>
-`主标题「${title}」置顶两行超大字号、双色配涂鸦、逐字准确；标题下方撕纸条写金句副标题，前景招牌商品特写，一侧背影。`,
-shortTitleLineEn: (_plan, title) =>
-`Title "${title}" (exact Chinese characters) in two extra-large lines across the top, two colors with doodles; torn paper note subtitle below, foreground signature product close-up, character seen from behind on one side.`,
-propShortHintZh: "在前景以特写呈现",
-propShortHintEn: "shown in close-up in the foreground",
-propLabelZh: "招牌商品（前景特写、视觉锚点）",
-propLabelEn: "Signature product (foreground close-up, visual anchor)",
-effectsLabelZh: "涂鸦装饰（标题旁的纸飞机、爱心、星星等）",
-effectsLabelEn: "Doodle decorations (paper plane, heart, sparkles beside the title)",
-},
-{
 id: "evidence_reveal",
 label: "风格11 · 证物揭晓",
 shortDesc:
-"中央证物超写实特写 + 表面/真相双标签 + 揭晓式大标题（反转揭晓单集）",
+"证物档案招牌版式：米纸底 + 红封条 + 藏青底条固定画框、两行揭晓标题、证物居中特写、左右双标签、右下角已验真红章（反转揭晓单集）",
 analysisSummary:
-"中央一个超写实证物特写 + 上下两张\"表面/真相\"身份标签 + 顶部一句揭晓式大标题；人物退居两侧当证人；档案证物风，红章、编号、封条做第二层。独一性：从用户自己的三单精修解剖机制提炼（萝卜头=灵参、爸爸=校长、规则字面执行），而非学外部爆款封面。",
+"每张封面都是一份「证物档案」：档案米纸底、顶部红色斜纹封条、底部藏青「证物档案」条、两行揭晓式标题、证物居中藏青框特写、表面/真相双标签、人物两侧当证人、右下角「已验真」红章——位置与 5 色配色全部钉死不变，变的只是每集的证物、标题文字与出场人物；发到平台主页一排拼起来整齐统一、一眼认出。独一性：从用户自己的三单精修解剖机制提炼（萝卜头=灵参、爸爸=校长、规则字面执行），而非学外部爆款封面。",
 traits: EVIDENCE_REVEAL_TRAITS,
 rulesZh: EVIDENCE_REVEAL_RULES_ZH,
 rulesEn: EVIDENCE_REVEAL_RULES_EN,
 negativeZh:
-"不要：人物居中抢戏、证物太小、表面和真相标签同字号同色、标题写成口号而非揭晓句、无证物编号和印章等档案元素、全屏高饱和综艺色、水印、无关文字。",
+"不要：换底色（底色必须是档案米纸 #F5EDDC）、自己改配色、标题移位或改成一行、标题与标签文字改字漏字多字错字、双标签位置互换或同色、证物不在正中央或没有藏青描边方框、人物居中抢戏或缺人、红章缺失或不在右下角或文字不是「已验真」、底部藏青条缺失或「证物档案」四字缺失、水印、无关文字。",
 negativeEn:
-"Avoid: characters taking the center, tiny evidence, surface and truth labels in the same size and color, title written as a slogan instead of a reveal, missing evidence tag and stamp, full-frame high-saturation variety colors, watermarks, unrelated or garbled text.",
+"Avoid: changing the background (it must stay archive cream #F5EDDC), inventing a different palette, moving the title or making it one line, changed, missing, extra or wrong characters in the title or labels, swapped or same-color labels, evidence off-center or without the navy frame, characters taking the center or missing, missing stamp, stamp not at the bottom right, or stamp text other than 「已验真」, missing navy bottom bar or missing 「证物档案」 characters, watermarks, unrelated text.",
 shortNameZh: "证物揭晓",
 shortNameEn: "Evidence Reveal",
 digestZh:
-"证物中央特写、表面/真相双标签、揭晓式大标题、人物两侧当证人、档案红章封条",
+"档案米纸底 + 红封条 + 藏青「证物档案」底条的固定画框、两行揭晓式标题、证物居中藏青框特写、左右双标签、人物两侧当证人、右下角「已验真」红章",
 digestEn:
-"evidence close-up at center, surface/truth double labels, reveal headline, characters as witnesses on both sides, archive red stamps and seals",
+"fixed evidence-file frame (cream paper, red seal tape, navy 证物档案 bar), two-line reveal title, centered evidence in a navy frame, surface/truth labels left and right, characters as witnesses on both sides, red 已验真 stamp at bottom right",
 paletteZh:
-"暗底 + 金黄真相 + 红章 + 白表面标签",
+"钉死 5 色：档案米纸 #F5EDDC、档案红 #C0392B、藏青 #1F2A44、金黄 #F7C948、标签灰 #E8E0CC，不许换色",
 paletteEn:
-"dark background + gold truth letters + red stamps and seals + white surface label",
+"locked 5-color palette: archive cream #F5EDDC, archive red #C0392B, navy #1F2A44, gold #F7C948, label gray #E8E0CC — never substitute",
 negativeShortZh:
-"人物居中抢戏、证物太小、双标签同字号同色、标题写成口号、无档案元素、全屏高饱和综艺色、水印、乱码文字",
+"换底色、改配色、标题移位、标题标签错字、标签互换、证物无框、人物抢中心、红章缺失或移位、水印、乱码文字",
 negativeShortEn:
-"characters taking the center, tiny evidence, labels in same size and color, slogan title, missing file elements, full-frame high-saturation colors, watermarks, garbled text",
+"changed background, changed palette, moved title, wrong title/label characters, swapped labels, unframed evidence, characters taking the center, missing or moved stamp, watermarks, garbled text",
 forceLayout: "slogan",
 },
 ];

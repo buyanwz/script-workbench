@@ -78,12 +78,12 @@ export const privileged = definePrivilegedContracts({
   // 避免重复提交重复计费；重试只发生在轮询（只读查询，不计费）。
   // v4.22 参考图通道恢复（用户明确要求、推翻 v4.05 停用）：异步端
   // 点的 image 字段只收 http(s) 链接（data: Base64 会被 400 拒）；
-  // 带 referenceImages 的提交先在特权层把降采样副本临时托管到
-  // uguu.se 公开图床换 https 链接再提交（v3.86 已实测链路：直传
-  // Geeknow 与本站签名链接均实测走不通）。客户端负责当次知情同
-  // 意：未同意时不发送参考图、自动降级纯文字，本层收到的参考图
-  // 即视为已同意；托管失败整单失败并写清原因，不静默丢图。同步
-  // generate 契约把参考图以 data: 直传 Geeknow 本站接口不变。
+  // 带 referenceImages 的提交先在特权层把降采样副本换成 https 链
+  // 接再提交。v5.97 起换链接走 host_reference_images 双路线：主
+  // 路线 Geeknow 自家上传（presign + PUT，v5.97 沙箱实测通），回
+  // 退 uguu.se 公开图床。本层收到的参考图即视为已同意发送；托管
+  // 失败整单失败并写清原因，不静默丢图。同步 generate 契约把参
+  // 考图以 data: 直传 Geeknow 本站接口不变。
   geeknowSubmitImageTask: {
     request: z.object({
       model: z.string().min(1).max(120),
@@ -105,6 +105,14 @@ export const privileged = definePrivilegedContracts({
           }),
         )
         .max(16),
+      // v5.95：参考图已在上一步（geeknowHostReferenceImages）换好
+      // 的托管链接——带它进来时提交一步不再现传图床，只剩一次
+      // Geeknow 调用，稳在守护进程 30 秒预算内。与 referenceImages
+      // 二选一（链接优先）；都不带 = 纯文字提交。
+      referenceImageUrls: z
+        .array(z.string().min(1).max(2000))
+        .max(16)
+        .optional(),
       // v3.83 提交设置：用户自填 Key / API 地址（可空）。Key 只经
       // 本契约透传到助手进程用于当次请求头，绝不落库、不进日志
       // 与任何返回字段；为空时再按请求头（总设置）> 环境变量的
@@ -119,11 +127,60 @@ export const privileged = definePrivilegedContracts({
       mimeType: z.string().nullable(),
       error: z.string().nullable(),
       previewBase64: z.string().nullable(),
-      // v5.16：本次提交实际带上的参考图托管链接（uguu.se，提交顺
-      // 序）——只在提交成功时随回执带回供封面记录算哈希自证「带
+      // v5.16：本次提交实际带上的参考图托管链接（提交顺序；v5.97
+      // 起可能是 Geeknow 自家 r2.geeknow.ai 链接或 uguu.se 回退链
+      // 接）——只在提交成功时随回执带回供封面记录算哈希自证「带
       // 了哪几张图」；链接本身不落库（记录只存 SHA-256 哈希），
       // 失败 / 无参考图时为空数组。
       refImageUrls: z.array(z.string()),
+      // v5.97：内联图兜底路径这次实际走的托管路线（geeknow /
+      // uguu）；走预托管链接或无参考图时为 null。
+      hostRoute: z.string().nullable(),
+      // v5.95：失败出在哪一步——host_timeout / host_error（图床托
+      // 管步，没提交不计费）/ submit_timeout（已发出、建没建不确
+      // 定）/ submit_unreachable（没连上、确定没建）/ auth / http /
+      // submit_error；成功时为 null。供上层把报错写成大白话并说
+      // 清能不能直接重试。authFailed 保留 v3.84 起的鉴权标记。
+      stage: z.string().nullable(),
+      authFailed: z.boolean(),
+    }),
+    timeoutMs: 120_000,
+  },
+  // v5.95 参考图托管独立一步（v5.97 改主路线）：把参考图降采样
+  // 副本逐张换成 https 链接，只换链接——不建任务、不计费。与提
+  // 交拆开后各自独占守护进程 30 秒预算：托管整步共用 24 秒截止。
+  // v5.97 主路线改走 Geeknow 自家上传（POST /api/upload/presign
+  // 拿预签名地址 → PUT 字节 → public_url，r2.geeknow.ai），自家
+  // 上传走不通才自动回退 uguu.se 公开图床；两条都失败才报错。
+  // 鉴权与 submit 同口径（apiKey / apiBase 可选透传）。回执带
+  // route（geeknow / uguu）写明实际走的路线。链接只随回执返回
+  // 供紧接着的提交使用，不落库（记录只存哈希，与 v5.16 同口
+  // 径）。失败整步失败、写清哪张图卡在哪一步，绝不部分成功
+  // （少一张图提交出去就是静默丢图）。
+  geeknowHostReferenceImages: {
+    request: z.object({
+      referenceImages: z
+        .array(
+          z.object({
+            dataBase64: z.string().min(1).max(100_000_000),
+            mimeType: z.string().min(1).max(100),
+          }),
+        )
+        .min(1)
+        .max(16),
+      // v5.97：与 submit 相同的可选自填 Key / API 地址——presign
+      // 自家上传要带同一套鉴权才走得通；为空走已连接凭证。
+      apiKey: z.string().min(1).max(400).optional(),
+      apiBase: z.string().min(1).max(300).optional(),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      urls: z.array(z.string()),
+      error: z.string().nullable(),
+      stage: z.string().nullable(),
+      // v5.97：这次实际走的路线——geeknow（自家上传）/ uguu
+      // （公开图床回退）；失败时为 null。
+      route: z.string().nullable(),
     }),
     timeoutMs: 120_000,
   },
@@ -483,7 +540,7 @@ export const privileged = definePrivilegedContracts({
 // 与连接器 bin/geeknow.py 同一条调用口径，但不截断输出（模型列表
 // 与图片 base64 都可能远超 8000 字），结果以 RESULT_JSON 行回传。
 const GEEKNOW_PY = `
-import json, sys, base64, time, urllib.request, urllib.error
+import json, sys, base64, time, socket, urllib.request, urllib.error
 
 # P4：exe 环境没有 Muse 平台的 dynamic_credentials 代理凭证机制，
 # read_json_response 在此本地实现（与原 helper 等价：分块读完
@@ -538,19 +595,96 @@ def apply_auth(req, req_in, host):
         return None
     return "未填 Geeknow Key，请在工作台生图设置里填写"
 
-# v4.22 参考图临时托管（恢复 v3.86 已实测链路，用户明确要求恢复带
-# 参考图生成、推翻 v4.05 下线决定）：把参考图降采样副本（最长边
-# 1024px 的 JPEG）逐张上传到 uguu.se 匿名公开图床换 https 链接——
-# 异步接口的 image 字段只收 http(s) 链接、拒 data: Base64，本站
-# blob 是站内私有地址服务商取不到，直传 Geeknow 与签名链接两条路
-# 线此前均已实测走不通，这条是唯一实测可用的通道。调用前提：客户
-# 端已取得用户当次的具名知情同意（未同意时客户端根本不会把参考图
-# 发到这里、自动降级纯文字提交）；本层只负责「收到图 → 换链接」，
-# 拿不到可用链接就整单失败、写清真实原因，绝不静默丢图照常提交。
-def host_reference_images(refs):
+# v5.95 超时判定：urllib 的超时会以 TimeoutError / socket.timeout
+# 本体、或 URLError.reason 的形式冒出来，三种都认。
+def is_timeout_exc(e):
+    if isinstance(e, (TimeoutError, socket.timeout)):
+        return True
+    reason = getattr(e, "reason", None)
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return True
+    return "timed out" in str(e).lower()
+
+# v5.97 Geeknow 自家上传单张：presign（钳 presign_timeout）+ PUT
+# 字节到预签名地址（钳 put_timeout）。PUT 不带任何鉴权头——地址
+# 本身已签名（SignedHeaders 只含 content-type 与 host），多带头
+# 反而可能让签名失效。成功回 (public_url, None)；失败回
+# (None, {"error", "stage"})，其中该地址走不了自家上传（地址格
+# 式不对 / 不在已连接凭证白名单内且没自填 Key）标 unavailable，
+# 调用方照常回退、不算用户错误。
+def upload_ref_geeknow(img_bytes, label, req_in, presign_timeout, put_timeout):
+    base, berr = effective_base(req_in)
+    if berr:
+        return None, {"error": berr, "stage": "host_error", "unavailable": True}
+    host = urllib.parse.urlparse(base).hostname or ""
+    try:
+        data = json.dumps({"file_name": "cover-ref.jpg", "content_type": "image/jpeg"}).encode("utf-8")
+        pr = urllib.request.Request(base + "/api/upload/presign", data=data, method="POST")
+        pr.add_header("Content-Type", "application/json")
+        aerr = apply_auth(pr, req_in, host)
+        if aerr:
+            return None, {"error": aerr, "stage": "host_error", "unavailable": True}
+        with opener().open(pr, timeout=presign_timeout) as resp:
+            body = read_json_response(resp)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            detail = ""
+        return None, {"error": label + "向 Geeknow 申请自家上传地址失败 HTTP " + str(e.code) + ("：" + detail if detail else ""), "stage": "host_error"}
+    except Exception as e:
+        if is_timeout_exc(e):
+            return None, {"error": label + "向 Geeknow 申请自家上传地址超时了", "stage": "host_timeout"}
+        return None, {"error": label + "向 Geeknow 申请自家上传地址失败：" + type(e).__name__ + ": " + str(e)[:200], "stage": "host_error"}
+    d = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(d, dict):
+        d = body if isinstance(body, dict) else {}
+    upload_url = d.get("upload_url")
+    public_url = d.get("public_url")
+    method = d.get("method") if isinstance(d.get("method"), str) and d.get("method") else "PUT"
+    ctype = d.get("content_type") if isinstance(d.get("content_type"), str) and d.get("content_type") else "image/jpeg"
+    if not (isinstance(upload_url, str) and upload_url.startswith("https://") and isinstance(public_url, str) and public_url.startswith("https://")):
+        return None, {"error": label + "Geeknow 自家上传没返回可用的上传地址（返回里缺 upload_url / public_url）", "stage": "host_error"}
+    try:
+        ur = urllib.request.Request(upload_url, data=img_bytes, method=method)
+        ur.add_header("Content-Type", ctype)
+        ur.add_header("Connection", "close")
+        with urllib.request.build_opener().open(ur, timeout=put_timeout) as resp:
+            resp.read()
+            if resp.status < 200 or resp.status >= 300:
+                return None, {"error": label + "往 Geeknow 自家空间传图失败 HTTP " + str(resp.status), "stage": "host_error"}
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            detail = ""
+        return None, {"error": label + "往 Geeknow 自家空间传图失败 HTTP " + str(e.code) + ("：" + detail if detail else ""), "stage": "host_error"}
+    except Exception as e:
+        if is_timeout_exc(e):
+            return None, {"error": label + "往 Geeknow 自家空间传图超时了", "stage": "host_timeout"}
+        return None, {"error": label + "往 Geeknow 自家空间传图失败：" + type(e).__name__ + ": " + str(e)[:200], "stage": "host_error"}
+    return public_url, None
+
+# v5.95：deadline_ts = 本次调用的共享截止时刻（time.time() 口径）。
+# 逐张上传的超时不再写死 30 秒，而是「剩多少时间用多少」并钳在
+# 15 秒内——守护进程整次动作只有 30 秒预算，托管这一步必须给后
+# 面的提交留出时间，绝不许出现「托管 30 秒 + 提交 25 秒」这种串
+# 行超预算的组合。失败回 (None, {"error", "stage"}, None)：stage
+# 区分 host_timeout（托管太慢/超时）与 host_error（其他托管失
+# 败），供上层写清是哪一步出的问题；两种都表示还没提交、不会
+# 计费。成功回 (urls, None, route)：route = geeknow（全走自家
+# 上传）/ uguu（全走公开图床回退）/ mixed（两种都有）。
+# v5.97：primary_deadline_ts = 自家上传路线的时间段截止——每张
+# 图先在该截止内走自家上传（presign 钳 4 秒、PUT 钳 6 秒），走
+# 不通立刻用 deadline_ts 内的剩余时间改走 uguu.se；两段相加不
+# 超 deadline_ts。req_in 为空（没鉴权信息）时直接走回退路线。
+def host_reference_images(refs, deadline_ts=None, req_in=None, primary_deadline_ts=None):
     import io, uuid
     from PIL import Image
     urls = []
+    routes = []
     for idx, r in enumerate(refs):
         label = "第 " + str(idx + 1) + " 张参考图"
         try:
@@ -597,7 +731,32 @@ def host_reference_images(refs):
                         img_bytes = cand
                         break
         except Exception as e:
-            return None, label + "没能处理成可上传的副本：" + type(e).__name__ + ": " + str(e)[:200]
+            return None, {"error": label + "没能处理成可上传的副本：" + type(e).__name__ + ": " + str(e)[:200], "stage": "host_error"}, None
+        # v5.97 主路线：先走 Geeknow 自家上传（只在 primary 截止内
+        # 试；presign 钳 4 秒、PUT 钳 6 秒）。走通就用自家链接，
+        # 不再碰公开图床。
+        geek_err = None
+        if req_in is not None and primary_deadline_ts is not None:
+            prem = primary_deadline_ts - time.time()
+            if prem >= 1.5:
+                gurl, geek_err = upload_ref_geeknow(img_bytes, label, req_in, max(1.0, min(4.0, prem)), max(1.5, min(6.0, prem)))
+                if gurl:
+                    urls.append(gurl)
+                    routes.append("geeknow")
+                    continue
+            elif geek_err is None:
+                geek_err = {"error": label + "还没开始传，Geeknow 自家上传的时间段已经用完了", "stage": "host_timeout"}
+        # 回退路线：uguu.se 公开图床，用整步截止内的剩余时间。
+        if deadline_ts is not None:
+            remain = deadline_ts - time.time()
+            if remain < 2.0:
+                uerr = {"error": label + "还没开始传，前面几张图换链接已经把时间用完了", "stage": "host_timeout"}
+                if geek_err:
+                    uerr = {"error": "先走 Geeknow 自家上传没走通（" + geek_err["error"] + "），自动改走公开图床也没走通：" + uerr["error"], "stage": "host_timeout"}
+                return None, uerr, None
+            up_timeout = max(2.0, min(15.0, remain))
+        else:
+            up_timeout = 30
         try:
             boundary = "----hatchref" + uuid.uuid4().hex
             crlf = chr(13) + chr(10)
@@ -607,7 +766,7 @@ def host_reference_images(refs):
             hr = urllib.request.Request("https://uguu.se/upload.php", data=body, method="POST")
             hr.add_header("Content-Type", "multipart/form-data; boundary=" + boundary)
             hr.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
-            with opener().open(hr, timeout=30) as hresp:
+            with opener().open(hr, timeout=up_timeout) as hresp:
                 hbody = read_json_response(hresp)
             url = None
             if isinstance(hbody, dict):
@@ -617,18 +776,39 @@ def host_reference_images(refs):
                     if isinstance(u, str) and u.startswith("https://"):
                         url = u
             if not url:
-                return None, label + "上传到公开图床后没拿到可用链接（图床返回：" + json.dumps(hbody, ensure_ascii=False)[:200] + "）"
+                uerr = {"error": label + "上传到公开图床后没拿到可用链接（图床返回：" + json.dumps(hbody, ensure_ascii=False)[:200] + "）", "stage": "host_error"}
+                if geek_err:
+                    uerr = {"error": "先走 Geeknow 自家上传没走通（" + geek_err["error"] + "），自动改走公开图床也没走通：" + uerr["error"], "stage": "host_error"}
+                return None, uerr, None
             urls.append(url)
+            routes.append("uguu")
         except urllib.error.HTTPError as e:
             detail = ""
             try:
                 detail = e.read().decode("utf-8", "replace")[:200]
             except Exception:
                 detail = ""
-            return None, label + "上传公开图床失败 HTTP " + str(e.code) + ("：" + detail if detail else "")
+            uerr = {"error": label + "上传公开图床失败 HTTP " + str(e.code) + ("：" + detail if detail else ""), "stage": "host_error"}
+            if geek_err:
+                uerr = {"error": "先走 Geeknow 自家上传没走通（" + geek_err["error"] + "），自动改走公开图床也没走通：" + uerr["error"], "stage": "host_error"}
+            return None, uerr, None
         except Exception as e:
-            return None, label + "上传公开图床失败：" + type(e).__name__ + ": " + str(e)[:200]
-    return urls, None
+            if is_timeout_exc(e):
+                uerr = {"error": label + "上传到公开图床超时了（图床这会儿响应太慢）", "stage": "host_timeout"}
+            else:
+                uerr = {"error": label + "上传公开图床失败：" + type(e).__name__ + ": " + str(e)[:200], "stage": "host_error"}
+            if geek_err:
+                uerr = {"error": "先走 Geeknow 自家上传没走通（" + geek_err["error"] + "），自动改走公开图床也没走通：" + uerr["error"], "stage": uerr["stage"]}
+            return None, uerr, None
+    if routes and all(x == "geeknow" for x in routes):
+        route = "geeknow"
+    elif routes and all(x == "uguu" for x in routes):
+        route = "uguu"
+    elif routes:
+        route = "mixed"
+    else:
+        route = None
+    return urls, None, route
 
 # 图片文件在 r2.geeknow.ai 上：默认 Python UA 会被 403 拒绝，带
 # 浏览器 UA 才放行（实测）。所有取图下载都走这里，不带凭证头
@@ -789,10 +969,36 @@ def main():
         except Exception as e:
             emit({"ok": False, "models": [], "error": "读取模型列表失败：" + type(e).__name__ + ": " + str(e)[:400]})
         return
+    if mode == "hostrefs":
+        # v5.95 参考图托管独立一步（与提交拆开、各走各的 30 秒预
+        # 算）：只换链接、不建任务、不计费。整步共用一个 24 秒截
+        # 止时间（留 6 秒余量给进程启动与回执）。
+        # v5.97：主路线 Geeknow 自家上传的时间段 = 前段（1 张图约
+        # 8 秒、每多一张加 2 秒、上限 16 秒），走不通自动改走
+        # uguu.se 用剩余时间再试；两段相加不超 24 秒。回执带
+        # route 写明实际路线；失败时 error 已写清两条各败在哪。
+        refs = req_in.get("referenceImages") or []
+        if not refs:
+            emit({"ok": True, "urls": [], "error": None, "stage": None, "route": None})
+            return
+        host_start = time.time()
+        primary_secs = min(16.0, 6.0 + 2.0 * len(refs))
+        img_urls, herr, route = host_reference_images(refs, host_start + 24.0, req_in, host_start + primary_secs)
+        if herr:
+            emit({"ok": False, "urls": [], "error": herr["error"], "stage": herr["stage"], "route": None})
+            return
+        emit({"ok": True, "urls": img_urls, "error": None, "stage": None, "route": route})
+        return
     if mode == "submit":
         # 异步提交：一次短调用，只拿任务号，绝不在这里等出图，也绝不
         # 自动重试提交（重试提交 = 可能重复计费）。提交等待在服务端
         # 钳到 25 秒内，稳在守护进程 30 秒预算之下。
+        # v5.95：整步共用一个截止时间（开始后 24 秒，留 6 秒余量）：
+        # 客户端一般先走 hostrefs 把参考图换好链接、提交时直接带
+        # referenceImageUrls 进来，这一步就只剩一次 Geeknow 调用；
+        # 万一还带了内联图进来（旧路径），托管只准用截止时间内的
+        # 前段（最多约 14 秒），剩下的全留给提交——两步相加永远
+        # 小于守护进程 30 秒预算，不再串行超预算被掐断。
         payload = {
             "model": req_in["model"],
             "prompt": req_in["prompt"],
@@ -801,21 +1007,42 @@ def main():
             "quality": req_in["quality"],
             "response_format": "b64_json",
         }
+        submit_start = time.time()
+        submit_deadline = submit_start + 24.0
         refs = req_in.get("referenceImages") or []
+        prehosted = req_in.get("referenceImageUrls") or []
         hosted_ref_urls = []
-        if refs:
+        submit_host_route = None
+        if prehosted:
+            # v5.95 主路径：参考图已在上一步（hostrefs）换好链接，
+            # 这里直接用，不再现传图床——提交只剩一次 Geeknow 调用。
+            hosted_ref_urls = [u for u in prehosted if isinstance(u, str) and u.startswith("https://")]
+            if hosted_ref_urls:
+                payload["image"] = hosted_ref_urls
+        elif refs:
             # v4.22 恢复带参考图提交（用户明确要求、推翻 v4.05 停
             # 用）：异步接口的 image 字段只收 http(s) 链接，先把参
-            # 考图降采样副本临时托管到 uguu.se 换链接再带上提交。
-            # 走到这里说明客户端已取得用户当次具名同意；托管失败
-            # 整单失败、写清原因、不提交不计费，绝不静默丢图。
-            img_urls, herr = host_reference_images(refs)
+            # 考图降采样副本换成链接再带上提交。托管失败整单失败、
+            # 写清原因、不提交不计费，绝不静默丢图。
+            # v5.95：托管只准用到开始后约 14 秒，余量全留给提交。
+            # v5.97：与 hostrefs 同一套双路线——前约 7 秒先走
+            # Geeknow 自家上传，走不通自动改走 uguu.se 用剩余的托
+            # 管时间；req_in 里带与提交同一套 apiKey / apiBase。
+            img_urls, herr, host_route = host_reference_images(refs, submit_start + 14.0, req_in, submit_start + 7.0)
             if herr:
-                emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "error": "参考图没能换成链接，这次没有提交、不会计费：" + herr + "。可以稍后重试；或取消参考图（并去掉提示词里「以随附的人物资产图为准」约束）用纯文字生成。"})
+                if herr["stage"] == "host_timeout":
+                    emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "stage": "host_timeout", "error": "参考图换链接超时了：" + herr["error"] + "。这一步在提交之前，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。"})
+                else:
+                    emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "stage": "host_error", "error": "参考图没能换成链接，这次没有提交、不会计费：" + herr["error"] + "。可以稍后重试；或取消参考图（并去掉提示词里「以随附的人物资产图为准」约束）用纯文字生成。"})
                 return
             payload["image"] = img_urls
             hosted_ref_urls = img_urls
-        sub_timeout = min(float(req_in.get("requestTimeoutSec", 60)), 25.0)
+            submit_host_route = host_route
+        remain = submit_deadline - time.time()
+        if remain < 3.0:
+            emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "stage": "host_timeout", "error": "参考图换链接太慢，还没轮到向 Geeknow 提交时间就用完了：这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。"})
+            return
+        sub_timeout = max(1.0, min(float(req_in.get("requestTimeoutSec", 60)), 25.0, remain))
         dl_timeout = float(req_in.get("downloadTimeoutSec", 60))
         base, berr = effective_base(req_in)
         if berr:
@@ -833,27 +1060,37 @@ def main():
             with opener().open(r, timeout=sub_timeout) as resp:
                 body = read_json_response(resp)
         except urllib.error.HTTPError as e:
-            extra = {}
+            extra = {"stage": "http"}
             if e.code in (401, 403):
-                extra = {"authFailed": True}
+                extra = {"authFailed": True, "stage": "auth"}
             http_error_emit(e, "Geeknow 异步提交失败", extra)
             return
         except Exception as e:
-            emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "error": "Geeknow 异步提交失败：" + type(e).__name__ + ": " + str(e)[:400]})
+            # v5.95 超时分清是哪种：等回复超时 = 请求多半已经发到
+            # Geeknow 了，任务到底建没建没法确认，明说不确定、不让
+            # 用户盲目重点（重点可能重复计费）；连接层就失败（连不
+            # 上 / 域名解析失败 / 连接被拒）= 请求根本没送达，任务
+            # 确定没建，可以直接重试。
+            if is_timeout_exc(e):
+                emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "stage": "submit_timeout", "error": "提交已经发给 Geeknow 了，但等它回任务号等超时了——这次任务到底建没建，现在没法确认。先别马上再点生成（万一已经建好，重点一次会重复计费）：等一两分钟，先看下面的生图记录 / 封面记录里有没有新任务冒出来，或去 Geeknow 控制台对一下；确认没有，再重新生成。"})
+            elif isinstance(e, urllib.error.URLError):
+                emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "stage": "submit_unreachable", "error": "没连上 Geeknow（" + type(e).__name__ + "：" + str(e)[:200] + "）：请求根本没送达，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。"})
+            else:
+                emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "stage": "submit_error", "error": "Geeknow 异步提交失败：" + type(e).__name__ + ": " + str(e)[:400]})
             return
         tid = find_task_id(body)
         if tid:
-            emit({"ok": True, "taskId": tid, "imageBase64": None, "mimeType": None, "error": None, "refImageUrls": hosted_ref_urls})
+            emit({"ok": True, "taskId": tid, "imageBase64": None, "mimeType": None, "error": None, "refImageUrls": hosted_ref_urls, "hostRoute": submit_host_route})
             return
         # 个别模型可能同步直接回图（没有任务号）：照单收下，不算失败。
         b64, url = extract_image(body)
         try:
             if b64:
-                emit({"ok": True, "taskId": None, "imageBase64": b64, "mimeType": "image/png", "error": None, "previewBase64": preview_of_b64(b64), "refImageUrls": hosted_ref_urls})
+                emit({"ok": True, "taskId": None, "imageBase64": b64, "mimeType": "image/png", "error": None, "previewBase64": preview_of_b64(b64), "refImageUrls": hosted_ref_urls, "hostRoute": submit_host_route})
                 return
             if url:
                 raw, mime = download_image(url, dl_timeout)
-                emit({"ok": True, "taskId": None, "imageBase64": base64.b64encode(raw).decode("ascii"), "mimeType": mime, "error": None, "previewBase64": make_preview_b64(raw), "refImageUrls": hosted_ref_urls})
+                emit({"ok": True, "taskId": None, "imageBase64": base64.b64encode(raw).decode("ascii"), "mimeType": mime, "error": None, "previewBase64": make_preview_b64(raw), "refImageUrls": hosted_ref_urls, "hostRoute": submit_host_route})
                 return
         except Exception as e:
             emit({"ok": False, "taskId": None, "imageBase64": None, "mimeType": None, "error": "提交已返回但取图失败：" + type(e).__name__ + ": " + str(e)[:400]})
@@ -1610,6 +1847,11 @@ type GeeknowRaw = {
   bodyJson?: unknown;
   previewBase64?: unknown;
   refImageUrls?: unknown;
+  urls?: unknown;
+  stage?: unknown;
+  // v5.97 参考图托管双路线回传。
+  route?: unknown;
+  hostRoute?: unknown;
   colorName?: unknown;
   labL?: unknown;
   labA?: unknown;
@@ -1928,6 +2170,7 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
       downloadTimeoutSec: args.downloadTimeoutSec,
       retryCount: args.retryCount,
       referenceImages: args.referenceImages,
+      referenceImageUrls: args.referenceImageUrls,
       ...resolveGeeknowCredentials(
         { apiKey: args.apiKey, apiBase: args.apiBase },
         auth,
@@ -1952,6 +2195,34 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
             (u): u is string => typeof u === "string",
           )
         : [],
+      stage: typeof raw.stage === "string" ? raw.stage : null,
+      authFailed: raw.authFailed === true,
+      hostRoute: typeof raw.hostRoute === "string" ? raw.hostRoute : null,
+    };
+  },
+  async geeknowHostReferenceImages(args, auth) {
+    const raw = await runPythonHelper(GEEKNOW_PY, {
+      mode: "hostrefs",
+      referenceImages: args.referenceImages,
+      ...resolveGeeknowCredentials(
+        { apiKey: args.apiKey, apiBase: args.apiBase },
+        auth,
+      ),
+    });
+    const ok = raw.ok === true;
+    return {
+      ok,
+      urls: Array.isArray(raw.urls)
+        ? raw.urls.filter((u): u is string => typeof u === "string")
+        : [],
+      error:
+        typeof raw.error === "string"
+          ? raw.error
+          : ok
+            ? null
+            : "参考图换链接失败",
+      stage: typeof raw.stage === "string" ? raw.stage : null,
+      route: typeof raw.route === "string" ? raw.route : null,
     };
   },
   async geeknowProbeAuth(args, auth) {

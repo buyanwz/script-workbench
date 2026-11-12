@@ -1564,16 +1564,18 @@ blocking: z.string().max(2000).optional(),
 // 物代号记）：AI 分析填入与用户手改的值先深存于此、刷新不丢，点
 // 「确认并同步到分镜提示词」才转正进 characterRows。存储口径宽松
 // （只卡形状与防爆上限），拼装永不读它。
+// v5.84：来源加 match——一键匹配资产图填进来的造型 / 音色也只进
+// 待确认（不再自动确认同步），来源记 match 与分析 / 手改区分。
 const charPendingRecordIn = z.object({
   look: z.string().max(5000),
   voice: z.string().max(2000),
   tone: z.string().max(2000),
   gender: z.string().max(10),
   source: z.object({
-    look: z.enum(["analysis", "manual"]).nullable(),
-    voice: z.enum(["analysis", "manual"]).nullable(),
-    tone: z.enum(["analysis", "manual"]).nullable(),
-    gender: z.enum(["analysis", "manual"]).nullable(),
+    look: z.enum(["analysis", "manual", "match"]).nullable(),
+    voice: z.enum(["analysis", "manual", "match"]).nullable(),
+    tone: z.enum(["analysis", "manual", "match"]).nullable(),
+    gender: z.enum(["analysis", "manual", "match"]).nullable(),
   }),
   jobId: z.number().nullable(),
   hasImage: z.boolean(),
@@ -4109,6 +4111,10 @@ const backupManifest = z.object({
   readme: z.string(),
   counts: z.object({
     projects: z.number(),
+    // v5.87：项目总数里在储存箱里的个数（archived=1）。导出本来就
+    // 查全部项目行、不按 archived 过滤，储存箱项目一直都在清单里；
+    // 本版起每个项目另带储存箱状态字段随包，导入后原样回到储存箱。
+    archivedProjects: z.number(),
     presets: z.number(),
     presetImages: z.number(),
     characterImages: z.number(),
@@ -4125,6 +4131,9 @@ const backupManifest = z.object({
     stagedImages: z.number(),
   }),
   categories: z.array(z.object({ name: z.string(), sortOrder: z.number() })),
+  // v5.87：储存箱分类名清单随包，导入时缺哪个分类就补建哪个，
+  // 保证储存箱项目的分类名在新台有对应的分类栏。
+  archiveCategories: z.array(z.string()),
   presets: z.array(
     z.object({
       oldId: z.number(),
@@ -4167,6 +4176,13 @@ const backupManifest = z.object({
       publishCopyJson: z.string().optional(),
       // v4.79 项目来源标记随包迁移；旧包没有此项，按普通项目处理。
       source: z.string().optional(),
+      // v5.87 储存箱状态随包迁移：以前只导项目内容、状态不进包，
+      // 导入后储存箱里的剧本会变成普通项目；本版起四项状态原样
+      // 带走、导入原样恢复。旧包没有这四项，导入端按未存入处理。
+      archived: z.boolean().optional(),
+      archiveCategory: z.string().optional(),
+      stars: z.number().optional(),
+      archivedAt: z.string().nullable().optional(),
       scriptJson: z.string().nullable(),
       characters: z.array(
         z.object({
@@ -4367,14 +4383,14 @@ function buildExecutionSheet(
     "",
     `包信息：基线版本 ${baseline}；导出时间：${exportedAt}；数量：项目 ${counts.projects} 个、储存库卡 ${counts.presets} 张、图片 ${counts.totalUniqueImages} 张（内容去重后，其中生图暂存图 ${counts.stagedImages} 张）、快照 ${counts.snapshots} 份、风格卡 ${counts.styleCards} 张、训练记录 ${counts.trainingRecords} 条、生图记录 ${counts.imageGenRecords} 条。包内另带 contentFingerprint 内容指纹（逐项内容哈希），是验收的比对基准。`,
     "",
-    "第 0 步 · 先验包：确认文件第一项就是本执行单、format 为 script-workbench-backup、packageVersion 为 2、contentFingerprint 字段在位。若文件带 incomplete 字段，先把其中 missingImages 逐条报给用户（这几张图在旧账号打包时重试后仍没能取回，复刻出的工作台会缺这几张图），再继续。用户同一次点击还下载了一个「复刻页」HTML 文件（独立复刻页：同布局、同窗口顺序、单套深色主题、全量数据与图片内嵌，双击离线可开的可编辑功能复刻——页内可编辑保存、时长重算、分镜重切、格式01/SRT/提示词包导出都在；v3.79 起页内还自带 AI 与生图：用户在页内填入自己的 Geeknow Key 即可页内 AI 写大纲 / 生成剧本与生图，Key 不在复刻页文件里、也不在本包里）——那是给用户当场对照验收布局、内容与功能层用的，不是导入材料，导入只用本 JSON 包（或复刻页导出的更新包），不要把复刻页 HTML 当备份导入。",
+    "第 0 步 · 先验包：确认文件第一项就是本执行单、format 为 script-workbench-backup、packageVersion 为 2、contentFingerprint 字段在位。若文件带 incomplete 字段，先把其中 missingImages 逐条报给用户（这几张图在旧账号打包时重试后仍没能取回，复刻出的工作台会缺这几张图），再继续。v5.87 起打包只下载这一个数据包文件，不再附带独立复刻页 HTML——工作台程序本身已经在 GitHub 上，不需要再打进备份里；恢复只用本 JSON 包在工作台里「导入备份」完成。包里只有用户数据：全部项目（含储存箱里的项目，储存箱状态——分类、星级、存入时间——随每个项目一起带走）、储存库卡与图片、模式与基因卡、训练记录、生图记录与暂存图、本机设置与未保存草稿；监控账号与监控视频、封面生成记录、任何 Key 与凭证都不在包里。",
     "第 1 步 · 重建工作台应用：读包内 replicationSpec 字段（机器可读完整规格：双台结构与窗口顺序、主题全部色值（单套深空未来）、审查页纸面规格、字号阶梯、全部功能规则、数据库表结构），在本账号新建一个同款 TypeScript 全栈网页工作台「剧本创作工作台」（私人工作台、不对外分享），逐项照规格实现，不凭印象简化、不删功能。规格里标为硬性底线的必须原样保留：生图只能由用户亲手点「生成图片」触发、失败续查只复用同一任务号、凭证永不落库不进包、时长公式与 30 秒软顶口径、模式1双层时空对比与快节奏规则。若本账号已经有由本包重建出的同款工作台，跳过本步、直接导入。",
     "第 2 步 · 导入数据：在新工作台里点页底「导入备份」、上传本文件一次导入全部（项目、储存库卡与图片、模式基因卡、训练记录、生图记录与暂存图、本机界面设置与本机草稿都随导入恢复，剧本草稿会按新项目 id 重新挂接）；导入界面若要求确认「新增不覆盖」，直接确认继续。导入逐项成败：有失败项就点该项自己的「单独重试」，不要整包重导。",
     "第 3 步 · 逐项验收（内容指纹为准）：导入结束时新工作台会自动回读自身数据、与包内 contentFingerprint 逐项比对并在核对清单里给出「内容指纹」一行与逐项明细（数量 / 项目大纲+剧本+快照 / 储存库卡全字段 / 基因卡全文与权重 / 图片字节）——先看这一行：全部一致才算内容级 1:1 对上；有未对上就按明细定位处理，不许只报数量对上。再按包内 acceptanceChecklist 逐项核对，并实际打开一个项目确认人物图与分镜都在、打开储存库确认卡图无破图、在新工作台里再点一次「打包备份」确认能正常下载新包。每一项给出对上 / 未对上和依据（指纹明细、数量或实际打开看到的内容），不许只说「已完成」。",
     "第 4 步 · 重连 Geeknow：提醒用户在新账号里重新走安全连接接一次 Geeknow（Key 不在本包内、不要让用户把 Key 贴进聊天）；没接之前生图面板能打开但不能出图，这不算复刻失败，单独说明。",
     "第 5 步 · 收尾报告：向用户逐项报告——重建是否照规格完成、导入核对清单每一行对上没对上、内容指纹逐项明细结果、缺图清单（若有）、Geeknow 是否已重连；并提醒：全部对上之前不要退旧账号、不要删旧工作台、本地这份文件多处保存。",
     "",
-    "边界说明（照实告诉用户，不要夸大）：Muse 的工作台应用只属于创建它的账号，没有跨账号一键克隆应用本体的功能，所以「重建」是照包内规格重建应用、再用同一个文件导入全部数据。本执行单的意义是把用户要做的事降到只剩「把这一个文件发过来」：可以不附任何文字，其余验包、重建、导入、指纹验收、报告都按本单一次做完；唯一还需要用户出面的是在新账号重新连接一次 Geeknow（凭证永不进包）。同一次点击下载的独立复刻页已经让「布局 + 内容 + 确定性功能」（编辑保存、时长重算、分镜重切、成套导出、改后数据导回）在点击当场成为一个可打开可用的复刻品；v3.79 起复刻页内也自带 AI 生成与 Geeknow 生图（用户在页内填自己的 Key 直连同一服务商，同口径提示词与生图禁令），但那是用户自备凭证的页内直连，与服务端完全同口径的完整工作台仍以本单重建出的工作台为准，视频投喂训练分析也不在复刻页内。",
+    "边界说明（照实告诉用户，不要夸大）：Muse 的工作台应用只属于创建它的账号，没有跨账号一键克隆应用本体的功能，所以「重建」是照包内规格重建应用、再用同一个文件导入全部数据。本执行单的意义是把用户要做的事降到只剩「把这一个文件发过来」：可以不附任何文字，其余验包、重建、导入、指纹验收、报告都按本单一次做完；唯一还需要用户出面的是在新账号重新连接一次 Geeknow（凭证永不进包）。v5.87 起不再生成独立复刻页：工作台程序已在 GitHub 上，备份只管用户数据，恢复就是在工作台里用本数据包导入。",
   ].join("\n");
 }
 
@@ -4393,8 +4409,8 @@ function buildBackupReadme(
     "",
     `导出时间：${exportedAt}`,
     `工作台基线版本：${baseline}`,
-    `包内数量清单：项目 ${counts.projects} 个；储存库人物卡 ${counts.presets} 张；储存库图片 ${counts.presetImages} 张；项目人物图 ${counts.characterImages} 张；图片按内容（字节 SHA-256）去重后共 ${counts.totalUniqueImages} 张（同一张图多处引用、或在存储里存了多份相同字节，只存一份）；版本快照 ${counts.snapshots} 份；带爆款基因卡的模式 ${counts.modesWithCards} 个（模式1在内），风格卡共 ${counts.styleCards} 张、训练记录共 ${counts.trainingRecords} 条；生图记录 ${counts.imageGenRecords} 条，其中 ${counts.stagedImages} 条的暂存图本体也随包迁移。`,
-    "这个包装了 1:1 复刻需要的全部内容：⓪一键复刻执行单——文件第一项「RESTORE_一键复刻执行单」是给新账号 Muse 的编号步骤（先验包 → 照规格重建 → 一次导入 → 指纹验收 → 重连 Geeknow → 收尾报告），用户在新账号只需把这一个文件发过去、可以不附任何文字，文件本身就是指令，不用再转述任何步骤；①布局排版 + 功能——包内 replicationSpec 字段是机器可读的完整规格（双台结构与窗口顺序、主题全部色值（单套深空未来）、审查页纸面规格、字号阶梯、全部功能规则、数据库表结构），另有人可读的 REPLICATION_一键复刻说明；②内容数据——项目大纲 / 剧本 / 分镜与版本快照、储存库卡的 10 部位中英文、扮演 / 身份、备注与独立的性格字段、分类，模式爆款基因卡全文（主题 / 节奏 / 对话 / 像素 / 钩子 / 情绪曲线 / 叙事结构 / 互动 / 提炼摘要 / 权重 / 字幕）与训练记录、生图记录列表与暂存图本体，以及全部图片的真实字节（逐张写清字节数与 SHA-256、导入时逐张复验，不是图片地址引用）；③本机状态——包内 localSettings 字段带了储存库查看档位与鼠标放大、指引档案与已看状态，localDrafts 字段带了未保存的剧本草稿（导入时按新项目 id 重新挂接）与生图面板草稿，在新工作台里导入本包时自动恢复；④内容指纹（v3.76）——包内 contentFingerprint 字段带了逐项内容哈希（项目大纲/剧本/快照、储存库卡全部字段、基因卡全文与权重、全部图片字节 SHA-256），导入结束后新台会自动回读自身数据同口径再算一份逐项比对并给出明细，内容级 1:1 由哈希对上证明、不再只对数量。打包下载前还有结构自检与成品回读自验（把即将下载的文本重新解析、逐张复核图片字节数与 SHA-256），缺项或对不上会拦下下载。同一次点击还会下载一个独立复刻页 HTML：同布局、同窗口顺序、单套深色主题、全量数据与图片字节内嵌，双击离线可开、可编辑（改基础设置/人物/大纲/剧本节拍/储存库卡/基因卡、自动存本机、时长重算、分镜重切、格式01/SRT/提示词包导出、改后数据导回成兼容包），v3.79 起页内还自带 AI 与生图（用户在页内填入自己的 Geeknow Key 直连同一服务商做 AI 大纲 / 剧本与生图，Key 不进复刻页文件），用户不等新账号就能当场用它干活并对照验收；它不是导入材料，导入仍只用本 JSON 包（或复刻页导出的更新包）。包里不含任何账号凭证与 Geeknow 的 Key。",
+    `包内数量清单：项目 ${counts.projects} 个（其中 ${counts.archivedProjects} 个在储存箱里，储存箱状态随项目一起打包、导入后原样回到储存箱）；储存库人物卡 ${counts.presets} 张；储存库图片 ${counts.presetImages} 张；项目人物图 ${counts.characterImages} 张；图片按内容（字节 SHA-256）去重后共 ${counts.totalUniqueImages} 张（同一张图多处引用、或在存储里存了多份相同字节，只存一份）；版本快照 ${counts.snapshots} 份；带爆款基因卡的模式 ${counts.modesWithCards} 个（模式1在内），风格卡共 ${counts.styleCards} 张、训练记录共 ${counts.trainingRecords} 条；生图记录 ${counts.imageGenRecords} 条，其中 ${counts.stagedImages} 条的暂存图本体也随包迁移。不打包：监控账号与监控视频、封面生成记录、工作台程序本身（已在 GitHub 上）、任何 Key 与凭证。`,
+    "这个包装了 1:1 复刻需要的全部内容：⓪一键复刻执行单——文件第一项「RESTORE_一键复刻执行单」是给新账号 Muse 的编号步骤（先验包 → 照规格重建 → 一次导入 → 指纹验收 → 重连 Geeknow → 收尾报告），用户在新账号只需把这一个文件发过去、可以不附任何文字，文件本身就是指令，不用再转述任何步骤；①布局排版 + 功能——包内 replicationSpec 字段是机器可读的完整规格（双台结构与窗口顺序、主题全部色值（单套深空未来）、审查页纸面规格、字号阶梯、全部功能规则、数据库表结构），另有人可读的 REPLICATION_一键复刻说明；②内容数据——项目大纲 / 剧本 / 分镜与版本快照、储存库卡的 10 部位中英文、扮演 / 身份、备注与独立的性格字段、分类，模式爆款基因卡全文（主题 / 节奏 / 对话 / 像素 / 钩子 / 情绪曲线 / 叙事结构 / 互动 / 提炼摘要 / 权重 / 字幕）与训练记录、生图记录列表与暂存图本体，以及全部图片的真实字节（逐张写清字节数与 SHA-256、导入时逐张复验，不是图片地址引用）；③本机状态——包内 localSettings 字段带了储存库查看档位与鼠标放大、指引档案与已看状态，localDrafts 字段带了未保存的剧本草稿（导入时按新项目 id 重新挂接）与生图面板草稿，在新工作台里导入本包时自动恢复；④内容指纹（v3.76）——包内 contentFingerprint 字段带了逐项内容哈希（项目大纲/剧本/快照、储存库卡全部字段、基因卡全文与权重、全部图片字节 SHA-256），导入结束后新台会自动回读自身数据同口径再算一份逐项比对并给出明细，内容级 1:1 由哈希对上证明、不再只对数量。打包下载前还有结构自检与成品回读自验（把即将下载的文本重新解析、逐张复核图片字节数与 SHA-256），缺项或对不上会拦下下载。v5.87 起打包只下载这一个数据包文件，不再另外生成独立复刻页——工作台程序本身已经在 GitHub 上，备份只装用户数据；恢复时在工作台里点「导入备份」上传本包即可。项目含储存箱里的项目（储存箱状态随项目打包、导入后原样回到储存箱）；监控账号与监控视频、封面生成记录不打包。包里不含任何账号凭证与 Geeknow 的 Key。",
     "图片校验字段说明（etag 与 SHA-256 的关系，必须分清）：清单（导出清单与包内图片的引用信息）里每张图带的 etag，就是该图字节的 SHA-256 校验值——etag 即 SHA-256，是同一个值，不是两种算法。但清单本身只有 etag、字节数与取图地址，不含图片字节；清单里的 etag 只能用来核对字节对不对，不能证明下载包里含字节。图片字节只在下载的复刻文件里：打包时逐张从服务端取回真实字节，先核对字节数、再实算 SHA-256 与 etag 比对，通过后才把字节本身写进包，包内每张图另存它自己的 sha256 字段；导入时再逐张按字节数与 sha256 复验。所以「包里含字节」的依据是下载文件里的图片数据段本身，不是一份只有 etag 的清单。",
     "打包失败口径（v3.75）：逐张取图时每张自动重试 3 次；重试后仍失败的图只记进失败清单（写清卡名 / 图名与原因），已经取回的图片保留，可以只补失败的那几张续跑，不用从头重取。只有用户在打包窗口里明确勾选确认后，才会生成「不完整包」：包内 incomplete 字段逐条写明缺了哪几张图，导入时也会先把缺图清单亮出来；不勾选就不会生成残缺包。",
     "",
@@ -6095,6 +6111,59 @@ function parseStoredImageLook(json: string): ImageLookData | null {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// v5.92 提示词检查（checkPromptCopyright 动作专用结构）：用户在
+// 「提示词检查」页粘贴任意一段视频生成提示词，AI 通读全文找版权 /
+// 商标 / 真实人物等会被平台拦截的风险点，逐处给问题与解决办法，并
+// 产出一份改好的完整提示词。两条硬性规则写死在检查指令里：①台词
+// 意思不许改（台词里的风险词只许谐音替换）；②人物造型不许改（造
+// 型描写逐字保留，只许把造型句里夹带的 IP 名称换成描述同一外观的
+// 通用词）。服务端再做确定性兜底：AI 报的问题片段必须在原文里逐字
+// 找得到才保留；用户本机替换表命中的词（knownHits）AI 漏了也强制
+// 并入问题清单，AI 完全没碰过的非删词类命中由服务端按表补改（删
+// 词类只点名不自动删，防误删台词信息）；命中清单不发给模型（表
+// 里与硬规则冲突的条目会让模型反复权衡、把检查拖到超时），覆盖
+// 全靠这层确定性兜底保证。
+// v5.93 调用方式改一段一调：v5.92 时服务端在单次动作调用里串行
+// 跑多段推理，长提示词整次调用超过网关等待上限被掐断（Gateway
+// request timed out），用户拿不到任何结果。现由客户端按约 1200
+// 字切段、一段调一次本动作（单段单次推理），逐段串行、带真实进
+// 度、单段失败可单独重试，合并（问题/改动拼接、改好全文按原文
+// 偏移拼回、未查完段数写进 note）全部在客户端完成。
+// ---------------------------------------------------------------------------
+
+const promptCheckIssueSchema = z.object({
+  quote: z.string(),
+  location: z.string(),
+  kind: z.string(),
+  reason: z.string(),
+  solution: z.string(),
+});
+const promptCheckChangeSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  note: z.string(),
+});
+const promptCheckOutSchema = z.object({
+  summary: z.string(),
+  issues: z.array(promptCheckIssueSchema),
+  changes: z.array(promptCheckChangeSchema),
+  dialogueIntact: z.boolean(),
+  lookIntact: z.boolean(),
+});
+const promptCheckResponse = z.object({
+  ok: z.boolean(),
+  error: z.string().nullable(),
+  summary: z.string(),
+  note: z.string(),
+  issues: z.array(promptCheckIssueSchema),
+  changes: z.array(promptCheckChangeSchema),
+  fixedText: z.string(),
+  dialogueIntact: z.boolean(),
+  lookIntact: z.boolean(),
+});
+type PromptCheckResult = z.infer<typeof promptCheckResponse>;
 
 export const Actions = {
 listProjects: defineAction({
@@ -11533,6 +11602,211 @@ return { preset: await toAssetPresetOut(ctx, fresh)};
 },
 }),
 
+// ---------------------------------------------------------------------------
+// v5.98 主文件 ⇄ 子文件双向打通（用户亲口定）：人物卡 = 主文件、
+// 卡上的每张服装图 = 子文件。下面两个新动作：
+// ① promotePresetImage —— 把一张子文件（服装图）从主文件里拉出
+//    来、做成独立主文件：图片行整体改挂到一张新建的人物卡下成
+//    为其主体图（同一份图片字节，不复制、不新增 blob；字节的
+//    删除仍走既有引用检查），新卡造型取这张图自己的造型，音
+//    色 / 语气基调与系统分类（性别 / 年龄组 / 存疑 / 依据）从
+//    原卡继承（同一个人换一套衣服独立成卡）；原卡少这一张
+//    图——拆的是主体图时下一张接任主体、卡片造型跟新主体走
+//    （与 deleteAssetPresetImage 的接任同口径），拆走唯一一张
+//    图时原卡保留、造型文字不清。
+// ② attachPresetAsSubImage —— 把任意一张主文件添加到另一张主
+//    文件下面成为子文件：来源卡的主体图连同它的造型在目标卡
+//    图片列表末尾复制一条图片行（共享同一份 blob 引用）；来
+//    源卡本身原样保留、仍是独立主文件。不能把卡加到自己下面。
+// 两个动作都不碰剧本项目人物卡、不自动生图。
+
+promotePresetImage: defineAction({
+description: "把储存库人物卡上的一张服装图拆出来做成一张独立人物卡：图片连同它自己的造型移出原卡、成为新卡的主体图（图片字节不复制、共享原引用），新卡继承原卡的分类与音色 / 语气基调；原卡拆走的是主体图时下一张接任主体、造型跟新主体走，拆走唯一一张图时原卡与造型文字保留。",
+request: z.object({
+presetId: z.number().int().positive(),
+imageId: z.number().int().positive(),
+newName: z.string().min(1).max(80),
+}),
+response: z.object({ source: assetPresetOut, created: assetPresetOut }),
+async handler(ctx, args) {
+const db = ctx.db<typeof schema>();
+const newName = args.newName.trim();
+if (!newName) throw new Error("新人物卡的名字不能为空");
+const rows = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, args.presetId));
+const preset = rows[0];
+if (!preset) throw new Error("设定卡不存在");
+const imgs = await loadPresetImages(ctx, args.presetId);
+const target = imgs.find((im) => im.id === args.imageId);
+if (!target) throw new Error("这张图不存在");
+const cardLook = noteSegmentValue(preset.cardNote, ["造型", "外貌"]);
+const wasPrimary = imgs[0]?.id === target.id;
+// 这张图自己的造型：图行 look 优先；主体图的 look 在存量行上
+// 可能还只存在卡片造型段里（读取回填前），以卡片造型补上。
+const imgLook = target.look.trim() || (wasPrimary ? cardLook : "");
+const remaining = imgs.filter((im) => im.id !== args.imageId);
+// 新卡备注 = 原卡备注换造型段为这张图的造型（空造型时造型段
+// 摘掉，setNoteSegmentValue 空值口径）；音色 / 语气基调与其
+// 余段落原样继承。
+const newNote = setNoteSegmentValue(
+preset.cardNote,
+["造型", "外貌"],
+"造型",
+imgLook,
+);
+const inserted = await db
+.insert(schema.assetPresets)
+.values({
+name: newName,
+locked: 0,
+personZh: preset.personZh,
+personEn: preset.personEn,
+hairZh: preset.hairZh,
+hairEn: preset.hairEn,
+hatZh: preset.hatZh,
+hatEn: preset.hatEn,
+faceZh: preset.faceZh,
+faceEn: preset.faceEn,
+neckZh: preset.neckZh,
+neckEn: preset.neckEn,
+topZh: preset.topZh,
+topEn: preset.topEn,
+armsZh: preset.armsZh,
+armsEn: preset.armsEn,
+bottomZh: preset.bottomZh,
+bottomEn: preset.bottomEn,
+shoesZh: preset.shoesZh,
+shoesEn: preset.shoesEn,
+extraZh: preset.extraZh,
+extraEn: preset.extraEn,
+cardRole: preset.cardRole,
+cardNote: newNote,
+category: preset.category,
+gender: preset.gender,
+ageGroup: preset.ageGroup,
+classUncertain: preset.classUncertain,
+classNote: preset.classNote,
+fromCard: 0,
+updatedAt: new Date(),
+})
+.returning();
+const created = inserted[0];
+if (!created) throw new Error("拆出新卡没成，请重试");
+// 图片行整体改挂到新卡下当主体图（同一份 blob、不复制字
+// 节）；图自己的造型随行（此前只在卡片造型段里时补写进行）。
+await db
+.update(schema.assetPresetImages)
+.set({ presetId: created.id, sortOrder: 0, look: imgLook })
+.where(eq(schema.assetPresetImages.id, target.id));
+// 原卡主体接任（与 deleteAssetPresetImage 同口径）：拆走的
+// 是主体图且还有图时，剩余第一张接任主体——它有自己的造
+// 型则卡片造型段换成它的，它没造型则沿用卡片现有造型并回
+// 填存成它的造型；拆走唯一一张图时卡片造型文字保留不动。
+// 音色 / 语气基调绝不动。
+let nextNote = preset.cardNote;
+if (wasPrimary && remaining.length > 0) {
+const newPrimary = remaining[0];
+if (newPrimary) {
+const newLook = newPrimary.look.trim();
+if (newLook) {
+if (newLook !== cardLook) {
+nextNote = setNoteSegmentValue(
+preset.cardNote,
+["造型", "外貌"],
+"造型",
+newLook,
+);
+}
+} else if (cardLook) {
+await db
+.update(schema.assetPresetImages)
+.set({ look: cardLook })
+.where(eq(schema.assetPresetImages.id, newPrimary.id));
+}
+}
+}
+// 原卡剩余图片 sortOrder 重新排紧（接任者归 0），顺序不变。
+for (let i = 0; i < remaining.length; i++) {
+const im = remaining[i];
+if (!im || im.sortOrder === i) continue;
+await db
+.update(schema.assetPresetImages)
+.set({ sortOrder: i })
+.where(eq(schema.assetPresetImages.id, im.id));
+}
+await db
+.update(schema.assetPresets)
+.set({ cardNote: nextNote, updatedAt: new Date() })
+.where(eq(schema.assetPresets.id, args.presetId));
+ctx.invalidateQueries();
+const freshRows = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, args.presetId));
+const fresh = freshRows[0] ?? preset;
+return {
+source: await toAssetPresetOut(ctx, fresh),
+created: await toAssetPresetOut(ctx, created),
+};
+},
+}),
+
+attachPresetAsSubImage: defineAction({
+description: "把一张储存库人物卡添加为另一张人物卡的子文件（服装图）：来源卡的主体图连同它的造型复制一条图片行挂到目标卡图片列表末尾（共享同一份图片字节，任一侧删图仍走引用检查）；来源卡本身原样保留、仍是独立人物卡。",
+request: z.object({
+sourcePresetId: z.number().int().positive(),
+targetPresetId: z.number().int().positive(),
+}),
+response: z.object({ target: assetPresetOut }),
+async handler(ctx, args) {
+if (args.sourcePresetId === args.targetPresetId) {
+throw new Error("不能把人物卡加到它自己下面");
+}
+const db = ctx.db<typeof schema>();
+const srcRows = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, args.sourcePresetId));
+const source = srcRows[0];
+if (!source) throw new Error("来源人物卡不存在");
+const tgtRows = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, args.targetPresetId));
+const targetPreset = tgtRows[0];
+if (!targetPreset) throw new Error("目标人物卡不存在");
+const srcImgs = await loadPresetImages(ctx, args.sourcePresetId);
+const srcPrimary = srcImgs[0];
+if (!srcPrimary) {
+throw new Error(
+`「${source.name || "未命名人物"}」还没有图片，没法加进来当服装图——先给它加一张图再试`,
+);
+}
+// 子文件的造型 = 来源卡主体图的造型（图行 look 优先，空时
+// 回落来源卡备注的造型段，与卡面显示同一口径）。
+const srcLook =
+srcPrimary.look.trim() ||
+noteSegmentValue(source.cardNote, ["造型", "外貌"]);
+const tgtImgs = await loadPresetImages(ctx, args.targetPresetId);
+await db.insert(schema.assetPresetImages).values({
+presetId: args.targetPresetId,
+fileName: srcPrimary.fileName || source.name,
+imageBlobKey: srcPrimary.imageBlobKey,
+imageMime: srcPrimary.imageMime,
+look: srcLook,
+sortOrder: tgtImgs.length,
+});
+await db
+.update(schema.assetPresets)
+.set({ updatedAt: new Date() })
+.where(eq(schema.assetPresets.id, args.targetPresetId));
+ctx.invalidateQueries();
+return { target: await toAssetPresetOut(ctx, targetPreset) };
+},
+}),
+
 // Rebuild a script project's existing character cards into the
 // library as character cards (v3.24): one library card per character,
 // matched by name — an existing same-named card is updated in place,
@@ -15623,9 +15897,10 @@ description: "同步提交 Geeknow 生图并等待出图，只在用户点生成
 // 个别模型可能同步直接回图——那种情况直接暂存并带回 stagedKey。
 // v4.22 参考图通道恢复（用户明确要求、推翻 v4.05 停用）：异步端
 // 点只收 http(s) 图片链接；带 referenceImages 的提交由特权层把
-// 降采样副本临时托管到 uguu.se 公开图床换链接再提交（v3.86 已
-// 实测链路），客户端负责当次具名知情同意——未同意不发送参考
-// 图、自动降级纯文字提交；特权层托管失败回真实原因、整单失败。
+// 降采样副本换成链接再提交（v5.97 起主路线 Geeknow 自家上传、
+// 回退 uguu.se 公开图床，与 hostGeeknowReferenceImages 同一套双
+// 路线）；未带链接进来时客户端一般已先调托管动作。特权层托管
+// 失败回真实原因、整单失败。
 submitGeeknowImageTask: defineAction({
 description: "提交一个 Geeknow 异步生图任务并返回任务号，只在用户点生成时调用。",
   request: z.object({
@@ -15639,6 +15914,11 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
     // v5.04：参考图可混入中转分片引用（过大原图专用），handler
     // 里先拼回归一再透传特权层。
     referenceImages: z.array(submitReferenceImage).max(16).optional(),
+    // v5.95：参考图已由 hostGeeknowReferenceImages 单独一步换好的
+    // 托管链接。带它进来时本动作不再解析参考图字节、特权层也不
+    // 再现传图床——提交只剩一次 Geeknow 调用，稳在守护进程 30
+    // 秒预算内。与 referenceImages 二选一（链接优先）。
+    referenceImageUrls: z.array(z.string().min(1).max(2000)).max(16).optional(),
     // v3.83 提交设置（封面页两个小输入框）：用户自填 Key 与 API
     // 地址，都可空——不传就走已连接的 custom.geeknow 安全凭证与
     // 默认地址。Key 只透传给特权层用于当次请求，绝不落库、绝不
@@ -15657,6 +15937,11 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
     // v5.16：本次实际带上的参考图托管链接（提交顺序），供封面记
     // 录算哈希自证；链接本身不落库。
     refImageUrls: z.array(z.string()),
+    // v5.95：失败出在哪一步（host_timeout / host_error /
+    // submit_timeout / submit_unreachable / auth / http /
+    // submit_error / daemon_timeout），成功时为 null。客户端据此
+    // 把报错写成大白话并说清能不能直接重试。
+    stage: z.string().nullable(),
   }),
   privileged: [privileged.geeknowSubmitImageTask],
   async handler(
@@ -15671,8 +15956,9 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
     previewUrl: string | null;
     mimeType: string | null;
     refImageUrls: string[];
+    stage: string | null;
   }> {
-    const fail = (error: string) => ({
+    const fail = (error: string, stage: string | null = null) => ({
       ok: false,
       error,
       taskId: null,
@@ -15681,6 +15967,7 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
       previewUrl: null,
       mimeType: null,
       refImageUrls: [] as string[],
+      stage,
     });
     // v3.85 提交前字数检查：Geeknow 提交端点对 prompt 有
     // 4000 字符硬上限，超了是确定性的
@@ -15693,23 +15980,32 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
         `提示词太长，这次没有提交：实际提交的提示词共 ${promptLen} 字符，Geeknow 的上限是 ${GEEKNOW_PROMPT_HARD_LIMIT} 字符，本台提交前先按 ${SUBMIT_PROMPT_BUDGET} 字符的安全线拦下。请删减提示词再生成——优先删方案细节里的长句（人物表情与动作、核心道具、背景场景），主标题、钩子句和风格规则尽量别动；删完看提示词框下方的字数提示变绿再点生成。这次检查发生在提交之前，没有发出请求、不会计费。`,
       );
     }
+    // v5.95：参考图已换好托管链接时（客户端先调了
+    // hostGeeknowReferenceImages），跳过参考图解析、直接带链接提
+    // 交；没带链接才走旧路在本动作里解析字节、由特权层在共享截
+    // 止时间内顺带托管（兜底路径，口径见特权层）。
+    const hostedUrls = (args.referenceImageUrls ?? []).filter((u) =>
+      u.startsWith("https://"),
+    );
     // v5.04 中转参考图拼回：混在 referenceImages 里的分片引用先
     // 在服务端拼回原图归一成内联副本，再透传特权层压缩托管。
     // 拼不回（缺片）就如实失败、不提交——错误里写清缺哪几片，
     // 不把传输问题说成别的；重新点一次生成会重新中转这张图。
-    let resolvedRefs: { dataBase64: string; mimeType: string }[];
-    try {
-      resolvedRefs = await resolveSubmitReferenceImages(
-        ctx,
-        args.referenceImages,
-      );
-    } catch (e) {
-      const msg = (
-        e instanceof Error ? e.message : String(e)
-      ).replace(/，原图没有保存，请重新上传/g, "");
-      return fail(
-        `参考图没能备齐，这次没有提交：${msg}。重新点一次生成，会重新中转这张图。`,
-      );
+    let resolvedRefs: { dataBase64: string; mimeType: string }[] = [];
+    if (hostedUrls.length === 0) {
+      try {
+        resolvedRefs = await resolveSubmitReferenceImages(
+          ctx,
+          args.referenceImages,
+        );
+      } catch (e) {
+        const msg = (
+          e instanceof Error ? e.message : String(e)
+        ).replace(/，原图没有保存，请重新上传/g, "");
+        return fail(
+          `参考图没能备齐，这次没有提交：${msg}。重新点一次生成，会重新中转这张图。`,
+        );
+      }
     }
     let r: {
       ok: boolean;
@@ -15719,6 +16015,9 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
       error: string | null;
       previewBase64: string | null;
       refImageUrls: string[];
+      stage: string | null;
+      authFailed: boolean;
+      hostRoute: string | null;
     };
     try {
       r = await ctx.executePrivileged(privileged.geeknowSubmitImageTask, {
@@ -15730,16 +16029,26 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
         downloadTimeoutSec: args.downloadTimeoutSec,
         retryCount: args.retryCount,
         referenceImages: resolvedRefs,
+        referenceImageUrls: hostedUrls.length > 0 ? hostedUrls : undefined,
         apiKey: args.apiKey,
         apiBase: args.apiBase,
       });
     } catch (e) {
-      return fail(
-        `生图提交失败：${e instanceof Error ? e.message : String(e)}`,
-      );
+      // v5.95：整次调用被守护进程 30 秒预算掐断时，不再把英文原
+      // 文甩给用户——这次提交有没有被 Geeknow 收到没法确认，按
+      // 「建没建不确定」的大白话说清，并提醒先核对再重试、防重
+      // 复计费（提交拆步后正常路径不该再走到这里，这是兜底）。
+      const rawMsg = e instanceof Error ? e.message : String(e);
+      if (/wall-clock budget|exceeded \d+\s*ms|timed out|timeout/i.test(rawMsg)) {
+        return fail(
+          "提交这一步超时了：这次提交到底有没有被 Geeknow 收到、任务建没建，现在没法确认。先别马上再点生成（万一已经建好，重点一次会重复计费）：等一两分钟，先看下面的生图记录 / 封面记录里有没有新任务冒出来，或去 Geeknow 控制台对一下；确认没有，再重新生成。",
+          "daemon_timeout",
+        );
+      }
+      return fail(`生图提交失败：${rawMsg}`);
     }
     if (!r.ok) {
-      return fail(r.error ?? "Geeknow 异步提交失败，请重试");
+      return fail(r.error ?? "Geeknow 异步提交失败，请重试", r.stage);
     }
     if (r.imageBase64) {
       const mime = r.mimeType ?? "image/png";
@@ -15757,6 +16066,7 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
         previewUrl: await previewUrlForKey(ctx, key),
         mimeType: mime,
         refImageUrls: r.refImageUrls ?? [],
+        stage: null,
       };
     }
     if (!r.taskId) {
@@ -15771,7 +16081,122 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
       previewUrl: null,
       mimeType: null,
       refImageUrls: r.refImageUrls ?? [],
+      stage: null,
     };
+  },
+}),
+
+// v5.95 参考图托管独立一步（修「提交生成图片总是超时」）：旧链路
+// 在一次提交调用里串行做两步——先逐张把参考图传图床换链接（每
+// 张超时上限 30 秒）、再调 Geeknow 提交（钳 25 秒），两步相加超
+// 过守护进程 30 秒预算，带 1 张图也必被掐断。拆开后托管单独一个
+// 动作、独占自己的 30 秒预算（特权层整步共用 24 秒截止），提交
+// 动作只带链接、只剩一次 Geeknow 调用。
+// v5.97 托管换主路线：先走 Geeknow 自家上传（presign + PUT 到自
+// 家空间，鉴权与提交同口径、经 apiKey / apiBase 透传），自家上
+// 传走不通才自动改走 uguu.se 公开图床再试一次——用户只点一次，
+// 内部自动换线；两条都失败才报错，报错写清两条各败在哪。本动
+// 作只换链接：不建任务、不计费；明说还没提交、不会计费、可以
+// 直接重试。回执带 route（geeknow / uguu / mixed）写明这次实际
+// 走的路线。链接只随回执返回、不落库（记录只存哈希）。
+hostGeeknowReferenceImages: defineAction({
+description: "把生图参考图换成 https 链接（先走 Geeknow 自家上传、走不通自动改走公开图床），只换链接不提交任务，用户点生成时在提交前调用。",
+  request: z.object({
+    // 与提交动作同一套参考图形态（内联副本 | 中转分片引用），
+    // handler 里先拼回归一再透传特权层。
+    referenceImages: z.array(submitReferenceImage).min(1).max(16),
+    // v5.97：与提交动作相同的可选自填 Key / API 地址——Geeknow
+    // 自家上传（presign）要带同一套鉴权；不传走已连接凭证。总
+    // 设置 / 单次输入 / 已连接凭证的生效顺序由客户端按与提交相
+    // 同的口径解析后透传，服务端不另做一套。
+    apiKey: z.string().min(1).max(400).optional(),
+    apiBase: z.string().min(1).max(300).optional(),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    error: z.string().nullable(),
+    urls: z.array(z.string()),
+    // host_timeout（两条路线都太慢）/ host_error（其他失败），
+    // 成功时为 null。
+    stage: z.string().nullable(),
+    // v5.97：这次实际走的路线——geeknow（Geeknow 自家上传）/
+    // uguu（公开图床回退）/ mixed（两种都有）；失败时为 null。
+    route: z.string().nullable(),
+  }),
+  privileged: [privileged.geeknowHostReferenceImages],
+  async handler(
+    ctx,
+    args,
+  ): Promise<{
+    ok: boolean;
+    error: string | null;
+    urls: string[];
+    stage: string | null;
+    route: string | null;
+  }> {
+    const fail = (error: string, stage: string | null = null) => ({
+      ok: false,
+      error,
+      urls: [] as string[],
+      stage,
+      route: null as string | null,
+    });
+    let resolvedRefs: { dataBase64: string; mimeType: string }[];
+    try {
+      resolvedRefs = await resolveSubmitReferenceImages(
+        ctx,
+        args.referenceImages,
+      );
+    } catch (e) {
+      const msg = (
+        e instanceof Error ? e.message : String(e)
+      ).replace(/，原图没有保存，请重新上传/g, "");
+      return fail(
+        `参考图没能备齐，这次没有提交：${msg}。重新点一次生成，会重新中转这张图。`,
+      );
+    }
+    let r: {
+      ok: boolean;
+      urls: string[];
+      error: string | null;
+      stage: string | null;
+      route: string | null;
+    };
+    try {
+      r = await ctx.executePrivileged(privileged.geeknowHostReferenceImages, {
+        referenceImages: resolvedRefs,
+        apiKey: args.apiKey,
+        apiBase: args.apiBase,
+      });
+    } catch (e) {
+      const rawMsg = e instanceof Error ? e.message : String(e);
+      if (/wall-clock budget|exceeded \d+\s*ms|timed out|timeout/i.test(rawMsg)) {
+        return fail(
+          "参考图换链接超时了：先走 Geeknow 自家上传、再自动改走公开图床，两条都没在时间里走完。这一步在提交之前，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。",
+          "host_timeout",
+        );
+      }
+      return fail(`参考图换链接失败，这次没有提交、不会计费：${rawMsg}`);
+    }
+    if (!r.ok) {
+      if (r.stage === "host_timeout") {
+        return fail(
+          `参考图换链接超时了：${r.error ?? "两条路线都响应太慢"}。这一步在提交之前，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。`,
+          "host_timeout",
+        );
+      }
+      return fail(
+        `参考图没能换成链接，这次没有提交、不会计费：${r.error ?? "两条路线都没返回可用链接"}。可以稍后重试；或取消参考图（并去掉提示词里「以随附的人物资产图为准」约束）用纯文字生成。`,
+        r.stage ?? "host_error",
+      );
+    }
+    if (r.urls.length !== resolvedRefs.length) {
+      return fail(
+        `参考图只换好了 ${r.urls.length} / ${resolvedRefs.length} 张链接，少一张提交出去就是图对不上人：这次没有提交、不会计费，可以直接再点一次生成重试。`,
+        "host_error",
+      );
+    }
+    return { ok: true, error: null, urls: r.urls, stage: null, route: r.route };
   },
 }),
 
@@ -18151,8 +18576,17 @@ description: "导出备份清单（项目、储存库、模式与生图记录的
       .select()
       .from(schema.projects)
       .orderBy(asc(schema.projects.id));
+    // v5.87：储存箱分类名随包（导入时补建缺失分类）。
+    const archiveCatRows = await db
+      .select()
+      .from(schema.projectArchiveCategories)
+      .orderBy(
+        asc(schema.projectArchiveCategories.sortOrder),
+        asc(schema.projectArchiveCategories.id),
+      );
     let characterImageCount = 0;
     let snapshotCount = 0;
+    let archivedProjectCount = 0;
     const projects: BackupManifest["projects"] = [];
     for (const p of projectRows) {
       const chars = await db
@@ -18183,9 +18617,16 @@ description: "导出备份清单（项目、储存库、模式与生图记录的
         .where(eq(schema.projectVersions.projectId, p.id))
         .orderBy(asc(schema.projectVersions.versionNo));
       snapshotCount += vers.length;
+      if (p.archived === 1) archivedProjectCount += 1;
       projects.push({
         oldId: p.id,
         name: p.name,
+        // v5.87 储存箱状态随包：导入后原样回到储存箱（分类/星级/
+        // 存入时间一并恢复），不再变成普通项目。
+        archived: p.archived === 1,
+        archiveCategory: p.archiveCategory,
+        stars: p.stars,
+        archivedAt: p.archivedAt ? p.archivedAt.toISOString() : null,
         outline: p.outline,
         speechRate: p.speechRate,
         stylePreset: p.stylePreset,
@@ -18345,6 +18786,7 @@ description: "导出备份清单（项目、储存库、模式与生图记录的
     const exportedAt = new Date().toISOString();
     const counts: BackupManifest["counts"] = {
       projects: projects.length,
+      archivedProjects: archivedProjectCount,
       presets: presets.length,
       presetImages: presetImageCount,
       characterImages: characterImageCount,
@@ -18366,6 +18808,7 @@ description: "导出备份清单（项目、储存库、模式与生图记录的
       executionSheet: buildExecutionSheet(counts, exportedAt, "v3.79"),
       counts,
       categories: catRows.map((c) => ({ name: c.name, sortOrder: c.sortOrder })),
+      archiveCategories: archiveCatRows.map((c) => c.name),
       presets,
       projects,
       modes,
@@ -18573,10 +19016,18 @@ importBackupProjects: defineAction({
 description: "从备份导入剧本项目。",
   request: z.object({
     presetIdMap: z.array(z.object({ oldId: z.number(), newId: z.number() })),
+    // v5.87：储存箱分类名清单（随新包）；导入项目前先补建本台缺的
+    // 分类，保证储存箱项目的分类名有对应的分类栏。旧包不传。
+    archiveCategories: z.array(z.string().min(1).max(40)).max(200).optional(),
     projects: z.array(
       z.object({
         oldId: z.number().int(),
         name: z.string().max(200),
+        // v5.87 储存箱状态随包恢复；旧包没有这四项，按未存入处理。
+        archived: z.boolean().optional(),
+        archiveCategory: z.string().max(40).optional(),
+        stars: z.number().int().min(0).max(5).optional(),
+        archivedAt: z.string().max(60).nullable().optional(),
         outline: z.string(),
         speechRate: z.number(),
         // v4.03: old backup packages' scene fields are accepted for
@@ -18652,6 +19103,26 @@ description: "从备份导入剧本项目。",
   async handler(ctx, args) {
     const db = ctx.db<typeof schema>();
     const presetMap = new Map(args.presetIdMap.map((m) => [m.oldId, m.newId]));
+    // v5.87：先补建本台缺的储存箱分类（只补名字，不动已有分类与其
+    // 下项目），储存箱项目随后按原分类名落位。
+    if (args.archiveCategories && args.archiveCategories.length > 0) {
+      const existingCats = await db
+        .select()
+        .from(schema.projectArchiveCategories);
+      const knownCats = new Set(existingCats.map((c) => c.name));
+      let catSort = existingCats.reduce(
+        (mx, c) => Math.max(mx, c.sortOrder),
+        -1,
+      );
+      for (const rawName of args.archiveCategories) {
+        const name = rawName.trim();
+        if (!name || knownCats.has(name)) continue;
+        await db
+          .insert(schema.projectArchiveCategories)
+          .values({ name, sortOrder: ++catSort });
+        knownCats.add(name);
+      }
+    }
     const results: {
       oldId: number;
       name: string;
@@ -18685,6 +19156,18 @@ description: "从备份导入剧本项目。",
             outlineOverlapModeName: p.outlineOverlapModeName ?? "",
             publishCopyJson: p.publishCopyJson ?? "[]",
             source: p.source ?? "",
+            // v5.87 储存箱状态原样恢复：包里标了存入的项目导入后仍
+            // 在储存箱里，分类 / 星级 / 存入时间一并带回；旧包没带
+            // 这四项时按未存入的普通项目落库（与旧口径一致）。
+            archived: p.archived ? 1 : 0,
+            archiveCategory: p.archiveCategory?.trim()
+              ? p.archiveCategory.trim()
+              : "暂时不用",
+            stars: p.stars ?? 0,
+            archivedAt:
+              p.archived && p.archivedAt && !Number.isNaN(new Date(p.archivedAt).getTime())
+                ? new Date(p.archivedAt)
+                : null,
             ...(p.outlineOverlapRate != null
               ? { outlineOverlapComputedAt: new Date() }
               : {}),
@@ -19202,6 +19685,189 @@ purgeIssueData: defineAction({
       blobsDeleted,
     };
   },
+}),
+
+checkPromptCopyright: defineAction({
+description: "提示词检查（v5.92 立、v5.93 改为一段一调）：检查用户粘贴的视频生成提示词中的一段（客户端按约 1200 字切段、逐段串行调用本动作，一次调用只查这一段、只按这一段产出），逐处指出版权/商标/真实人物等会被平台拦截的风险点（原文片段、位置、类型、为什么会被拦、怎么改），并产出这一段改好的文本与逐处改动清单。硬性规则：台词意思不许改（台词里的风险词只许谐音替换）、人物造型不许改（造型描写逐字保留，只许换掉造型句里夹带的 IP 名称）。不存任何数据。",
+request: z.object({
+text: z.string().trim().min(1).max(20000),
+knownHits: z
+.array(
+z.object({
+from: z.string().trim().min(1).max(60),
+to: z.string().max(120),
+}),
+)
+.max(40)
+.default([]),
+segmented: z.boolean().default(false),
+}),
+response: promptCheckResponse,
+async handler(ctx, args): Promise<PromptCheckResult> {
+const fail = (error: string): PromptCheckResult => ({
+ok: false,
+error,
+summary: "",
+note: "",
+issues: [],
+changes: [],
+fixedText: "",
+dialogueIntact: false,
+lookIntact: false,
+});
+const text = args.text;
+// 本机替换表命中去重（同一原词只留第一条，与客户端合并口径一致）。
+const knownHits: { from: string; to: string}[] = [];
+const seenFrom = new Set<string>();
+for (const h of args.knownHits) {
+if (seenFrom.has(h.from)) continue;
+seenFrom.add(h.from);
+if (text.includes(h.from)) knownHits.push(h);
+}
+// 命中清单不发给模型：实测把替换表（尤其「灭霸→删掉」这类与
+// 台词硬规则冲突的条目、以及互相包含的词）写进指令后，模型会
+// 反复权衡、把单次检查拖到超时；不带命中的同一文本能正常返
+// 回。覆盖由确定性兜底保证：模型通读这一段找风险，表命中词模
+// 型漏掉的由服务端强制补进问题清单并按保守口径补改（见兜底二）。
+const system =
+"你是一名 AI 视频生成提示词的版权风险审查员，熟悉豆包、即梦等平台的版权拦截口径：提示词里出现受版权或商标保护的名称、真实人物姓名等内容时，整段提示词会被平台拦截。你只做审查与最小改动的修复，不创作新内容、不改写原文风格。";
+const prompt = [
+"请检查下面这份视频生成提示词，找出所有可能触发版权拦截的内容，并给出每一处该怎么改。",
+...(args.segmented
+? ["（这是用户粘贴的长提示词中的一段，只检查这一段、只按这一段产出即可。）", ""]
+: []),
+"",
+"",
+"1. 影视 / 动漫 / 游戏 / 小说等作品的 IP 名称、角色名、专有道具名、标志性招式或口号；",
+"2. 品牌名、商标、产品名、公司名；",
+"3. 真实人物的姓名、明星 / 网红 / 公众人物的名字或明确指向；",
+"4. 直接照搬的知名作品台词、歌词、广告语原文；",
+"5. 其他明确指向某个受保护作品或人物的说法。",
+"",
+"",
+"1. 台词的意思不许改：台词（引号里的、或明确标明是台词的句子）的语义、信息、语气必须与原文完全一致。台词里若有风险词，只允许换成同音或近音字（谐音替换），替换后读出来的意思必须和原意一致；不许删台词、不许换一种说法、不许增减信息。",
+"2. 人物的造型不许改：人物外貌、发型、发色、服装、配饰、体型等造型描写的具体内容必须原样保留（颜色、款式、材质一律不动）。造型句里若夹带 IP 名称，只许把 IP 名称本身换成描述同一外观的通用词（例：「钢铁侠铠甲」换成「红金色机甲铠甲」——外观还是同一个样子，只是没了 IP 名字），造型描写的其余部分逐字保留，并要在 changes 里注明这属于「造型句里的 IP 名称替换、外观未动」。",
+"3. 除风险点外，原文其他内容（场景、动作、镜头、时长、站位、语气标注等）逐字保留：不许改写、不许增删、不许调整顺序；不要往改好的提示词里添加原文没有的任何句子（包括声明、说明、标题）。",
+"4. 非台词、非造型部分的风险词，换成意思最接近的通用说法；实在没有通用说法的 IP 专有名词可以删掉该词，但要保证删完句子通顺。",
+"",
+"",
+"- summary：一句话结论（有没有风险、大概几处、主要是什么类型）。",
+"- issues：逐处列出。quote 必须是原文中逐字出现的片段（一字不差、含标点，不要改写、不要拼接不相邻的文字）；location 写它在原文中的位置（如「第 2 段的台词里」「人物造型描写里」，数不准就写「正文里」）；kind 从「影视动漫游戏IP」「品牌商标」「真实人物」「知名台词歌词」「其他」里选最贴切的一个；reason 用大白话说清这是什么版权或商标、为什么会被平台拦（一句话、别超过 60 字）；solution 说清这处具体怎么改、改成什么，必须与 changes 里的改法一致（一句话、别超过 40 字）。",
+"- changes：需要改的每一处（from = 原文片段，to = 改成什么，删掉就给空字符串；note 说明这处属于哪一类：台词谐音 / 造型句IP名称 / 普通替换 / 删除）。服务端会按 changes 把原文逐处替换、拼出改好的提示词，所以 changes 必须覆盖全部要改的地方、一处不漏；同一处在原文出现多次的只列一条（会统一替换）。没有任何风险时给空数组。",
+"- dialogueIntact：自检——按 changes 改完后，台词与原文台词意思完全一致（只许谐音差异）时给 true，否则 false。",
+"- lookIntact：自检——按 changes 改完后，人物造型描写与原文一致（只许造型句中的 IP 名称按硬性规则 2 替换）时给 true，否则 false。",
+"",
+"",
+text,
+].join("\n");
+// v5.93：一次动作调用只查一段、只跑一次推理。旧实现（v5.92）
+// 在单次调用里串行跑多段推理，5357 字约 5 段、每段 90 秒封
+// 顶，整次调用超过网关等待上限被掐断（Gateway request timed
+// out），用户什么结果都拿不到。切段与逐段串行改由客户端做
+// （promptcheck.tsx 按约 1200 字切段、一段一调、带真实进度、
+// 单段失败可单独重试、合并在客户端），本动作只对入参这一段
+// 负责。单段推理封顶 240 秒（与站内其他单次推理动作同口径）：
+// 实测 IP 密集的短段（满段漫威词 + 台词）模型通读权衡会超过旧
+// 的 90 秒封顶被误杀，240 秒给足通读时间；网关掐断的是整次动
+// 作调用的总时长，一段一调后单次调用最长就是一段的时长，不
+// 会重蹈多段串行的覆辙。
+let out: z.infer<typeof promptCheckOutSchema>;
+try {
+out = await ctx.inference.complete(prompt, {
+schema: promptCheckOutSchema,
+system,
+timeout_secs: 240,
+});
+} catch (e) {
+const raw = e instanceof Error? e.message: String(e?? "");
+if (/timed?\s?out|timeout|超时/i.test(raw)) {
+return fail(
+"这次检查超时了：AI 那边这会儿比较慢。可以过一会儿再点一次，或把提示词拆成两段分别粘进来检查。",
+);
+}
+return fail(
+genErrorMessage(e?? new Error("检查失败")).replace(
+"生成失败",
+"检查失败",
+),
+);
+}
+// 确定性兜底一：AI 报的问题片段必须在这一段原文里逐字找得到，
+// 找不到的（模型改写或拼接出来的）直接丢弃，不拿假片段糊弄用户。
+const issues: z.infer<typeof promptCheckIssueSchema>[] = [];
+for (const it of out.issues) {
+const quote = it.quote.trim();
+if (!quote ||!text.includes(quote)) continue;
+issues.push({
+quote,
+location: it.location.trim() || "正文里",
+kind: it.kind.trim() || "其他",
+reason: it.reason.trim(),
+solution: it.solution.trim(),
+});
+if (issues.length >= 30) break;
+}
+const changes: z.infer<typeof promptCheckChangeSchema>[] = [];
+for (const c of out.changes) {
+const from = c.from.trim();
+if (!from ||!text.includes(from)) continue;
+changes.push({ from, to: c.to, note: c.note.trim()});
+if (changes.length >= 40) break;
+}
+// 改好的这一段由服务端按 changes 确定性拼出（模型不重印全文：
+// 输出更短、检查更快，且改动清单与成品天然一致）：按原文片段
+// 长度从长到短逐处全量替换（长词组先于短词，避免半截替换）。
+// 整篇的拼接由客户端按各段在原文中的偏移完成。
+let fixedText = text;
+const orderedChanges = [...changes].sort(
+(a, b) => b.from.length - a.from.length,
+);
+for (const c of orderedChanges) {
+if (fixedText.includes(c.from)) {
+fixedText = fixedText.split(c.from).join(c.to);
+}
+}
+// 确定性兜底二：本机替换表命中的词，AI 漏报也强制并入问题清单。
+// 文本补改只处理 AI 完全没碰过的词、且只补「换成别的词」这类
+// 替换（逐处记进 changes、用户看得见）；表里要求删掉的词不在
+// 这里自动删——删词可能删掉台词里的信息、违反台词硬规则，这
+// 类只在问题清单里点名、交用户决定。AI 已按硬规则处理过的词
+// （如台词里的 IP 名已谐音）以 AI 的改法为准，服务端不覆盖。
+for (const h of knownHits) {
+const covered =
+issues.some((it) => it.quote.includes(h.from)) ||
+changes.some((c) => c.from === h.from);
+if (!covered) {
+issues.push({
+quote: h.from,
+location: "正文里",
+kind: "已知风险词",
+reason:
+"这个词在防版权替换表里（就是提示词检查页粘贴时本机预扫用的那张），是会被平台拦截的 IP / 敏感词。",
+solution: h.to === ""? "删掉这个词": `换成「${h.to}」`,
+});
+if (h.to!== "" && fixedText.includes(h.from)) {
+fixedText = fixedText.split(h.from).join(h.to);
+changes.push({
+from: h.from,
+to: h.to,
+note: "按你的防版权替换表替换",
+});
+}
+}
+}
+return {
+ok: true,
+error: null,
+summary: out.summary.trim(),
+note: "",
+issues: issues.slice(0, 30),
+changes: changes.slice(0, 40),
+fixedText,
+dialogueIntact: out.dialogueIntact,
+lookIntact: out.lookIntact,
+};
+},
 }),
 
 
