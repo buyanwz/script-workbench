@@ -33,6 +33,9 @@ export type ContentFingerprint = {
     outlineSha: string;
     scriptSha: string | null;
     versionShas: string[];
+    // v5.87：储存箱状态规范串（在不在储存箱 / 分类 / 星级 / 存入
+    // 时间）的哈希；旧包指纹没有此字段，比对时按未带处理不判错。
+    archiveSha?: string;
   }[];
   presets: { name: string; sha: string }[];
   geneCards: { modeId: number; version: number; sha: string }[];
@@ -55,6 +58,14 @@ export async function computeFingerprintFromManifest(
       outlineSha: await textSha(p.outline),
       scriptSha: p.scriptJson == null ? null : await textSha(p.scriptJson),
       versionShas,
+      archiveSha: await textSha(
+        JSON.stringify([
+          p.archived ? 1 : 0,
+          p.archiveCategory ?? "",
+          p.stars ?? 0,
+          p.archivedAt ?? null,
+        ]),
+      ),
     });
   }
   const presets: ContentFingerprint["presets"] = [];
@@ -126,6 +137,7 @@ export type FingerprintReport = {
 
 const COUNT_LABELS: [keyof Manifest["counts"], string][] = [
   ["projects", "项目"],
+  ["archivedProjects", "储存箱项目"],
   ["presets", "储存库卡"],
   ["presetImages", "储存库图片"],
   ["characterImages", "项目人物图"],
@@ -171,7 +183,10 @@ export function compareFingerprints(
         ap.outlineSha === ep.outlineSha &&
         ap.scriptSha === ep.scriptSha &&
         ap.versionShas.length === ep.versionShas.length &&
-        ap.versionShas.every((s, i) => s === ep.versionShas[i]),
+        ap.versionShas.every((s, i) => s === ep.versionShas[i]) &&
+        // v5.87：包内指纹带了储存箱状态哈希时，状态也要对上才算
+        // 同一个项目对上（旧包没带此字段则不查这一项）。
+        (ep.archiveSha == null || ap.archiveSha === ep.archiveSha),
     );
     if (idx < 0) missingProjects.push(ep.name || "未命名项目");
     else actualProjects.splice(idx, 1);

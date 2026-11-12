@@ -419,7 +419,7 @@ export interface GenerationProgress {
 }
 
 /** v5.49 待确认字段来源：analysis = AI 分析填入，manual = 用户手改。 */
-export type CharPendingSource = "analysis" | "manual";
+export type CharPendingSource = "analysis" | "manual" | "match";
 
 /**
  * v5.49 单个人物的待确认草稿记录（见 ScriptData.charPending）：
@@ -481,6 +481,20 @@ export function charPendingHasManual(rec: CharPendingRecord): boolean {
     rec.source.voice === "manual" ||
     rec.source.tone === "manual" ||
     rec.source.gender === "manual"
+  );
+}
+
+/**
+ * 待确认记录里有没有来源为 match 的字段（v5.84：一键匹配资产图
+ * 把卡的造型 / 音色填进待确认、来源记 match，人物按钮标「匹配
+ * 待确认」据此）。
+ */
+export function charPendingHasMatch(rec: CharPendingRecord): boolean {
+  return (
+    rec.source.look === "match" ||
+    rec.source.voice === "match" ||
+    rec.source.tone === "match" ||
+    rec.source.gender === "match"
   );
 }
 
@@ -682,14 +696,14 @@ export function parseScript(json: string | null): ScriptData | null {
       }
     }
     // v5.49 人物待确认草稿归一：形状不对的记录整条丢弃（按无待确
-    // 认值处理）；字段级来源只认 analysis / manual；待确认值与已
+    // 认值处理）；字段级来源只认 analysis / manual / match（v5.84）；待确认值与已
     // 存值相同的字段直接清掉（只记不同的）；代号已不在人物表里
     // 的记录一并删（删人物行 → 删其 charPending）；全空又无回退
     // 点的记录不保留。没有这个键的存量稿不补写、原样通过。
     if (data.charPending != null && typeof data.charPending === "object") {
       const rowByName = new Map(data.characterRows.map((r) => [r.name, r]));
       const asSource = (v: unknown): CharPendingSource | null =>
-        v === "analysis" || v === "manual" ? v : null;
+        v === "analysis" || v === "manual" || v === "match" ? v : null;
       const out: CharPendingMap = {};
       for (const [code, rawRec] of Object.entries(
         data.charPending as Record<string, unknown>,
@@ -1096,7 +1110,7 @@ export function buildMarkdown(
   );
   out.push(`| 合计秒数 | ${tl.totalSeconds.toFixed(1)} 秒（台词确认后按 ${script.speechRate} 字/s 换算） |`);
   out.push(
-    `| 生成总时长 | ${(tl.totalSeconds + Math.max(0, tl.groups.length - 1)).toFixed(1)} 秒（故事总时长 + 首帧重叠 ${Math.max(0, tl.groups.length - 1)} 秒 = 镜头数 − 1；重叠秒数不计入故事时长） |`,
+    `| 生成总时长 | ${tl.totalSeconds.toFixed(1)} 秒（与故事总时长一致，镜头之间不重叠、时间码连续） |`,
   );
   out.push("| 画幅 | 16:9 |");
   out.push(`| 语速 | ${script.speechRate} 字/s |`);
@@ -1121,7 +1135,6 @@ export function buildMarkdown(
     // inside each beat's 画面内容.
     out.push(...filmStyleLockLines(script), "");
     out.push(...lensCharacterMappingLines(script, g, ctx, opts), "");
-    if (gi > 0) out.push(...lensOverlapLines(script, gi), "");
     out.push(...lensBeatLines(script, ctx, g, gi, dlgNums));
     // v4.83：每条分镜提示词（本镜头块）末尾固定带资产图优先规则行。
     // v4.94：v4.93 的短版风格后缀已删——风格锁只留每镜头顶部一次。
@@ -1287,14 +1300,12 @@ export function buildGenChecklist(
 ): string {
   const tl = computeTimeline(script);
   const out: string[] = [];
-  const overlapSeconds = Math.max(0, tl.groups.length - 1);
-  const generationTotal = tl.totalSeconds + overlapSeconds;
   out.push(`# ${script.title} · AI 视频生成清单（可灵 / 即梦）`, "");
   // v4.70：【郑重声明】置顶，紧跟标题，不藏在镜头备注里。
   out.push(...videoDeclarationLines(), "");
   out.push(`项目：${projectName}｜画幅：16:9｜语速：${script.speechRate} 字/s｜故事总时长：${tl.totalSeconds.toFixed(1)} 秒`, "");
   out.push(
-    `生成总时长：${generationTotal.toFixed(1)} 秒 = 故事总时长 ${tl.totalSeconds.toFixed(1)} 秒 + 首帧重叠 ${overlapSeconds} 秒（镜头数 ${tl.groups.length} − 1，每个后续镜头首帧与上一镜头重叠1秒）；故事总时长没有变长，多出的只是重叠帧。`,
+    `生成总时长：${tl.totalSeconds.toFixed(1)} 秒（与故事总时长一致，镜头之间不重叠、时间码连续）`,
     "",
   );
   if (script.targetSeconds > 0) {
@@ -1314,18 +1325,13 @@ export function buildGenChecklist(
   tl.groups.forEach((g, gi) => {
     out.push("", `## 镜头 ${gi + 1}｜${g.title}`, "");
     out.push(`- 故事时间码：${fmtRange(g.start, g.end)}（故事时长 ${g.duration.toFixed(1)} 秒 · 全片总时长 ${tl.totalSeconds.toFixed(1)} 秒${g.duration > 30.05 ? `，⚠️ 超过 30 秒默认上限${(script.overlongOverride?.lenses ?? []).some((l) => l.lensIndex === gi + 1) ? "（已高权限确认保留）" : ""}，生成前请留意工具的单镜头时长上限` : ""}）`);
-    out.push(
-      gi === 0
-        ? `- 生成时长：${g.duration.toFixed(1)} 秒（首个镜头，无首帧重叠）`
-        : `- 生成时长：${lensGenerationSeconds(gi, g.duration).toFixed(1)} 秒 = 故事时长 ${g.duration.toFixed(1)} 秒 + 首帧重叠 1 秒（生成从 ${fmtTc(Math.max(0, g.start - 1))} 起，首帧=上一镜头末帧）`,
-    );
+    out.push(`- 生成时长：${g.duration.toFixed(1)} 秒（与故事时长一致）`);
     // Same order as the per-lens copy: style lock (v4.93) and
     // character mappings first, then the beats; the scene lives as
     // text inside each beat's 画面内容， not as a separate
     // scene-mapping section.
     out.push(...filmStyleLockLines(script), "");
     out.push(...lensCharacterMappingLines(script, g, ctx), "");
-    if (gi > 0) out.push(...lensOverlapLines(script, gi), "");
     out.push(...lensBeatLines(script, ctx, g, gi, dlgNums));
     // v4.83：每条分镜提示词（本镜头块）末尾固定带资产图优先规则行。
     // v4.94：v4.93 的短版风格后缀已删——风格锁只留每镜头顶部一次。
@@ -1521,7 +1527,7 @@ export function buildDialogueBook(
 
 /**
  * 逐镜头生图/生视频提示词包：每个镜头一条独立可用的提示词——画幅
- * 16:9、场景、画面内容、人物映射（造型/音色/语气）、首帧与末帧衔接、
+ * 16:9、场景、画面内容、人物映射（造型/音色/语气）、首帧与末帧、
  * 禁用项。人物造型与场景短语在每个镜头里重复写全，不只在全局写一次，
  * 这样单独复制任何一个镜头去生图/生视频都不会丢人物与场景。
  */
@@ -1554,15 +1560,23 @@ export function buildLensPromptPack(
             )
             .join("；")
         : g.sceneName || NOT_FILLED;
+    // v5.94：每镜人物行同口径只列已提取人物资产图的人物（见
+    // visibleMappingCharacters）；过滤启用且一人不剩时 charText
+    // 为空——「人物映射：」行整行不出现、可粘贴提示词里的人物
+    // 段同步省去，不写 未填写 占位。过滤未启用（解剖等无卡 id
+    // 的上下文）时与改版前逐字一致。
+    const visChars = visibleMappingCharacters(maps.characters, ctx);
     const charText =
-      maps.characters.length > 0
-        ? maps.characters
+      visChars.length > 0
+        ? visChars
             .map(
               (c) =>
                 `${c.name}（造型：${c.look.trim() || NOT_FILLED}；音色：${c.voice.trim() || NOT_FILLED}；语气基调：${c.tone.trim() || NOT_FILLED}）`,
             )
             .join("；")
-        : NOT_FILLED;
+        : mappingImageFilterEnabled(ctx)
+          ? ""
+          : NOT_FILLED;
     const visuals = g.beats.map((b) => b.visual.trim()).filter(Boolean);
     const lines = g.beats
       .filter((b) => b.line.trim())
@@ -1577,7 +1591,8 @@ export function buildLensPromptPack(
     );
     out.push(`- 画幅：16:9，超写实真人短剧质感`);
     out.push(`- 场景：${sceneText}`);
-    out.push(`- 人物映射：${charText}`);
+    // v5.94：charText 为空（过滤后一人不剩）时整行不出现。
+    if (charText) out.push(`- 人物映射：${charText}`);
     out.push(`- 画面内容：${visuals.join("；") || NOT_FILLED}`);
     if (lines.length > 0) out.push(`- 台词：${lines.join("；")}`);
     // v3.92 严格审核口径进提示词包：神态逐拍写明、切镜方式按场景
@@ -1610,11 +1625,11 @@ export function buildLensPromptPack(
     out.push(
       gi === 0
         ? `- 首帧衔接：开场镜头，无上一镜头——首帧直接建立场景与人物站位。`
-        : `- 首帧衔接：首帧与上一镜头末帧重叠 1 秒（首帧 = 上一镜头末帧，画面/场景/人物原文沿用），生成时长 = 本镜头 ${g.duration.toFixed(1)} 秒 + 重叠 1 秒。`,
+        : `- 首帧衔接：首帧按本镜头第一拍画面生成，生成时长 = 本镜头故事时长 ${g.duration.toFixed(1)} 秒。`,
     );
-    out.push(`- 末帧：${lastVisual || NOT_FILLED}（定格作为下一镜头首帧衔接）`);
+    out.push(`- 末帧：${lastVisual || NOT_FILLED}`);
     out.push(
-      `- 提示词（可直接粘贴）：16:9 超写实真人短剧，场景：${sceneText}；人物：${charText}；画面：${visuals.join("，") || NOT_FILLED}；人物神态表情与台词情绪一致、眼神眉头嘴角到位；画面连贯流畅、镜头切换与场景一致、无跳变无串场；空镜不超过 2 秒；自然光影，真实皮肤质感，电影感构图。人物锁定：台词只能由标注造型的本人表演，严禁角色互换串演；台词仅用于配音，画面不烧录任何字幕。`,
+      `- 提示词（可直接粘贴）：16:9 超写实真人短剧，场景：${sceneText}${charText ? `；人物：${charText}` : ""}；画面：${visuals.join("，") || NOT_FILLED}；人物神态表情与台词情绪一致、眼神眉头嘴角到位；画面连贯流畅、镜头切换与场景一致、无跳变无串场；空镜不超过 2 秒；自然光影，真实皮肤质感，电影感构图。人物锁定：台词只能由标注造型的本人表演，严禁角色互换串演；台词仅用于配音，画面不烧录任何字幕。`,
     );
     out.push(
       `- 禁用项 / 负面提示词：卡通，动漫，3D 渲染，塑料皮肤，水印，logo，画面内烧录文字/字幕，换脸，服装变化，多余肢体，变形手指（cartoon, anime, 3d render, plastic skin, watermark, logo, text, burned-in subtitles, extra limbs, deformed hands）`,
@@ -3367,6 +3382,13 @@ export function globalSpecLines(
   ctx?: LensMappingContext,
 ): string[] {
   const { characters, scenes } = globalSpecData(script, ctx);
+  // v5.94：全局规范的人物口径与逐镜头角色映射一致——工作台项
+  // 目上下文里只列已提取人物资产图的人物：资产说明的人数只计
+  // 有图人物，角色映射行与音色行只列有图人物；过滤启用且一人
+  // 不剩时这两行整行不出现（与 v4.85 场景映射行同口径）。过滤
+  // 未启用（解剖临时上下文）时与改版前逐字一致。
+  const filterOn = mappingImageFilterEnabled(ctx);
+  const visChars = visibleMappingCharacters(characters, ctx);
   const lines: string[] = [];
   lines.push(
     "- **画幅**：16:9，no text, no watermark（画面内禁止烧录任何文字/字幕/水印/logo，字幕后期压制）",
@@ -3379,17 +3401,17 @@ export function globalSpecLines(
           .join("；")
       : "无场景资产图（场景随剧本各段场景名与画面描述写入）";
   lines.push(
-    `- **资产说明**：人物资产=人物资产图（共 ${characters.length} 位，见项目人物资产图）；场景资产=${sceneAsset}`,
+    `- **资产说明**：人物资产=人物资产图（共 ${visChars.length} 位，见项目人物资产图）；场景资产=${sceneAsset}`,
   );
-  lines.push(
-    `- **角色映射**：${
-      characters.length > 0
-        ? characters
-            .map((c) => `${c.name}=${c.name}（${c.role || NOT_FILLED}）`)
-            .join("；")
-        : NOT_FILLED
-    }`,
-  );
+  if (visChars.length > 0) {
+    lines.push(
+      `- **角色映射**：${visChars
+        .map((c) => `${c.name}=${c.name}（${c.role || NOT_FILLED}）`)
+        .join("；")}`,
+    );
+  } else if (!filterOn) {
+    lines.push(`- **角色映射**：${NOT_FILLED}`);
+  }
   // v4.85：全局规范的场景映射同样只列有数据、非特写 framing 的
   // 条目；一条有效条目都没有时整行不出现，不写 未填写 占位。
   const specScenes = visibleSceneMappings(scenes);
@@ -3405,19 +3427,16 @@ export function globalSpecLines(
         .join("；")}`,
     );
   }
-  lines.push(
-    `- **音色**：${
-      characters.length > 0
-        ? characters
-            .map((c) => `${c.name}=${c.voice.trim() || NOT_FILLED}`)
-            .join("；")
-        : NOT_FILLED
-    }`,
-  );
+  if (visChars.length > 0) {
+    lines.push(
+      `- **音色**：${visChars
+        .map((c) => `${c.name}=${c.voice.trim() || NOT_FILLED}`)
+        .join("；")}`,
+    );
+  } else if (!filterOn) {
+    lines.push(`- **音色**：${NOT_FILLED}`);
+  }
   lines.push(`- **语速**：${script.speechRate} 字/秒，节奏紧凑`);
-  lines.push(
-    "- **首帧重叠**：除第一个镜头外，每个镜头的首帧与上一镜头重叠1秒（首帧=上一镜头末帧，画面/场景/人物/末帧描述原文沿用上一镜头末帧）；重叠的1秒不重复台词、不计入故事时长，生成时长=镜头故事时长+1秒",
-  );
   lines.push(
     "- **禁用**：cartoon, anime, 3d render, plastic skin, extra limbs, watermark, logo, text",
   );
@@ -3581,6 +3600,38 @@ export function visiblePropMappings(
   return props.filter(propMappingHasData);
 }
 
+/**
+ * v5.94 角色映射只列「已提取人物资产图」的人物（用户点名：没
+ * 有提取的人物资产图不要出现在角色映射当中——项目 44 的 C/F/G
+ * 人物卡已删、台词还在分镜里，映射正文却按出场列出他们、写
+ * 「C=造型：未填写」占位）。判定 = resolveCharacterInfo 已算
+ * 的 hasImage（人物卡 imageUrl 非空才为真；卡被删了、或卡还
+ * 在但没图，都是假），没图的人物整条不出现、不写占位。
+ * 例外守卫：过滤只在「工作台项目上下文」启用——上下文里的
+ * 人物带了人物卡 id（App.buildMappingContext 传入）才算数；
+ * AI 解剖临时上下文（analysisbench mappingCtxOf）的人物没有
+ * id、也没有 imageUrl，那里的映射保持原样全列，否则解剖结
+ * 果页的分镜表会丢光人物。
+ * 过滤只在映射正文呈现层做：lensMappings 本身（出场判定、描
+ * 述词替换、附图清单、切镜核对、说话人锁定行）一字不动；台
+ * 词、人物卡、人物表、审查页「待确认人物」提示都不动。
+ */
+export function mappingImageFilterEnabled(
+  ctx?: LensMappingContext,
+): boolean {
+  return (ctx?.characters ?? []).some((c) => typeof c.id === "number");
+}
+
+/** 映射正文里真正呈现的人物条目：过滤启用时只留有资产图的人。 */
+export function visibleMappingCharacters(
+  chars: LensMappingCharInfo[],
+  ctx?: LensMappingContext,
+): LensMappingCharInfo[] {
+  return mappingImageFilterEnabled(ctx)
+    ? chars.filter((c) => c.hasImage)
+    : chars;
+}
+
 export interface MappingGaps {
   scenes: string[];
   props: string[];
@@ -3620,6 +3671,17 @@ export function collectMappingGaps(
  */
 export const ASSET_PRIORITY_RULE =
   "资产图优先规则：用户提供了人物、场景、道具的资产图，就优先使用资产图；如果没有，就使用分镜中描述的提示词。";
+
+/**
+ * v5.91 切镜规则（问题 #23「111220」追加，用户原话「同一个动作没
+ * 做完别切新镜头」）：重分组版本（Seedance 每镜 20–30 秒版 / 强
+ * 制 30 秒版、H3 每镜 10–15 秒版）的逐镜头文本末尾带这一行给视
+ * 频模型——同一个动作必须完整做完再切镜。H3 版的同义句写在
+ * detailed_description 开场（见 buildH3TextForGroup），按剧情版
+ * 不带（分组与文本口径照旧）。
+ */
+export const ACTION_CUT_RULE_LINE =
+  "切镜规则：同一个动作没有做完，不要切到下一个镜头；当前动作必须完整做完、落到结束姿态之后再切镜，不要把一个动作切到一半就换镜头。";
 
 // ---------------------------------------------------------------------------
 // v4.93 全片风格锁定 + 每镜头站位（v4.95 站位改「固定站位每拍都带」）
@@ -4126,10 +4188,14 @@ export function lensMappingBlocks(
       }),
     );
   }
-  const charBlock: string[] = ["角色映射："];
-  if (m.characters.length === 0) {
-    charBlock.push(NOT_FILLED);
-  } else {
+  // v5.94：角色块只列过滤后留下的人物（visibleMappingCharacters，
+  // 工作台项目上下文里只剩已提取人物资产图的人）；过滤后一人不
+  // 剩时整个角色块不出现（与 v4.85 场景 / 道具同口径），不写
+  // 未填写 占位。过滤未启用（解剖临时上下文）时保持旧口径：
+  // 本镜头无人出场仍写「角色映射：/ 未填写」。
+  const visChars = visibleMappingCharacters(m.characters, ctx);
+  if (visChars.length > 0) {
+    const charBlock: string[] = ["角色映射："];
     // v4.92：条目头带真名（A（小帅）=造型：……）；条目后跟一行
     // 人物称呼对照表。
     // v5.27：对照表按本镜头出场人物过滤——旧口径整行取全项目别名
@@ -4137,9 +4203,10 @@ export function lensMappingBlocks(
     // 多出大伯=E、镜头 2 多出老板娘=D，模型会被没出场的人干扰）。
     // 只改这一行的入参，别名推导本身（projectCharacterAliases）
     // 一字未动；无别名的人本来就不进对照表，口径不变。
+    // v5.94：对照表同步只列过滤后留下的人物（inLens 取 visChars）。
     const aliasPairs = projectCharacterAliases(script, ctx);
     const aliasByCode = new Map(aliasPairs.map((p) => [p.code, p.alias]));
-    m.characters.forEach((c, i) => {
+    visChars.forEach((c, i) => {
       if (i > 0) charBlock.push("");
       const alias = aliasByCode.get(c.name) ?? "";
       const label = characterMappingLabel(c.name, alias);
@@ -4151,13 +4218,15 @@ export function lensMappingBlocks(
             : `${label}`,
       );
     });
-    const inLens = new Set(m.characters.map((c) => c.name));
+    const inLens = new Set(visChars.map((c) => c.name));
     const aliasLine = characterAliasTableLine(
       aliasPairs.filter((p) => inLens.has(p.code)),
     );
     if (aliasLine) charBlock.push(aliasLine);
+    blocks.push(charBlock);
+  } else if (!mappingImageFilterEnabled(ctx)) {
+    blocks.push(["角色映射：", NOT_FILLED]);
   }
-  blocks.push(charBlock);
   const visProps = visiblePropMappings(m.props);
   if (visProps.length > 0) {
     const propBlock: string[] = ["道具映射："];
@@ -4216,16 +4285,19 @@ export function lensMappingLines(
       }),
     );
   }
-  const charBlock: string[] = ["**角色映射**："];
-  if (m.characters.length === 0) {
-    charBlock.push(NOT_FILLED);
-  } else {
+  // v5.94：与 lensMappingBlocks 逐项同口径——只列过滤后留下的
+  // 人物（工作台项目上下文里只剩已提取人物资产图的人），对照表
+  // 同步只列留下的人；过滤后一人不剩时整个角色块不出现，过滤
+  // 未启用（解剖临时上下文）时保持旧口径（无人出场写 未填写）。
+  const visChars = visibleMappingCharacters(m.characters, ctx);
+  if (visChars.length > 0) {
+    const charBlock: string[] = ["**角色映射**："];
     // v4.92：与 lensMappingBlocks 同口径——条目头带真名、条目后跟
     // 人物称呼对照表，页面显示与复制 / 导出逐字一致。
     // v5.27：对照表同样按本镜头出场人物过滤（见 lensMappingBlocks）。
     const aliasPairs = projectCharacterAliases(script, ctx);
     const aliasByCode = new Map(aliasPairs.map((p) => [p.code, p.alias]));
-    m.characters.forEach((c, i) => {
+    visChars.forEach((c, i) => {
       if (i > 0) charBlock.push("");
       const alias = aliasByCode.get(c.name) ?? "";
       const label = characterMappingLabel(c.name, alias);
@@ -4237,13 +4309,15 @@ export function lensMappingLines(
             : `${label}`,
       );
     });
-    const inLens = new Set(m.characters.map((c) => c.name));
+    const inLens = new Set(visChars.map((c) => c.name));
     const aliasLine = characterAliasTableLine(
       aliasPairs.filter((p) => inLens.has(p.code)),
     );
     if (aliasLine) charBlock.push(aliasLine);
+    blocks.push(charBlock);
+  } else if (!mappingImageFilterEnabled(ctx)) {
+    blocks.push(["**角色映射**：", NOT_FILLED]);
   }
-  blocks.push(charBlock);
   const visProps = visiblePropMappings(m.props);
   if (visProps.length > 0) {
     const propBlock: string[] = ["**道具映射**："];
@@ -4468,7 +4542,6 @@ export function formatBeatLines(
   lensStart: number,
   lensDuration: number,
   opts?: {
-    firstBeatOverlap?: boolean;
     /** v5.21：本拍画面文本修正（描述词换标签 + 集体名词展开）。 */
     visualFix?: (text: string) => string;
   },
@@ -4477,9 +4550,6 @@ export function formatBeatLines(
     noteVisualFix: opts?.visualFix,
   });
   const fix = opts?.visualFix ?? ((t: string) => t);
-  const overlapNote = opts?.firstBeatOverlap
-    ? " · 其中1秒为与上一镜头重叠帧（首帧=上一镜头末帧，不重复计台词、不计入故事时长）"
-    : "";
   // v4.94 精简：每拍只留画面 + 台词 + 运镜——「快切感」行与
   // 「画面内无烧录文字」行删除（不烧录字幕郑重声明第 1 条已经
   // 说了，不用每拍重复）；音效只有本拍真有音效时才写一行，没
@@ -4491,7 +4561,7 @@ export function formatBeatLines(
   // 逐人名单，存量数据不动）；有台词的拍在台词行后加一行说话人
   // 绑脸行（说话人 + 他的 canonical 造型句）。
   const lines = [
-    `节拍${localNo}｜${d.annotation} ${fmtRange(beat.start, beat.end)} · ${beat.duration.toFixed(1)} 秒${overlapNote} · 切镜依据：${beat.cutReason?.trim() || "剧情分析"}`,
+    `节拍${localNo}｜${d.annotation} ${fmtRange(beat.start, beat.end)} · ${beat.duration.toFixed(1)} 秒 · 切镜依据：${beat.cutReason?.trim() || "剧情分析"}`,
     `画面内容：${fix(d.visualContent)}；末帧：${fix(d.finalFrame)}。`,
     `人物对话：${d.dialogueText}`,
   ];
@@ -4534,7 +4604,6 @@ export function lensBeatLines(
       group.start,
       group.duration,
       {
-        firstBeatOverlap: groupIndex > 0 && bi === 0,
         visualFix: fixers[bi],
       },
     );
@@ -4548,73 +4617,13 @@ export function lensBeatLines(
 }
 
 // ---------------------------------------------------------------------------
-// First-frame 1s overlap between consecutive lenses
-//
-// Every lens after the first starts (for generation) 1 second BEFORE
-// its story start point, and its first frame is exactly the previous
-// lens's final frame — the previous lens's last beat visual is carried
-// over VERBATIM (never rewritten) so the generated clips line up. The
-// overlapped second is a duplicate frame only: it does not repeat any
-// dialogue, does not shift story timecodes, and is not counted in the
-// story duration. Generation duration per lens = story duration + 1s
-// (first lens excluded), so 生成总时长 − 故事总时长 = 镜头数 − 1 秒.
+// v5.83：镜头之间不再做「首帧重叠」——旧口径（v4.94 以前）每个后续
+// 镜头生成时提前 1 秒、首帧 = 上一镜头末帧，用户实判这套说法没起
+// 到作用、亲口要求整套删除：拼装里不再写重叠段、不再写「首帧=上
+// 一镜头末帧」、不再写生成起始点提前，节拍 / 时间轴标题也不再提
+// 重叠帧；时间码按不重叠连续计算，生成时长 = 故事时长。旧的
+// lensOverlapLines / lensOverlapInfo / lensGenerationSeconds 已删。
 // ---------------------------------------------------------------------------
-
-export interface LensOverlapInfo {
-  /** Previous lens's scene name(s), verbatim. */
-  prevSceneName: string;
-  /** Previous lens's last beat visual, verbatim (原文照搬）. */
-  prevVisual: string;
-  /** Final frame fragment of the previous lens's last beat. */
-  prevFinalFrame: string;
-  /** This lens's generation start point: story start − 1s. */
-  generationStart: number;
-}
-
-/** Overlap info for lens `groupIndex` (null for the first lens). */
-export function lensOverlapInfo(
-  script: ScriptData,
-  groupIndex: number,
-): LensOverlapInfo | null {
-  if (groupIndex <= 0) return null;
-  const tl = computeTimeline(script);
-  const prev = tl.groups[groupIndex - 1];
-  const cur = tl.groups[groupIndex];
-  if (!prev || !cur || prev.beats.length === 0) return null;
-  const last = prev.beats[prev.beats.length - 1];
-  if (!last) return null;
-  return {
-    prevSceneName: prev.sceneName,
-    prevVisual: (last.visual ?? "").trim(),
-    prevFinalFrame: splitVisualFinal(last.visual ?? "").finalFrame,
-    generationStart: Math.max(0, cur.start - 1),
-  };
-}
-
-/**
- * The overlap annotation at the top of a lens (index > 0). v4.94:
- * the previous four technical lines are compressed into ONE line —
- * same facts (overlap rule, previous final frame verbatim, scene,
- * generation start), no information lost.
- */
-export function lensOverlapLines(
-  script: ScriptData,
-  groupIndex: number,
-): string[] {
-  const info = lensOverlapInfo(script, groupIndex);
-  if (!info) return [];
-  return [
-    `首帧重叠：与上一镜头重叠1秒，首帧=上一镜头末帧（原文照搬：${info.prevVisual}；场景：${info.prevSceneName}；末帧：${info.prevFinalFrame}）；生成起始点：${fmtTc(info.generationStart)}（比故事起点提前1秒），重叠的1秒不重复台词、不计入故事时间码`,
-  ];
-}
-
-/** Generation duration of one lens: story duration + 1s overlap (not first). */
-export function lensGenerationSeconds(
-  groupIndex: number,
-  storyDuration: number,
-): number {
-  return storyDuration + (groupIndex > 0 ? 1 : 0);
-}
 
 /** Dialogue numbers (1-based, storyboard order) per beat, null when silent. */
 export function dialogueNumbers(script: ScriptData): (number | null)[][] {
@@ -4736,12 +4745,12 @@ export function coverageLines(script: ScriptData): string[] {
 //        角色映射——只列本镜头出场人物、条目只剩条目头、带人物
 //        称呼对照表；道具映射只留描述行；无生图提示词、无资产
 //        行、无音色 / 语气基调行、无人物锁定重复段)
-//   【4】首帧重叠一行 (v4.94: 原四行技术说明压缩成一行)
-//   【5】节拍 (each beat its own block, blank line between beats;
+//   【4】节拍 (each beat its own block, blank line between beats;
 //        每拍只留画面 + 台词 + 运镜，音效非空才写；v4.93: 本组
 //        站位行插在画面内容之后、人物对话之前；v4.95: 改为固定
 //        站位每一拍都带同一句，只写位置不写动作)
-//   【6】资产图优先规则行 (v4.83: 固定文案逐字）
+//   【5】资产图优先规则行 (v4.83: 固定文案逐字）
+//   （v5.83：原【4】首帧重叠一行整段删除，见 lensBeatLines 上方注。）
 // Nothing else: no lens title, no totals/statistics, no 全局规范， no
 // 时间总规划， no 覆盖清单， no generation notes. A scene change
 // starts a new beat block rather than being squeezed into the same
@@ -4767,13 +4776,10 @@ export function buildSingleGroupText(
     lines.push(...videoDeclarationLines(), "");
   }
   lines.push(...lensCharacterMappingLines(script, g, ctx, opts));
-  // v5.24 第 1 档：角色映射块之后、首帧重叠行之前加 @Image N 绑定行。
+  // v5.24 第 1 档：角色映射块之后加 @Image N 绑定行。
   const bindingLine = lensImageBindingLine(script, g, ctx);
   if (bindingLine) lines.push(bindingLine);
   lines.push("");
-  if (groupIndex > 0) {
-    lines.push(...lensOverlapLines(script, groupIndex), "");
-  }
   const dlgNums = dialogueNumbers(script);
   lines.push(...lensBeatLines(script, ctx, g, groupIndex, dlgNums));
   // v4.83：本条分镜提示词末尾固定带资产图优先规则行（逐字定稿）。
@@ -4791,7 +4797,7 @@ export function buildSingleGroupText(
 // 条、场景一行、角色映射 + 称呼对照表、固定站位、资产图优先规则、
 // 台词原文一字不动（站位在 2.5 / 2.0 是每拍都带，v4.99 起 Fast /
 // Mini 改为开头只写一次，见下）。v5.24（第 1 档）起四档与通用版
-// 同步在角色映射块之后、首帧重叠行之前加「参考图绑定」行
+// 同步在角色映射块之后加「参考图绑定」行
 // （lensImageBindingLine：出场顺序 @Image N、无图不占号）。
 // v5.24 第 1 档【0】再收敛一处：全局头（风格锁定句 + 郑重声明）
 // 只在镜头 1 写一次、镜头 2 起两处拼装（本函数与通用版）都不再
@@ -4806,8 +4812,8 @@ export function buildSingleGroupText(
 //     其余（切镜依据、运镜、秒数）保留。
 //   · Seedance 2.0（镜头序号版）：每拍标题行改为「镜头N：…」（本
 //     镜头内从 1 编号，Seedance 的镜头 = 工作台的节拍）；删掉标题
-//     行里的绝对时间码与每拍秒数（只删标题行里的，首帧重叠行等其
-//     余部分与基线逐字一致）；台词用花括号 {台词内容}；音效本
+//     行里的绝对时间码与每拍秒数（只删标题行里的，其余部分与基
+//     线逐字一致）；台词用花括号 {台词内容}；音效本
 //     来就按 2.0 符号表写（音效 <…>），没有音乐 / 字幕数据就不写
 //     音乐（）/ 字幕【】；其余（切镜依据、运镜、画面、站位）保留。
 //   · Seedance 2.0 Fast（v4.99 单镜锁死版，实测省字策略、非官方
@@ -4899,20 +4905,6 @@ function mappingLinesForModel(
     const idx = line.indexOf("台词中出现的人名均指代号对应的人物");
     return idx > 0 ? line.slice(0, idx) : line;
   });
-}
-
-/**
- * 首帧重叠行四档与基线逐字一致（规格只授权删每拍标题行里的绝对
- * 时间码与每拍秒数，未列出的部分与 v4.97 完全一致），本函数只是
- * 统一取行、不做任何改写。
- */
-function overlapLinesForModel(
-  script: ScriptData,
-  groupIndex: number,
-  model: VideoModelId,
-): string[] {
-  void model;
-  return lensOverlapLines(script, groupIndex);
 }
 
 /** 2.5 一句话概述：只用已有数据拼，不编新内容。 */
@@ -5119,15 +5111,11 @@ function beatLinesForModel(
       finalFrame: fix(raw.finalFrame),
     };
     const cutReason = b.cutReason?.trim() || "剧情分析";
-    const overlapNote =
-      groupIndex > 0 && bi === 0
-        ? " · 其中1秒为与上一镜头重叠帧（首帧=上一镜头末帧，不重复计台词、不计入故事时长）"
-        : "";
     let title: string;
     if (model === "seedance25") {
       const relStart = (b.start - group.start).toFixed(1);
       const relEnd = (b.end - group.start).toFixed(1);
-      title = `${relStart}s-${relEnd}s：${d.annotation} · ${b.duration.toFixed(1)} 秒${overlapNote} · 切镜依据：${cutReason}`;
+      title = `${relStart}s-${relEnd}s：${d.annotation} · ${b.duration.toFixed(1)} 秒 · 切镜依据：${cutReason}`;
     } else {
       title = `镜头${bi + 1}：${d.annotation} · 切镜依据：${cutReason}`;
     }
@@ -5154,7 +5142,7 @@ export function buildSingleGroupTextForModel(
   script: ScriptData,
   groupIndex: number,
   ctx?: LensMappingContext,
-  opts?: LensMappingOptions & { videoModel?: VideoModelId },
+  opts?: LensMappingOptions & { videoModel?: VideoModelId; actionCutRule?: boolean },
 ): string {
   const model: VideoModelId = opts?.videoModel ?? "seedance25";
   const tl = computeTimeline(script);
@@ -5176,14 +5164,11 @@ export function buildSingleGroupTextForModel(
     lines.push(...videoDeclarationLines(), "");
   }
   lines.push(...mappingLinesForModel(script, g, ctx, opts, model));
-  // v5.24 第 1 档：四档共用——角色映射块之后、首帧重叠行之前加
-  // @Image N 绑定行（与通用版 buildSingleGroupText 同一位置口径）。
+  // v5.24 第 1 档：四档共用——角色映射块之后加 @Image N 绑定行
+  // （与通用版 buildSingleGroupText 同一位置口径）。
   const bindingLine = lensImageBindingLine(script, g, ctx);
   if (bindingLine) lines.push(bindingLine);
   lines.push("");
-  if (groupIndex > 0) {
-    lines.push(...overlapLinesForModel(script, groupIndex, model), "");
-  }
   if (isFastOrMini(model)) {
     // v4.99 单镜锁死版开头：锁死句单独一行，其后固定站位只写一次
     // （与 2.0 / 2.5 每拍站位行同一句原文），再进动作序列。固定
@@ -5195,6 +5180,9 @@ export function buildSingleGroupTextForModel(
   }
   lines.push(...beatLinesForModel(script, ctx, g, groupIndex, dlgNums, model));
   lines.push(ASSET_PRIORITY_RULE);
+  // v5.91：只有重分组版本（Seedance 20–30 秒版 / 强制 30 秒版）
+  // 在末尾多带切镜规则一行；按剧情版不带、逐字照旧。
+  if (opts?.actionCutRule) lines.push(ACTION_CUT_RULE_LINE);
   return lines.join("\n").trim();
 }
 
@@ -5246,7 +5234,7 @@ export function lensCastEntries(
  * 的实际出场顺序、与镜头包附图清单同序；只有真有资产图的人物才
  * 占编号，无资产图的写「暂无参考图」不占号（没图可 attach 就不
  * 该让后面的编号错位）。本镜头没人出场时返回空串、不进正文。
- * 拼装位置：角色映射块之后、首帧重叠行之前（通用版与四档共用）。
+ * 拼装位置：角色映射块之后（通用版与四档共用）。
  */
 export function lensImageBindingLine(
   script: ScriptData,
@@ -5405,7 +5393,8 @@ export function buildLensPackageText(
 }
 
 // ---------------------------------------------------------------------------
-// v5.31 MiniMax H3 六段式提示词拼装（两版：按剧情版 + 每镜 20–30 秒版）
+// v5.31 MiniMax H3 六段式提示词拼装（两版：按剧情版 + 每镜 10–15 秒版；
+// v5.90 起第 2 版由 20–30 秒版改为 10–15 秒版、按转折点切镜）
 //
 // v5.30 的未兑现项：H3 两版此前只在聊天解剖流程里出词、工作台内没
 // 有拼装，人物表改了造型 / 性别 / 音色点「同步到分镜提示词」后 H3
@@ -5444,11 +5433,14 @@ export function buildLensPackageText(
 //     带的音效原文汇总，不新编声音；不要配乐 → non_diegetic_
 //     music 恒写 N/A（工作台没有配乐数据）。
 // 两版的差别只在镜头分组：按剧情版 = 已确认的 storyboardGroups
-// 原样；20–30 秒版 = 把同一批节拍按顺序重新并成每镜高于 20 秒、
-// 低于 30 秒的组（节拍不可拆；先按总时长 ÷ 25 定组数、逐组往
-// 目标秒数凑，已达目标或再并一拍会到 30 秒即收组、末组取剩余，
-// 不留碎尾）。重分组只影响这一节的 H3 输出，不动已确认的
-// 分镜结构、不写回任何数据。
+// 原样；10–15 秒版（v5.90）= 把同一批节拍按顺序重新并成每镜
+// 10–15 秒的组，换镜优先落在剧情转折点上（见 h3ShortGroups）。
+// v5.91 起 10–15 秒版多一条：同一个动作没做完不切镜（动作链整
+// 段同进同出，见 actionUnits 上方说明），且逐镜正文开场带切镜
+// 规则一句；按剧情版分组与文本逐字不变。
+// 重分组只影响这一节的 H3 输出，不动已确认的分镜结构、不写回
+// 任何数据。旧 20–30 秒分组（h3DurationGroups）H3 不再使用，
+// 只剩 Seedance 每镜 20–30 秒版继续用同一函数。
 // ---------------------------------------------------------------------------
 
 export interface H3LensPrompt {
@@ -5503,15 +5495,99 @@ function h3GroupFromFlat(items: FlatBeat[]): ScriptGroup {
   };
 }
 
+// ---------------------------------------------------------------------------
+// v5.91 动作没做完不切镜（问题 #23「111220」追加，用户原话「同一
+// 个动作没做完别切新镜头」）：三个重分组版本（H3 每镜 10–15 秒
+// 版 / Seedance 每镜 20–30 秒版 / Seedance 强制 30 秒版）切镜头
+// 时多一条硬规矩——同一个动作的连续节拍（下称「动作链」）整段
+// 装进同一个镜头，不许从动作中间切开。判定（确定性，只看节拍
+// 自带信号，与 rules.shotCutReason 同一套信号源）：下一拍相对
+// 上一拍同段、同场，切分原因不是强信号（场景转场 / 悬念·反转
+// 点 / 人物出入场 / 开场节拍），并命中任一续接证据——①两拍都
+// 没有台词（无声动作相连）；②下一拍画面带续接词（继续 / 接着 /
+// 紧接着 / 随后 / 仍然 / 仍在 / 还在 / 同全景 / 同机位 / 同画
+// 面）；③下一拍画面是「边…边…」句式（前一个动作在本拍进行
+// 中）。装组时一个动作链 = 一个单元（整段同进同出）：链装不进
+// 当前镜就整段挪到下一镜（强制 30 秒版宁可多留白）。链本身比
+// 装组上限还长时（H3 版 18 秒 = 15 秒目标 + 宽限、Seedance 两
+// 版 30 秒）装不进任何一镜，只能退回逐拍装、在节拍边界切（节
+// 拍仍不可拆）。按剧情版不走重分组、不受这条规矩影响。
+// ---------------------------------------------------------------------------
+
+const ACTION_CHAIN_BREAK_REASONS = new Set([
+  "场景转场",
+  "悬念/反转点",
+  "人物出入场",
+  "开场节拍",
+]);
+
+const ACTION_CONTINUE_RE =
+  /继续|接着|紧接着|随后|仍然|仍在|还在|同全景|同机位|同画面/;
+
+const ACTION_WHILE_RE = /边[^，。；、]{1,10}边/;
+
+/** 下一拍是否续接上一拍没做完的同一个动作（见上方 v5.91 说明）。 */
+function beatContinuesAction(prev: FlatBeat, fb: FlatBeat): boolean {
+  if (fb.sectionTitle !== prev.sectionTitle) return false;
+  if (fb.sceneName !== prev.sceneName) return false;
+  if (ACTION_CHAIN_BREAK_REASONS.has(fb.cutReason)) return false;
+  const a = prev.beat;
+  const b = fb.beat;
+  if (a.line.trim() === "" && b.line.trim() === "") return true;
+  const visual = b.visual ?? "";
+  return ACTION_CONTINUE_RE.test(visual) || ACTION_WHILE_RE.test(visual);
+}
+
+interface ActionUnit {
+  items: FlatBeat[];
+  duration: number;
+  /** 所属动作链编号（同一链拆出的逐拍单元共用一个编号）。 */
+  chainId: number;
+}
+
 /**
- * 20–30 秒版的镜头分组：全片节拍（分镜阶段口径）按顺序重新并
- * 组，目标是每组高于 20 秒、低于 30 秒。算法（确定性）：先按
- * 总时长 ÷ 25 秒定组数 n（四舍五入、至少 1），每组目标秒数 =
- * 总时长 ÷ n；逐拍累积，当前组已达目标秒数、或再并一拍就会
- * 到 30 秒（且当前组已 ≥15 秒）时收组，最后一组取剩余——避免
- * 先把前面的组塞满、末尾留个十秒碎组。节拍不可拆，个别组仍
- * 可能略超范围（单拍过长 / 总时长本身凑不进区间），界面逐段
- * 标实际秒数。只用于 H3 拼装，不写回分镜结构。
+ * 把摊平节拍并成「装组单元」：一个动作链 = 一个单元（整段同进
+ * 同出）；链本身长于 splitAboveSec 时装不进任何一镜，退回逐拍
+ * 单元（仍共用 chainId，调用方据此认出链内边界）。
+ */
+function actionUnits(flat: FlatBeat[], splitAboveSec: number): ActionUnit[] {
+  const chains: FlatBeat[][] = [];
+  flat.forEach((fb, i) => {
+    const prev = i > 0 ? flat[i - 1] : undefined;
+    const last = chains[chains.length - 1];
+    if (prev && last && beatContinuesAction(prev, fb)) {
+      last.push(fb);
+    } else {
+      chains.push([fb]);
+    }
+  });
+  const units: ActionUnit[] = [];
+  chains.forEach((items, chainId) => {
+    const duration = items.reduce((s, fb) => s + fb.duration, 0);
+    if (items.length > 1 && duration > splitAboveSec) {
+      for (const fb of items) {
+        units.push({ items: [fb], duration: fb.duration, chainId });
+      }
+    } else {
+      units.push({ items, duration, chainId });
+    }
+  });
+  return units;
+}
+
+/**
+ * 20–30 秒分组：全片节拍（分镜阶段口径）按顺序重新并组，目标
+ * 是每组高于 20 秒、低于 30 秒。算法（确定性）：先按总时长 ÷
+ * 25 秒定组数 n（四舍五入、至少 1），每组目标秒数 = 总时长 ÷
+ * n；逐拍累积，当前组已达目标秒数、或再并一拍就会到 30 秒
+ * （且当前组已 ≥15 秒）时收组，最后一组取剩余——避免先把前
+ * 面的组塞满、末尾留个十秒碎组。节拍不可拆，个别组仍可能略
+ * 超范围（单拍过长 / 总时长本身凑不进区间），界面逐段标实际
+ * 秒数。v5.90 起 H3 第 2 版改用 h3ShortGroups（10–15 秒、按转
+ * 折点切），本函数只剩 Seedance 每镜 20–30 秒版使用，不写回
+ * 分镜结构。v5.91 起按 actionUnits 装组：同一个动作没做完不切
+ * 开，动作链整段同进同出（见 actionUnits 上方说明）；没有动作
+ * 链时（单元 = 单拍）与旧口径逐字一致。
  */
 export function h3DurationGroups(script: ScriptData): ScriptGroup[] {
   const view = storyboardScript(script);
@@ -5520,23 +5596,114 @@ export function h3DurationGroups(script: ScriptData): ScriptGroup[] {
   const total = flat.reduce((s, fb) => s + fb.duration, 0);
   const n = Math.max(1, Math.min(flat.length, Math.round(total / 25)));
   const target = total / n;
+  const units = actionUnits(flat, 30);
   const packs: { items: FlatBeat[]; duration: number }[] = [];
   let cur: { items: FlatBeat[]; duration: number } = { items: [], duration: 0 };
-  flat.forEach((fb, i) => {
-    const isLastBeat = i === flat.length - 1;
+  units.forEach((u, i) => {
+    const isLastUnit = i === units.length - 1;
     if (
       cur.items.length > 0 &&
       packs.length < n - 1 &&
-      !isLastBeat &&
+      !isLastUnit &&
       cur.duration >= 15 &&
-      (cur.duration >= target || cur.duration + fb.duration >= 30)
+      (cur.duration >= target || cur.duration + u.duration >= 30)
     ) {
       packs.push(cur);
       cur = { items: [], duration: 0 };
     }
-    cur.items.push(fb);
-    cur.duration += fb.duration;
+    cur.items.push(...u.items);
+    cur.duration += u.duration;
   });
+  if (cur.items.length > 0) packs.push(cur);
+  return packs.map((p) => h3GroupFromFlat(p.items));
+}
+
+/**
+ * v5.90 H3 第 2 版（每镜 10–15 秒版）的镜头分组：按剧情切割、
+ * 在转折点换镜。转折点（下一拍相对上一拍）= ①强信号：下一拍
+ * 切分原因 ∈ {场景转场，悬念/反转点，人物出入场}（rules.
+ * shotCutReason 口径，与 suggestPlotCuts 的强切点同一套）；
+ * ②换段 / 换场：sectionTitle 或 sceneName 与上一拍不同；
+ * ③说话人交接：相邻两拍说话人不同、且至少一拍有台词（换人
+ * 说话或另一人开口）；④情绪变化：相邻两拍情绪不同、且至少一
+ * 拍有台词。（③④比 shotCutReason 的「说话人切换 / 情绪转折」
+ * 略宽：那边要求两拍都有台词，无台词拍接台词拍的交接在那边只
+ * 记「动作转折」、在这里仍算转折点。）算法（确定性）：逐拍累
+ * 积——当前组攒够 10 秒后，遇到转折点就在转折点之前收组、新
+ * 镜头从转折拍开始；没攒够 10 秒时即使遇到转折点也不切（不
+ * 留碎组）；一直没等到转折点、当前组已满 15 秒时才在当前拍
+ * 收组（再等只会更超）。节拍不可拆：转折点来得晚时个别组会
+ * 略超 15 秒、单拍本身超 15 秒时该组只能超、最后一组可能不
+ * 足 10 秒，界面逐段标实际秒数。只用于 H3 10–15 秒版拼装，
+ * 不写回分镜结构。v5.91 起按 actionUnits 装组：切点正赶上一个
+ * 动作做到一半时不切、等动作做完（动作链整段同进同出，组可
+ * 因此到 18 秒）；动作链本身比 18 秒还长时退回逐拍装，链内边
+ * 界上转折点不切、只认满 15 秒的兜底切（动作链比一镜还长，
+ * 只能在节拍边界切开）。没有动作链时与旧口径逐字一致。
+ */
+const H3_STRONG_CUT_REASONS = new Set([
+  "场景转场",
+  "悬念/反转点",
+  "人物出入场",
+]);
+
+function h3IsTurningPoint(prev: FlatBeat, fb: FlatBeat): boolean {
+  if (H3_STRONG_CUT_REASONS.has(fb.cutReason)) return true;
+  if (fb.sectionTitle !== prev.sectionTitle) return true;
+  if (fb.sceneName !== prev.sceneName) return true;
+  const a = prev.beat;
+  const b = fb.beat;
+  const eitherHasLine = a.line.trim() !== "" || b.line.trim() !== "";
+  if (!eitherHasLine) return false;
+  if (
+    a.speaker.trim() !== "" &&
+    b.speaker.trim() !== "" &&
+    a.speaker.trim() !== b.speaker.trim()
+  ) {
+    return true;
+  }
+  if (
+    a.emotion.trim() !== "" &&
+    b.emotion.trim() !== "" &&
+    a.emotion.trim() !== b.emotion.trim()
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function h3ShortGroups(script: ScriptData): ScriptGroup[] {
+  const view = storyboardScript(script);
+  const flat = flattenStoryboardBeats(view);
+  if (flat.length === 0) return [];
+  const units = actionUnits(flat, 18);
+  const packs: { items: FlatBeat[]; duration: number }[] = [];
+  let cur: { items: FlatBeat[]; duration: number } = { items: [], duration: 0 };
+  let prevUnit: ActionUnit | null = null;
+  for (const u of units) {
+    if (cur.items.length > 0 && prevUnit) {
+      const prevBeat = prevUnit.items[prevUnit.items.length - 1];
+      const firstBeat = u.items[0];
+      // 链内边界 = 同一动作链被 18 秒上限拆成逐拍单元后的单元
+      // 之间：动作还没做完，转折点不切、只认满 15 秒兜底切。
+      const midChain = u.chainId === prevUnit.chainId;
+      const isTurningPoint =
+        prevBeat != null &&
+        firstBeat != null &&
+        h3IsTurningPoint(prevBeat, firstBeat);
+      if (
+        (!midChain &&
+          ((cur.duration >= 10 && isTurningPoint) || cur.duration >= 15)) ||
+        (midChain && cur.duration >= 15)
+      ) {
+        packs.push(cur);
+        cur = { items: [], duration: 0 };
+      }
+    }
+    cur.items.push(...u.items);
+    cur.duration += u.duration;
+    prevUnit = u;
+  }
   if (cur.items.length > 0) packs.push(cur);
   return packs.map((p) => h3GroupFromFlat(p.items));
 }
@@ -5748,14 +5915,15 @@ function h3FixVisualText(
 
 /**
  * 一个镜头的 H3 六段提示词全文。script 必须是「groups = 目标分
- * 组」的视图（按剧情版传 storyboardScript(script)，20–30 秒版
- * 传换上 h3DurationGroups 的视图），groupIndex 是该视图内的镜
+ * 组」的视图（按剧情版传 storyboardScript(script)，10–15 秒版
+ * 传换上 h3ShortGroups 的视图），groupIndex 是该视图内的镜
  * 头下标。镜头不存在返回空串。
  */
 export function buildH3TextForGroup(
   script: ScriptData,
   groupIndex: number,
   ctx?: LensMappingContext,
+  opts?: { actionCutRule?: boolean },
 ): string {
   const tl = computeTimeline(script);
   const g = tl.groups[groupIndex];
@@ -5853,6 +6021,13 @@ export function buildH3TextForGroup(
   if (styleCore) openingParts.push(`${styleCore}。`);
   if (sceneName) {
     openingParts.push(`本镜头场景是${sceneName}，同一场光线方向保持一致。`);
+  }
+  // v5.91：只有 10–15 秒版（重分组版）在开场多带切镜规则一句；
+  // 按剧情版不带、逐字照旧。
+  if (opts?.actionCutRule) {
+    openingParts.push(
+      "切镜规则：同一个动作没有做完不要切到下一个镜头，必须等当前动作完整做完、落到结束姿态之后再切镜。",
+    );
   }
 
   const shotTexts: string[] = [];
@@ -6037,6 +6212,7 @@ export function buildH3TextForGroup(
 function buildH3Version(
   view: ScriptData,
   ctx?: LensMappingContext,
+  opts?: { actionCutRule?: boolean },
 ): H3LensPrompt[] {
   const tl = computeTimeline(view);
   return tl.groups.map((g, gi) => ({
@@ -6044,7 +6220,7 @@ function buildH3Version(
     title: g.title,
     duration: g.duration,
     shotCount: g.beats.length,
-    text: buildH3TextForGroup(view, gi, ctx),
+    text: buildH3TextForGroup(view, gi, ctx, opts),
   }));
 }
 
@@ -6056,7 +6232,20 @@ export function buildH3PlotVersion(
   return buildH3Version(storyboardScript(script), ctx);
 }
 
-/** 每镜 20–30 秒版：同一批节拍按 h3DurationGroups 重新并组后逐镜拼。 */
+/** 每镜 10–15 秒版（v5.90）：同一批节拍按 h3ShortGroups（按剧情
+ * 在转折点切割、每镜 10–15 秒）重新并组后逐镜拼。v5.91 起逐镜
+ * 正文开场带切镜规则一句（opts.actionCutRule 强制开）。 */
+export function buildH3ShortVersion(
+  script: ScriptData,
+  ctx?: LensMappingContext,
+): H3LensPrompt[] {
+  const base = storyboardScript(script);
+  const view: ScriptData = { ...base, groups: h3ShortGroups(script) };
+  return buildH3Version(view, ctx, { actionCutRule: true });
+}
+
+/** @deprecated v5.90 起 H3 第 2 版改用 buildH3ShortVersion；保留
+ * 导出仅为兼容旧引用，界面不再调用。 */
 export function buildH3DurationVersion(
   script: ScriptData,
   ctx?: LensMappingContext,
@@ -6080,34 +6269,43 @@ export function buildH3FullText(
 }
 
 // ---------------------------------------------------------------------------
-// v5.38 Seedance 提示词（两版）：分镜页在镜头卡片与 H3 区之间新增的
-// 汇总区，与 H3 两版同构——按剧情版用已确认分镜镜头、每镜 20–30
-// 秒版用 h3DurationGroups 同一重组口径（只改呈现分组，不写回、不
-// 动已确认分镜结构）。每镜头文本不新拼：直接调
-// buildSingleGroupTextForModel（与分镜页逐镜头「一键复制」同一个
-// 函数、同一份 opts：expandLook + videoModel），按剧情版逐镜头与
-// 「一键复制」同镜头同模型逐字一致；四档格式分叉（2.5 时间戳 /
-// 2.0 系列镜头序号 / Fast 单镜锁死 / Mini 画面再压）全部由该函数
-// 本身保证，本节不写任何新文案。
+// v5.38 Seedance 提示词（v5.90 起三版）：分镜页的汇总区，与 H3 区
+// 并排——按剧情版用已确认分镜镜头、每镜 20–30 秒版用
+// h3DurationGroups 同一重组口径、强制 30 秒版用
+// seedanceForced30Groups（只改呈现分组，不写回、不动已确认分镜
+// 结构）。每镜头文本不新拼：直接调 buildSingleGroupTextForModel
+// （与分镜页逐镜头「一键复制」同一个函数、同一份 opts：
+// expandLook + videoModel），按剧情版逐镜头与「一键复制」同镜头
+// 同模型逐字一致；四档格式分叉（2.5 时间戳 / 2.0 系列镜头序号 /
+// Fast 单镜锁死 / Mini 画面再压）全部由该函数本身保证。例外两
+// 处：①强制 30 秒版的纯白留白段——内容装不满 30 秒时在该镜头
+// 文本末尾追加一段纯白留白说明（见 buildSeedanceForced30Version）；
+// ②v5.91 切镜规则行——每镜 20–30 秒版与强制 30 秒版（重分组
+// 版）逐镜文本末尾多带 ACTION_CUT_RULE_LINE 一行，按剧情版不带。
 // ---------------------------------------------------------------------------
 
 export interface SeedanceLensPrompt {
   /** 本版内的镜头序号（1 起）。 */
   lensIndex: number;
   title: string;
-  /** 本镜头时长（秒，computeTimeline 口径）。 */
+  /** 本镜头时长（秒，computeTimeline 口径；强制 30 秒版 = 内容
+   * 秒数 + 纯白留白秒数，凑满 30 秒）。 */
   duration: number;
   /** 本镜头节拍数。 */
   beatCount: number;
   /** 本镜头 Seedance 提示词全文（与「一键复制」同口径）。 */
   text: string;
+  /** 强制 30 秒版专用：剧情内容本身的秒数（其余版本不带）。 */
+  contentDuration?: number;
+  /** 强制 30 秒版专用：末尾纯白留白的秒数（0 = 不留白）。 */
+  padSeconds?: number;
 }
 
 /** Seedance 两版之一的逐镜头拼装（内部共用：换分组视图后逐镜拼）。 */
 function buildSeedanceVersion(
   view: ScriptData,
   ctx: LensMappingContext | undefined,
-  opts?: LensMappingOptions & { videoModel?: VideoModelId },
+  opts?: LensMappingOptions & { videoModel?: VideoModelId; actionCutRule?: boolean },
 ): SeedanceLensPrompt[] {
   const tl = computeTimeline(view);
   return tl.groups.map((g, gi) => ({
@@ -6128,7 +6326,8 @@ export function buildSeedancePlotVersion(
   return buildSeedanceVersion(storyboardScript(script), ctx, opts);
 }
 
-/** 每镜 20–30 秒版：同一批节拍按 h3DurationGroups 重新并组后逐镜拼。 */
+/** 每镜 20–30 秒版：同一批节拍按 h3DurationGroups 重新并组后逐镜拼。
+ * v5.91 起逐镜文本末尾带切镜规则一行（opts.actionCutRule 强制开）。 */
 export function buildSeedanceDurationVersion(
   script: ScriptData,
   ctx?: LensMappingContext,
@@ -6136,7 +6335,89 @@ export function buildSeedanceDurationVersion(
 ): SeedanceLensPrompt[] {
   const base = storyboardScript(script);
   const view: ScriptData = { ...base, groups: h3DurationGroups(script) };
-  return buildSeedanceVersion(view, ctx, opts);
+  return buildSeedanceVersion(view, ctx, { ...opts, actionCutRule: true });
+}
+
+/**
+ * v5.90 强制 30 秒版的镜头分组：全片节拍按顺序往每镜 30 秒里
+ * 装，节拍不可拆——当前组再装下一拍就会超过 30 秒时收组，缺的
+ * 秒数记为该组末尾的纯白留白（padSeconds，如内容 27 秒、下一
+ * 拍 4 秒装不进 → 留白 3 秒，下一拍从下一镜开始）；最后一组不
+ * 足 30 秒同样留白补满。单拍本身超过 30 秒时该组只能超、不留
+ * 白（切不开）。留白只记秒数，拼文本时才落成纯白段，不写回
+ * 分镜结构。v5.91 起按 actionUnits 装组：同一个动作没做完不切
+ * 开——动作链整段装不进当前镜时整段挪到下一镜、当前镜多留白
+ * 补满（宁可多留白也不拆动作）；动作链本身超 30 秒时退回逐拍
+ * 装。没有动作链时与旧口径逐字一致。
+ */
+export function seedanceForced30Groups(script: ScriptData): {
+  groups: ScriptGroup[];
+  pads: number[];
+} {
+  const view = storyboardScript(script);
+  const flat = flattenStoryboardBeats(view);
+  if (flat.length === 0) return { groups: [], pads: [] };
+  const units = actionUnits(flat, 30);
+  const packs: { items: FlatBeat[]; duration: number }[] = [];
+  let cur: { items: FlatBeat[]; duration: number } = { items: [], duration: 0 };
+  for (const u of units) {
+    if (cur.items.length > 0 && cur.duration + u.duration > 30.05) {
+      packs.push(cur);
+      cur = { items: [], duration: 0 };
+    }
+    cur.items.push(...u.items);
+    cur.duration += u.duration;
+  }
+  if (cur.items.length > 0) packs.push(cur);
+  const pads = packs.map((p) => {
+    const pad = Math.round((30 - p.duration) * 10) / 10;
+    return pad >= 0.05 ? pad : 0;
+  });
+  return { groups: packs.map((p) => h3GroupFromFlat(p.items)), pads };
+}
+
+/**
+ * 强制 30 秒版（v5.90）：每镜内容按 seedanceForced30Groups 装组，
+ * 逐镜文本仍走 buildSingleGroupTextForModel；有留白的镜头在文本
+ * 末尾追加纯白留白段——写明内容到第几秒结束、剩余几秒画面纯白
+ * （无人物 / 无场景 / 无文字 / 无台词），凑满 30 秒。duration
+ * 字段 = 内容 + 留白（≈30 秒），contentDuration / padSeconds 供
+ * 界面分开标注。
+ */
+export function buildSeedanceForced30Version(
+  script: ScriptData,
+  ctx?: LensMappingContext,
+  opts?: LensMappingOptions & { videoModel?: VideoModelId },
+): SeedanceLensPrompt[] {
+  const base = storyboardScript(script);
+  const { groups, pads } = seedanceForced30Groups(script);
+  const view: ScriptData = { ...base, groups };
+  const tl = computeTimeline(view);
+  return tl.groups.map((g, gi) => {
+    const pad = pads[gi] ?? 0;
+    // v5.91：强制 30 秒版逐镜文本末尾同样带切镜规则一行（在纯
+    // 白留白段之前，留白段仍是全文最后一段）。
+    let text = buildSingleGroupTextForModel(view, gi, ctx, {
+      ...opts,
+      actionCutRule: true,
+    });
+    if (pad > 0) {
+      text +=
+        `\n\n【纯白留白】本镜头剧情内容到约 ${g.duration.toFixed(1)} 秒结束，` +
+        `最后 ${pad.toFixed(1)} 秒（${g.duration.toFixed(1)}s–30.0s）画面纯白处理：` +
+        `纯白画面，不出现任何人物、场景、物品、文字或字幕，无台词、无动作、无声音，` +
+        `保持纯白直到本镜头满 30.0 秒结束。`;
+    }
+    return {
+      lensIndex: gi + 1,
+      title: g.title,
+      duration: g.duration + pad,
+      beatCount: g.beats.length,
+      text,
+      contentDuration: g.duration,
+      padSeconds: pad,
+    };
+  });
 }
 
 /** 「复制全部」文本：逐镜头提示词前后加镜头头行，段与段之间空行。 */
@@ -6147,7 +6428,11 @@ export function buildSeedanceFullText(
   return lenses
     .map(
       (l) =>
-        `【${versionLabel} · 镜头${l.lensIndex}｜${l.title}（约 ${l.duration.toFixed(1)} 秒）】\n${l.text}`,
+        `【${versionLabel} · 镜头${l.lensIndex}｜${l.title}（约 ${l.duration.toFixed(1)} 秒${
+          l.padSeconds && l.padSeconds > 0
+            ? `，含纯白留白 ${l.padSeconds.toFixed(1)} 秒`
+            : ""
+        }）】\n${l.text}`,
     )
     .join("\n\n");
 }
@@ -6456,6 +6741,10 @@ export async function urlToThumbnail(
 // 权层 PIL 逐档压缩后托管（见 coverbench 的 relayReference 与
 // chunkedupload 的 uploadImageUrlInChunks）；只有真读不到 / 传不
 // 上去才点名报真实原因，绝不静默丢图、也绝不重演大请求体失败。
+// v6.00 起直连解码失败先走第二通道：把图片字节取回浏览器本地、
+// 用本地对象地址再走同一套画布降采样（与生图面板「本地压小副
+// 本再直塞」的同一方案），绕开站内图片地址响应头对直连解码的
+// 影响——中转只剩本地连字节也解不动时的最后兜底。
 // ---------------------------------------------------------------------------
 
 export type SubmitRefImage = { dataBase64: string; mimeType: string };
@@ -6470,6 +6759,53 @@ export async function urlToSubmitReference(
   const thumb = await urlToThumbnail(url, "", SUBMIT_REF_MAX_EDGE);
   if (thumb) {
     return { dataBase64: thumb.dataBase64, mimeType: thumb.mimeType };
+  }
+  // v6.00 第二通道（与生图面板同一方案：图片字节先回到浏览器
+  // 本地、在本地压成小副本再直塞提交）：直连图片地址解码失败
+  // 时（站内图片地址带 sandbox / nosniff 响应头，部分浏览器 /
+  // WebView 里 <img> 直连解码会被拦或失败——项目 44 的 8K 三视
+  // 图原图在封面页实测压不动、被迫走分片中转），改走原始字
+  // 节：先把图片字节取回本地，再用本地对象地址喂给同一套画布
+  // 降采样。字节在本地解码不受地址响应头影响，9MB 级原图也能
+  // 当场压成 1024px 小副本，取图不再动不动掉进分片中转；只有
+  // 本地画布连字节也解不动时才返回 null、由封面页走中转兜底。
+  let blob: Blob | null = null;
+  try {
+    const resp = await fetch(url);
+    if (resp.ok) blob = await resp.blob();
+  } catch {
+    blob = null;
+  }
+  if (blob && (blob.type === "" || blob.type.startsWith("image/"))) {
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+      const local = await urlToThumbnail(objectUrl, "", SUBMIT_REF_MAX_EDGE);
+      if (local) {
+        return { dataBase64: local.dataBase64, mimeType: local.mimeType };
+      }
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+    // 本地画布仍压不动、但原图小到能直塞时，字节直接编码返回
+    // （与旧回落同一 3M 字符上限，只是字节已在手里、不再重取）。
+    if (Math.ceil(blob.size / 3) * 4 <= SUBMIT_REF_FALLBACK_MAX_B64) {
+      const dataUrl = await new Promise<string | null>((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+      if (dataUrl) {
+        const comma = dataUrl.indexOf(",");
+        if (comma >= 0) {
+          return {
+            dataBase64: dataUrl.slice(comma + 1),
+            mimeType: blob.type || "image/jpeg",
+          };
+        }
+      }
+    }
+    return null;
   }
   const orig = await urlToBase64(url);
   if (!orig) return null;

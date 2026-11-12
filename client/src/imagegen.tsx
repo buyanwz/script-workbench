@@ -13,11 +13,13 @@
 //   - 调用默认走已连接的 custom.geeknow 凭证（服务端特权层）；点
 //     「生成图片」才调用，打开面板、改设置不花钱；费用按实际生效
 //     的那份接口设置对应的账户计费，面板不编造单价。
-//   - v5.70 生图接口总设置：面板顶部有全站唯一一份「生图接口总
-//     设置」（API 地址 + 密钥密码框），生图面板与封面生成共用、
-//     只存本机 localStorage（见 imageapi.ts）；封面页单次输入优先
-//     于总设置，总设置没填才回落已连接凭证；Key 永不明文、不进
-//     数据库 / 备份 / 记录 / 日志，v3.83 服务端护栏原样保留。
+//   - v5.70 生图接口总设置：全站唯一一份「生图接口总设置」（API
+//     地址 + 密钥），生图面板与封面生成共用、只存本机 localStorage
+//     （见 imageapi.ts）；封面页单次输入优先于总设置，总设置没填
+//     才回落已连接凭证；Key 永不明文、不进数据库 / 备份 / 记录 /
+//     日志，v3.83 服务端护栏原样保留。v5.88 起唯一的编辑入口搬到
+//     左下角悬浮「设置」（settingsfloat.tsx），本面板只读解析结果
+//     提交 / 续查、顶部只留一行当前生效来源。
 //   - 生成走 v3.60 异步路径：先提交拿任务号（几秒返回），再用短
 //     调用轮询任务状态直到出图。同步等图会被守护进程 30 秒上限
 //     掐断（v3.58 的失败根因，与 Key 无关）；提交绝不自动重试，
@@ -93,13 +95,9 @@ retryReadQuery,
 withReadTimeout,
 } from "./gateway";
 import { PreviewImg } from "./previewimg";
-import { ConfirmDialog } from "./confirm";
 import {
-clearImageApiSettings,
 loadImageApiSettings,
 resolveImageApiConfig,
-saveImageApiSettings,
-DEFAULT_IMAGE_API_BASE,
 IMAGE_API_SETTINGS_EVENT,
 type ImageApiSettings,
 } from "./imageapi";
@@ -794,32 +792,26 @@ function ImageGenPanel({
   const [refs, setRefs] = useState<RefImage[]>(draft0?.refs ?? []);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  // v4.22 参考图公开图床单次知情同意（与封面页同口径，用户明确
-  // 要求恢复带参考图生成、推翻 v4.05 停用）：勾选只在本次打开面
-  // 板期间有效；带参考素材提交时，特权层把降采样副本临时上传
-  // uguu.se 换 https 链接再交给 Geeknow。
-  // v5.61 起没勾同意不再静默降级：有参考素材且未勾同意时点「生成
-  // 图片」先弹三选确认（refConsentAsk），用户选「不带参考图继
-  // 续」才按纯提示词提交、降级提示写进 refDegradeNote 并注明是
-  // 用户在弹窗里亲手选的；选「勾上同意并继续」即勾上同意再带图
-  // 提交；选「取消」什么都不发。
-  const [refHostConsent, setRefHostConsent] = useState(false);
+  // 参考图上传（用户要求去掉同意勾选）：不再有勾选、也不再弹
+  // 未同意确认——只要选了参考素材，点生成时就直接把降采样副本
+  // 换 https 链接再交给 Geeknow（特权层；v5.97：先走 Geeknow 自家上传、走不通才回退公开图床）；没选参考素材时照旧按纯提示词提交。参考素材区只留一
+  // 行简短说明写明这一点。
   const [refDegradeNote, setRefDegradeNote] = useState<string | null>(null);
-  // v5.61 未勾同意点生成时的三选确认开关（true = 弹窗打开）。弹窗
-  // 决定经 runGenerate 的 opts 递进提交，不改 refHostConsent 本身
-  // 以外的任何状态（「勾上同意并继续」会顺手把勾选补上）。
-  const [refConsentAsk, setRefConsentAsk] = useState(false);
-  // v5.70 生图接口总设置（全站唯一一份编辑入口就在本面板顶部）：
-  // 地址 / Key 只存本机 localStorage（imageapi.ts），输入即保存；
-  // 提交与续查经 imgCfgRef 读解析后的生效配置（总设置优先于已连
-  // 接凭证；封面页的单次输入只在封面页那边叠加、不经这里）。
+  // v5.97：最近一次参考图换链接实际走的路线说明（Geeknow 自家上
+  // 传 / 公开图床回退），提交成功后亮在生成按钮下方，让用户一眼
+  // 核对这次走的是哪条路。
+  const [hostRouteNote, setHostRouteNote] = useState<string | null>(null);
+  // v5.70 生图接口总设置（v5.88 起唯一的编辑入口在左下角悬浮
+  // 「设置」里，见 settingsfloat.tsx）：本面板只读它——地址 / Key
+  // 只存本机 localStorage（imageapi.ts）；提交与续查经 imgCfgRef
+  // 读解析后的生效配置（总设置优先于已连接凭证；封面页的单次输
+  // 入只在封面页那边叠加、不经这里）。
   const [apiSettings, setApiSettings] = useState<ImageApiSettings>(() =>
     loadImageApiSettings(),
   );
-  const [apiProbeMsg, setApiProbeMsg] = useState<string | null>(null);
-  const [apiProbeBad, setApiProbeBad] = useState(false);
-  const [apiProbing, setApiProbing] = useState(false);
-  const [apiClearAsk, setApiClearAsk] = useState(false);
+  const imgResolved = resolveImageApiConfig(apiSettings);
+  const imgCfgRef = useRef(imgResolved);
+  imgCfgRef.current = imgResolved;
   // v1.1.0 软件更新（仅 exe 打包版：window.electronAPI 由主进程注入；
   // 网页版 / Muse 版没有它，入口不显示）。
   const hasElectronAPI =
@@ -860,10 +852,7 @@ function ImageGenPanel({
       setUpdateChecking(false);
     }
   };
-  const imgResolved = resolveImageApiConfig(apiSettings);
-  const imgCfgRef = useRef(imgResolved);
-  imgCfgRef.current = imgResolved;
-  // 总设置在别处被改（理论上只有本面板会写，跨窗口时同步一下）。
+  // 总设置在左下角「设置」里被改（或在别的窗口被改）时即时同步。
   useEffect(() => {
     const on = () => setApiSettings(loadImageApiSettings());
     window.addEventListener(IMAGE_API_SETTINGS_EVENT, on);
@@ -873,73 +862,15 @@ function ImageGenPanel({
       window.removeEventListener("storage", on);
     };
   }, []);
-  const updateApiSettings = (next: ImageApiSettings) => {
-    setApiSettings(next);
-    saveImageApiSettings(next);
-    setApiProbeMsg(null);
-  };
-  // v5.70 只读预检：用当前总设置探一次提交口鉴权（不存在的模型
-  // 名，不建任务、不计费）；护栏类拒绝（非 geeknow 主机没填 Key /
-  // http:// 地址）由特权层在发请求前回 ok=false + 护栏原文，这里
-  // 单独按「会被拦下」展示，不混进「预检没查成」。
-  const runApiProbe = async () => {
-    if (apiProbing) return;
-    setApiProbing(true);
-    setApiProbeMsg(null);
-    try {
-      const cfg = resolveImageApiConfig(apiSettings);
-      const p = await api.probeGeeknowAuth({
-        apiKey: cfg.apiKey,
-        apiBase: cfg.apiBase,
-      });
-      if (
-        !p.ok &&
-        p.error &&
-        (p.error.includes("不在 Geeknow") || p.error.includes("API 地址格式不对"))
-      ) {
-        setApiProbeBad(true);
-        setApiProbeMsg(
-          `这份设置提交时会被拦下：${p.error}。请求还没发出去，不会计费。`,
-        );
-        return;
-      }
-      if (!p.ok) {
-        setApiProbeBad(true);
-        setApiProbeMsg(
-          `预检没查成（${p.error ?? "网络或服务异常"}）：这说明不了 Key 有没有问题，可以再点一次检测；点「生成图片」时用的就是这份设置。`,
-        );
-        return;
-      }
-      if (p.authOk) {
-        setApiProbeBad(false);
-        setApiProbeMsg(
-          p.usedCustomKey
-            ? "预检通过：总设置里这份地址 + Key 能通过鉴权——生图面板和封面生成提交时都会用它。"
-            : "预检通过：已连接的 Geeknow 凭证可用（总设置没填内容，走的就是这份凭证）。",
-        );
-      } else {
-        setApiProbeBad(true);
-        setApiProbeMsg(
-          p.usedCustomKey
-            ? `总设置里填的 Key 被拒绝了（${p.error ?? "鉴权失败"}）：多半是填错了、已过期，或不是这个 API 地址的 Key。改对，或点「清除」改用已连接凭证。这次没有提交生图、不会计费。`
-            : `已连接的 Geeknow 凭证被拒绝了（${p.error ?? "鉴权失败"}）：请重新连接 Geeknow。这次没有提交生图、不会计费。`,
-        );
-      }
-    } catch (e) {
-      setApiProbeBad(true);
-      setApiProbeMsg(`预检没查成：${describeThrownError(e)}`);
-    } finally {
-      setApiProbing(false);
-    }
-  };
   // v5.61 自动带入标注：从人物卡 / 分镜打开面板时自动带入的参考
   // 图说明（如「已自动带入人物参考图 1 张（人物卡 B 的图）」）；
   // 非自动带入时为 null。清除按钮只删 origin=auto 的那几张。
   const [autoRefNote, setAutoRefNote] = useState<string | null>(null);
   // v4.26 改图模式：从储存库卡面「改图」打开时置位（目标 presetId +
   // 用户写的改图要求）。改图模式下点生成走改图模板拼词（保持身份
-  // 特征不变、只改点名部位），且必须带参照图 + 已勾图床同意才提交，
-  // 不走普通生成的纯提示词降级——没带上原图的「改图」是假改图。
+  // 特征不变、只改点名部位），且必须带参照图才提交（带入后点生
+  // 成即自动上传），不走普通生成的纯提示词降级——没带上原图的
+  // 「改图」是假改图。
   const [editPresetId, setEditPresetId] = useState<number | null>(null);
   const [editRequest, setEditRequest] = useState("");
   const [mergeInfo, setMergeInfo] = useState<PromptMergeInfo | null>(null);
@@ -1643,7 +1574,7 @@ function ImageGenPanel({
             id: rec.id,
             status: "failed",
             error: imgCfgRef.current.usedGlobalKey
-              ? `续查被 Geeknow 拒绝：${res.error ?? "鉴权失败"}。续查用的是生图接口总设置里填的 Key——它可能不正确或已失效；在顶部「生图」面板的总设置里改对、或清除改用已连接凭证后，点这条记录的「续查」接着查同一个任务，不会重新提交。`
+              ? `续查被 Geeknow 拒绝：${res.error ?? "鉴权失败"}。续查用的是生图接口总设置里填的 Key——它可能不正确或已失效；在左下角「设置」的生图接口总设置里改对、或清除改用已连接凭证后，点这条记录的「续查」接着查同一个任务，不会重新提交。`
               : `Geeknow 未连接：${res.error ?? "鉴权失败"}。这是 Key / 连接问题，不是超时；重新连接 Geeknow 后点这条记录的「续查」接着查同一个任务。`,
           });
           await invalidateRecords();
@@ -1717,12 +1648,6 @@ function ImageGenPanel({
       mimeType: string;
       origin?: "auto" | "manual";
     }[];
-  }, opts?: {
-    // v5.61：本次提交的图床同意决定（runGenerate 弹窗三选的结果）；
-    // 不传 = 用面板当前勾选状态。userChoseNoRefs = 用户在弹窗里亲
-    // 手选了「不带参考图继续」，降级提示按这个口径写。
-    refConsent?: boolean;
-    userChoseNoRefs?: boolean;
   }): Promise<boolean> => {
     const prompt = input.promptEn.trim() || input.promptZh.trim();
     // v3.85 字数拦截（与服务端提交前检查同一口径，覆盖手改提示词
@@ -1737,38 +1662,23 @@ function ImageGenPanel({
     // 给模型的副本（最长边 1024px），原图整张 Base64 会让请求体在
     // 网关层被掐断、确定性失败；压不了又太大的图跳过不硬塞。面板
     // 里选好的参考图与储存库原图都不动。
-    // v4.22：降采样前先过公开图床同意门（与封面页同口径）——同意
-    // 才准备参考图（提交时特权层上传 uguu.se 换链接）。
-    // v5.61：没勾同意不再从这里静默降级——runGenerate 在点生成时
-    // 已先弹窗让用户三选（勾上同意并继续 / 不带参考图继续 / 取
-    // 消），走到这里的「未同意」只剩两种：用户在弹窗里亲手选了
-    // 不带参考图继续（userChoseNoRefs，提示按此口径写），或重提
-    // 等没有参考图的路径。preparedRefs 为空时照旧写降级提示。
+    // 参考图不再过同意门：只要这次带了参考素材，就直接准备降采
+    // 样副本（提交前由托管一步换链接再交给服务商，v5.97 先走 Geeknow 自家上传、回退公开图床）；一
+    // 张都没压成副本时照旧写降级提示、按纯提示词提交。
     setRefDegradeNote(null);
-    const consent = opts?.refConsent ?? refHostConsent;
     const preparedRefs: { dataBase64: string; mimeType: string }[] = [];
     const preparedOrigins: ("auto" | "manual")[] = [];
     if (input.referenceImages.length > 0) {
-      if (consent) {
-        for (const r of input.referenceImages) {
-          const p = await dataRefToSubmitReference(r.dataBase64, r.mimeType);
-          if (p) {
-            preparedRefs.push(p);
-            preparedOrigins.push(r.origin ?? "manual");
-          }
+      for (const r of input.referenceImages) {
+        const p = await dataRefToSubmitReference(r.dataBase64, r.mimeType);
+        if (p) {
+          preparedRefs.push(p);
+          preparedOrigins.push(r.origin ?? "manual");
         }
-        if (preparedRefs.length === 0) {
-          setRefDegradeNote(
-            "参考素材这次一张都没能压成可提交的副本（原图太大又压缩失败）：已按纯提示词提交，参考图没有带上。换一张小一点的参考图再生成即可。",
-          );
-        }
-      } else if (opts?.userChoseNoRefs) {
+      }
+      if (preparedRefs.length === 0) {
         setRefDegradeNote(
-          `你刚才在确认弹窗里选了「不带参考图继续」：这次没有上传任何图片、已按纯提示词提交，参考图没有带上，人物长相不会按参考图来。想带参考图，下次在弹窗里选「勾上同意并继续」。`,
-        );
-      } else {
-        setRefDegradeNote(
-          `你加了 ${input.referenceImages.length} 张参考素材，但还没勾选参考素材区的公开图床同意：这次没有上传任何图片、已按纯提示词提交。想带参考图，先勾上同意再点「生成图片」。`,
+          "参考素材这次一张都没能压成可提交的副本（原图太大又压缩失败）：已按纯提示词提交，参考图没有带上。换一张小一点的参考图再生成即可。",
         );
       }
     }
@@ -1790,8 +1700,53 @@ function ImageGenPanel({
       );
       return false;
     }
+    // v5.95 参考图先单独托管换链接（独立一步、独占自己的时间预
+    // 算）：旧链路在一次提交调用里先传图床再提交，两步串行超过
+    // 守护进程 30 秒预算、带 1 张图也被掐断。托管失败在这里就停
+    // 下——还没轮到提交、任务没建、不会计费，报错由服务端写清
+    // 两条路线各败在哪、可直接重试；绝不自动重试（用户亲手再点
+    // 才再走一遍）。
+    // v5.97：托管主路线改走 Geeknow 自家上传，鉴权带与提交同一
+    // 套生效配置（imgCfgRef）；走不通服务端自动改走公开图床，
+    // 回执 route 写明实际路线，成功后亮一行路线说明。
+    let hostedRefUrls: string[] = [];
+    setHostRouteNote(null);
+    if (preparedRefs.length > 0) {
+      let hostRes: Awaited<ReturnType<typeof api.hostGeeknowReferenceImages>>;
+      try {
+        const hostCfg = imgCfgRef.current;
+        hostRes = await api.hostGeeknowReferenceImages({
+          referenceImages: preparedRefs,
+          apiKey: hostCfg.apiKey,
+          apiBase: hostCfg.apiBase,
+        });
+      } catch (e) {
+        setSubmitError(
+          isGatewayTimeoutText(describeThrownError(e))
+            ? "参考图换链接超时了：先走 Geeknow 自家上传、再自动改走公开图床，两条都没在时间里走完。这一步在提交之前，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。"
+            : `参考图换链接没走完，这次没有提交、不会计费：${describeThrownError(e)}。可以直接再点一次生成重试。`,
+        );
+        return false;
+      }
+      if (!hostRes.ok) {
+        setSubmitError(hostRes.error ?? "参考图换链接失败，这次没有提交、不会计费，可以直接再点一次生成重试。");
+        return false;
+      }
+      hostedRefUrls = hostRes.urls;
+      setHostRouteNote(
+        hostRes.route === "geeknow"
+          ? "这次参考图走的是 Geeknow 自家上传（图传到了 Geeknow 自家空间，没走公开图床）。"
+          : hostRes.route === "uguu"
+            ? "这次 Geeknow 自家上传没走通，已自动改走公开图床换链接（拿到链接的人能打开这张图、短期后自动删除）。"
+            : hostRes.route === "mixed"
+              ? "这次参考图一部分走 Geeknow 自家上传、一部分走了公开图床回退（走公开图床的那几张，拿到链接的人能打开、短期后自动删除）。"
+              : null,
+      );
+    }
     // v5.70：提交带生图接口总设置的解析结果（填了用总设置、没填
     // 回落已连接凭证）；Key 只随当次请求透传，不落库不进记录。
+    // v5.95：提交只带已托管的链接、不再带图字节，提交调用里只剩
+    // 一次 Geeknow 请求。
     const submitCfg = imgCfgRef.current;
     const res = await api.submitGeeknowImageTask({
       model: input.useModel,
@@ -1801,7 +1756,8 @@ function ImageGenPanel({
       requestTimeoutSec: reqTimeout,
       downloadTimeoutSec: dlTimeout,
       retryCount: retries,
-      referenceImages: preparedRefs,
+      referenceImages: [],
+      referenceImageUrls: hostedRefUrls,
       apiKey: submitCfg.apiKey,
       apiBase: submitCfg.apiBase,
     });
@@ -1810,7 +1766,7 @@ function ImageGenPanel({
       setSubmitError(
         /401|403|鉴权|未连接|api key/i.test(errText)
           ? submitCfg.usedGlobalKey
-            ? `总设置里填的 Key 被 Geeknow 拒绝了：${errText}。这是 Key 问题，不是超时；到面板顶部「生图接口总设置」把 Key 改对、或清除改用已连接凭证后再生成。`
+            ? `总设置里填的 Key 被 Geeknow 拒绝了：${errText}。这是 Key 问题，不是超时；到左下角「设置」里的生图接口总设置把 Key 改对、或清除改用已连接凭证后再生成。`
             : `Geeknow 未连接：${errText}。这是 Key / 连接问题，不是超时；请重新连接 Geeknow 后再生成。`
           : errText,
       );
@@ -1890,29 +1846,18 @@ function ImageGenPanel({
     return true;
   };
 
-  // v5.61 生成入口先过同意门：有参考素材、又没勾图床同意时，不再
-  // 像 v4.22 那样静默按纯提示词提交——先弹三选确认（弹窗在组件末
-  // 尾渲染），用户亲手选完才走 doGenerate 真正提交。改图模式不走
-  // 这个弹窗：它本来就要求先勾同意、没勾直接拦下（见 doGenerate
-  // 的改图校验）。
+  // 生成入口：不再过同意门、不再弹未同意确认——选了参考素材就
+  // 直接带图提交（submitAndRecord 里准备副本），没选就纯提示词。
   const runGenerate = async () => {
     if (submitting) return;
-    if (!isEditMode && refs.length > 0 && !refHostConsent) {
-      setSubmitError(null);
-      setRefConsentAsk(true);
-      return;
-    }
     await doGenerate();
   };
 
-  const doGenerate = async (genOpts?: {
-    refConsent?: boolean;
-    userChoseNoRefs?: boolean;
-  }) => {
+  const doGenerate = async () => {
     if (submitting) return;
-    // v4.26 改图模式：先校验改图三件套（要求写了 / 参照图带入了 /
-    // 图床同意勾了），任一缺失就明说原因、不提交不计费——普通生成
-    // 没勾同意可以降级纯提示词，改图不行，没带上原图就是假改图。
+    // v4.26 改图模式：先校验改图两件套（要求写了 / 参照图带入
+    // 了），任一缺失就明说原因、不提交不计费——改图没带上原图
+    // 就是假改图。参照图带入后点生成即自动上传，不再要勾同意。
     let effPromptZh = promptZh;
     let effPromptEn = promptEn;
     if (isEditMode) {
@@ -1926,12 +1871,6 @@ function ImageGenPanel({
       if (refs.length === 0) {
         setSubmitError(
           "改图必须带参照图：现在参考素材是空的，原图没有带入。这次没有提交、不会计费——请在参考素材区点「从储存库选图（加入本卡图片）」把这张卡的主图带入再改图。",
-        );
-        return;
-      }
-      if (!refHostConsent) {
-        setSubmitError(
-          "改图必须把原图作为参照图发给服务商：请先到下方「参考素材」区勾上公开图床同意，再点「开始改图」。这次没有提交、不会计费。",
         );
         return;
       }
@@ -1996,7 +1935,7 @@ function ImageGenPanel({
           mimeType: r.mimeType,
           origin: r.origin ?? "manual",
         })),
-      }, genOpts);
+      });
     } catch (e) {
       setSubmitError(
         isGatewayTimeoutError(e)
@@ -2416,98 +2355,17 @@ function ImageGenPanel({
           按你的 Geeknow 账户计费；只有点「生成图片」才会调用。
         </p>
 
-        {/* v5.70 生图接口总设置：全站唯一一份（生图面板与封面生成
-            共用），只存本机 localStorage；封面页的单次输入只对封面
-            那一次提交优先、不会改这里。 */}
-        <div
-          className="mt-3 rounded-[var(--radius)] border p-3"
-          style={{
-            borderColor: "var(--border)",
-            background: "var(--surface-alt)",
-          }}
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-bold">生图接口总设置</p>
-            <span
-              className="text-xs font-bold"
-              style={{ color: "var(--olive)" }}
-              role="status"
-            >
-              {imgResolved.sourceLabel}
-            </span>
-          </div>
-          <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-            填一次就行：生图面板和封面生成都用这一份；两项都不填，就继续用已连接的
-            Geeknow 凭证。只存在这台浏览器的本机里（刷新还在、换电脑要重填），不进数据库、不进备份包。
-          </p>
-          <div className="mt-2">
-            <label className={labelCls} htmlFor="imagegen-api-base">
-              API 地址
-            </label>
-            <input
-              id="imagegen-api-base"
-              type="text"
-              className="field field-sm"
-              value={apiSettings.apiBase}
-              autoComplete="off"
-              placeholder={DEFAULT_IMAGE_API_BASE}
-              aria-label="生图接口总设置：API 地址（留空用默认 https://api.geeknow.top）"
-              onChange={(e) =>
-                updateApiSettings({ ...apiSettings, apiBase: e.target.value })
-              }
-            />
-          </div>
-          <div className="mt-2">
-            <label className={labelCls} htmlFor="imagegen-api-key">
-              密钥（Key）
-            </label>
-            <input
-              id="imagegen-api-key"
-              type="password"
-              className="field field-sm"
-              value={apiSettings.apiKey}
-              autoComplete="off"
-              placeholder="留空 = 用已连接的 Geeknow 凭证"
-              aria-label="生图接口总设置：密钥（密码框，永不明文显示；留空用已连接的 Geeknow 凭证）"
-              onChange={(e) =>
-                updateApiSettings({ ...apiSettings, apiKey: e.target.value })
-              }
-            />
-            <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-              密码框输入、永不明文显示。地址换成其他域名时必须同时填那个地址的
-              Key——工作台绝不会把已连接凭证发去别的地址，没填 Key 会在提交前拦下。
-            </p>
-          </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={apiProbing}
-              aria-label="检测生图接口总设置能否通过鉴权（只读预检，不提交生图、不计费）"
-              onClick={() => void runApiProbe()}
-            >
-              {apiProbing ? "检测中…" : "检测这份设置（只读预检）"}
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm btn-danger-ghost"
-              disabled={!apiSettings.apiBase && !apiSettings.apiKey}
-              aria-label="清除生图接口总设置（先弹确认；清掉保存在本机的 API 地址和密钥，之后回落已连接凭证）"
-              onClick={() => setApiClearAsk(true)}
-            >
-              清除
-            </button>
-          </div>
-          {apiProbeMsg && (
-            <p
-              className="mt-2 text-xs leading-5"
-              style={{ color: apiProbeBad ? "var(--bad)" : "var(--olive)" }}
-              role="status"
-            >
-              {apiProbeMsg}
-            </p>
-          )}
-        </div>
+        {/* v5.88：生图接口总设置已整份搬到左下角悬浮「设置」里
+            （全站仍只一份，存储与生效顺序不变）；本面板不再另放
+            一份，只留一行当前生效来源，改地址 / 密钥去左下角。 */}
+        <p className="mt-2 text-xs leading-5" role="status">
+          <span className="font-bold" style={{ color: "var(--olive)" }}>
+            {imgResolved.sourceLabel}
+          </span>
+          <span className="text-[var(--dim)]">
+            。API 地址和密钥在页面左下角的「设置」里改（生图面板和封面生成共用一份，只存本机）。
+          </span>
+        </p>
 
         {/* v1.1.0 软件更新：仅 exe 打包版显示（window.electronAPI 由主进程注入）；
             网页版 / Muse 版没有这个入口。更新只换程序文件，项目数据不动。 */}
@@ -2954,15 +2812,6 @@ function ImageGenPanel({
                 </button>
               ))}
             </div>
-            {!refHostConsent && (
-              <p
-                className="mt-2 text-[12px] leading-5"
-                style={{ color: "var(--bad)" }}
-                role="note"
-              >
-                还差一步：改图必须把原图发给服务商当参照图，请到下方「参考素材」区勾上公开图床同意再点「开始改图」（没勾会拦下、不提交不计费）。
-              </p>
-            )}
           </div>
         )}
 
@@ -3034,22 +2883,9 @@ function ImageGenPanel({
             </p>
           )}
           {refs.length > 0 && (
-            <label
-              className="mt-2 flex cursor-pointer items-start gap-2 rounded-[var(--radius)] border p-2 text-[11px] leading-4"
-              style={{ borderColor: "var(--border)", background: "var(--surface-alt)" }}
-            >
-              <input
-                type="checkbox"
-                className="mt-0.5 h-3.5 w-3.5 shrink-0"
-                checked={refHostConsent}
-                onChange={(e) => setRefHostConsent(e.target.checked)}
-                aria-label="同意把参考素材的副本临时上传到公开图床uguu.se换取链接（带参考图生成必须勾选，本次打开面板期间有效）"
-              />
-              <span>
-                <span className="font-bold">同意上传参考图副本换链接（带参考图生成先勾这里）：</span>
-                Geeknow 只收 https 图片链接。勾选后，提交时参考素材的降采样副本会被临时上传到公开图床 uguu.se 换成链接再交给 Geeknow——<span className="font-bold">任何拿到链接的人都能打开这张图</span>，临时托管、短期后自动删除；勾选只在本次打开面板期间有效。不勾选时点「生成图片」会先弹窗问你：勾上同意并继续、不带参考图继续、还是取消——不会再悄悄按纯提示词提交。
-              </span>
-            </label>
+            <p className="mt-2 text-[11px] leading-4 text-[var(--dim)]" role="note">
+              点「生成图片」时，已选参考图会自动上传换链接再交给 Geeknow：先走 Geeknow 自家上传（图传到 Geeknow 自家空间），自家上传走不通时才自动改走公开图床换链接（只有走公开图床那条路时，才是拿到链接的人能打开这张图、短期后自动删除），不用再勾选。
+            </p>
           )}
           {refs.length > 0 && (
             <p className="mt-1.5 text-[11px] leading-4 text-[var(--dim)]">
@@ -3166,6 +3002,14 @@ function ImageGenPanel({
             role="alert"
           >
             {submitError}
+          </p>
+        )}
+        {hostRouteNote && (
+          <p
+            className="mt-2 text-[12px] leading-5 text-[var(--dim)]"
+            role="status"
+          >
+            {hostRouteNote}
           </p>
         )}
 
@@ -3620,76 +3464,6 @@ function ImageGenPanel({
           )}
         </div>
       </div>
-      {/* v5.61 未勾图床同意点生成 → 三选确认（页内弹窗，不用系统
-          confirm）：说清这次不带参考图会怎样，给「勾上同意并继
-          续 / 不带参考图继续 / 取消」三条路，用户亲手选完才提交，
-          绝不静默降级。渲染在面板 section 内（z 随面板层叠）。 */}
-      {refConsentAsk && (
-        <ConfirmDialog
-          title="参考图还没法带上，先确认一下"
-          body={
-            <>
-              <p>
-                你加了 {refs.length}{" "}
-                张参考素材，但还没勾「同意上传参考图副本换链接」。Geeknow
-                只收 https 图片链接，不勾同意，参考图就发不出去——这次要是直接生成，就是按纯提示词出图，
-                <strong>人物不会按参考图的长相来，很可能换一张脸</strong>。
-              </p>
-              <p className="mt-2">
-                选「勾上同意并继续」：把参考素材的降采样副本临时上传到公开图床
-                uguu.se 换链接再提交（拿到链接的人能打开这张图，临时托管、短期后自动删除），同时按参考图锁脸生成；选「不带参考图继续」：这次不带任何参考图、按纯提示词生成；选「取消」：什么都不提交。
-              </p>
-            </>
-          }
-          confirmLabel="勾上同意并继续"
-          cancelLabel="取消"
-          extraActions={
-            <button
-              type="button"
-              className="btn"
-              aria-label="不带参考图继续生成（按纯提示词提交，人物不按参考图长相）"
-              onClick={() => {
-                setRefConsentAsk(false);
-                void doGenerate({
-                  refConsent: false,
-                  userChoseNoRefs: true,
-                });
-              }}
-            >
-              不带参考图继续
-            </button>
-          }
-          onConfirm={() => {
-            setRefConsentAsk(false);
-            setRefHostConsent(true);
-            void doGenerate({ refConsent: true });
-          }}
-          onCancel={() => setRefConsentAsk(false)}
-        />
-      )}
-      {/* v5.70 清除总设置确认：Key 清掉就找不回来（本机没有别处存
-          份），先确认一次防手滑；确认后地址与 Key 一并清掉、回落
-          已连接凭证，状态行随之更新。 */}
-      {apiClearAsk && (
-        <ConfirmDialog
-          title="清除生图接口总设置？"
-          body={
-            <p>
-              会把保存在这台浏览器本机里的 API 地址和密钥一起清掉。密钥清掉后找不回来（工作台别处没有存份），之后生图面板和封面生成都会改回用已连接的
-              Geeknow 凭证。要继续吗？
-            </p>
-          }
-          confirmLabel="清除"
-          cancelLabel="不清除"
-          onConfirm={() => {
-            clearImageApiSettings();
-            setApiSettings({ apiBase: "", apiKey: "" });
-            setApiProbeMsg(null);
-            setApiClearAsk(false);
-          }}
-          onCancel={() => setApiClearAsk(false)}
-        />
-      )}
       {/* v4.20 出图大图预览（面板内弹窗）：旧版「预览出图」是
           <a target="_blank" href={blob 地址}>——blob 地址带沙箱响应
           头、且在新标签页里脱离了工作台的会话上下文，打开只剩

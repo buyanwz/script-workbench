@@ -54,20 +54,34 @@ export async function uploadImageFileInChunks(
  * 同一片重试与失败清理）。v5.04 封面参考图中转压缩用：浏览器画布
  * 压不动的过大原图改走这条——原图字节分片送服务端拼回，由特权层
  * PIL 压缩后再托管提交，客户端不再因尺寸丢图。
+ * v6.00：新增可选 concurrency（同时在途的片数，默认 1 = 原串行口
+ * 径，人物图上传等既有调用方不变）。分片在服务端按 uploadId +
+ * 片号独立暂存、拼装按片号排序，乱序到达不影响拼回；封面中转
+ * 兜底传 3——12 片大图不再一片一片排队干等（用户实报串行中转
+ * 卡在 3 / 12 片十分钟没动静）。onProgress 的 done 改报「已送达
+ * 片数」（并行时不等于最后完成的片号），文案口径不变。
  */
 export async function uploadImageBytesInChunks(
   buf: Uint8Array,
   mimeType: string,
   fileName: string,
   onProgress?: (done: number, total: number) => void,
+  options?: { concurrency?: number },
 ): Promise<ChunkedImageRef> {
   if (buf.length === 0) {
     throw new Error(`上传失败：「${fileName}」是空文件，没有内容，请换一张图再传`);
   }
   const totalChunks = Math.max(1, Math.ceil(buf.length / CHUNK_RAW_BYTES));
   const uploadId = newUploadId();
+  const concurrency = Math.max(
+    1,
+    Math.min(options?.concurrency ?? 1, totalChunks, 4),
+  );
   try {
-    for (let i = 0; i < totalChunks; i++) {
+    let nextIndex = 0;
+    let doneCount = 0;
+    let failure: Error | null = null;
+    const sendChunk = async (i: number): Promise<void> => {
       const slice = buf.subarray(
         i * CHUNK_RAW_BYTES,
         Math.min(buf.length, (i + 1) * CHUNK_RAW_BYTES),
@@ -100,8 +114,28 @@ export async function uploadImageBytesInChunks(
           `上传失败：第 ${i + 1} / ${totalChunks} 片连续重试 3 次都没传上（${describeThrownError(lastError)}），「${fileName}」没有保存，请检查网络后重新上传`,
         );
       }
-      onProgress?.(i + 1, totalChunks);
-    }
+    };
+    const worker = async (): Promise<void> => {
+      while (failure === null) {
+        const i = nextIndex;
+        nextIndex += 1;
+        if (i >= totalChunks) return;
+        try {
+          await sendChunk(i);
+        } catch (e) {
+          if (failure === null) {
+            failure = e instanceof Error ? e : new Error(String(e));
+          }
+          return;
+        }
+        doneCount += 1;
+        onProgress?.(doneCount, totalChunks);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: concurrency }, () => worker()),
+    );
+    if (failure !== null) throw failure;
   } catch (e) {
     // 失败不留半截分片在服务端暂存里。
     void api.discardImageChunks({ uploadId }).catch(() => undefined);
@@ -130,6 +164,7 @@ export async function uploadImageUrlInChunks(
   url: string,
   fileName: string,
   onProgress?: (done: number, total: number) => void,
+  options?: { concurrency?: number },
 ): Promise<ChunkedImageRef> {
   let blob: Blob;
   try {
@@ -148,6 +183,7 @@ export async function uploadImageUrlInChunks(
     blob.type || "image/jpeg",
     fileName,
     onProgress,
+    options,
   );
 }
 

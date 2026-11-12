@@ -17,7 +17,7 @@
 //      原文，不再只有一句通用文案（P0）。提交设置另有 Key（密码
 //      框、只存内存、填了当次优先）与 API 地址两个小输入框，为空
 //      时走已连接的安全凭证、流程不变。v5.70 起这两个框下面多一
-//      层：生图接口总设置（顶部「生图」面板里维护、只存本机），
+//      层：生图接口总设置（左下角悬浮「设置」里维护、只存本机），
 //      生效顺序 = 本页单次输入 > 总设置 > 已连接凭证，逐项解析见
 //      imageapi.ts；本页设置区只显示当前生效来源一行，不另设一份
 //      总设置输入。v3.84 起点「生成封面」先
@@ -211,11 +211,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type ApiResponse } from "./api";
 import { GenProgress } from "./genprogress";
 import {
-  PreviewImg,
-  PREVIEW_MAX_EDGE,
-  regenerateOversizedPreview,
+PreviewImg,
+PREVIEW_MAX_EDGE,
+regenerateOversizedPreview,
 } from "./previewimg";
-import { ConfirmDialog } from "./confirm";
 import {
 loadImageApiSettings,
 resolveImageApiConfig,
@@ -245,28 +244,19 @@ uploadImageUrlInChunks,
 type ChunkedImageRef,
 } from "./chunkedupload";
 import coverRefVs from "./assets/封面参照图-21张/cover-ref-vs.jpg";
-import coverRefFace from "./assets/封面参照图-21张/cover-ref-face.jpg";
 import coverRefCollage from "./assets/封面参照图-21张/cover-ref-collage.jpg";
-import coverRefPanorama from "./assets/封面参照图-21张/cover-ref-panorama.jpg";
-import coverRefSolo from "./assets/封面参照图-21张/cover-ref-solo.jpg";
-import coverRefPoster from "./assets/封面参照图-21张/cover-ref-poster.jpg";
 import coverRefPanels from "./assets/封面参照图-21张/cover-ref-panels.jpg";
 import coverRefCamps from "./assets/封面参照图-21张/cover-ref-camps.jpg";
 import coverRefSpectacle from "./assets/封面参照图-21张/cover-ref-spectacle.jpg";
-import coverRefMarket from "./assets/封面参照图-21张/cover-ref-market.jpg";
 // v5.57：风格参照图在选择排里只显示 46px 高的小图，另备一份
-// ≤224px 的降质小图（十张合计约 129KB，原图约 1MB）；点开看大图
-// 仍用原图全质（上方十个导入）。
+// ≤224px 的降质小图；点开看大图仍用原图全质（上方五个导入）。
+// v5.89：风格 2 / 4 / 5 / 6 / 10 已删（见 server/src/coverstyles.ts
+// 文件头），其参照图导入与本地图片文件一并删除，现存五张。
 import coverRefVsSm from "./assets/封面参照图-21张/cover-ref-vs-sm.jpg";
-import coverRefFaceSm from "./assets/封面参照图-21张/cover-ref-face-sm.jpg";
 import coverRefCollageSm from "./assets/封面参照图-21张/cover-ref-collage-sm.jpg";
-import coverRefPanoramaSm from "./assets/封面参照图-21张/cover-ref-panorama-sm.jpg";
-import coverRefSoloSm from "./assets/封面参照图-21张/cover-ref-solo-sm.jpg";
-import coverRefPosterSm from "./assets/封面参照图-21张/cover-ref-poster-sm.jpg";
 import coverRefPanelsSm from "./assets/封面参照图-21张/cover-ref-panels-sm.jpg";
 import coverRefCampsSm from "./assets/封面参照图-21张/cover-ref-camps-sm.jpg";
 import coverRefSpectacleSm from "./assets/封面参照图-21张/cover-ref-spectacle-sm.jpg";
-import coverRefMarketSm from "./assets/封面参照图-21张/cover-ref-market-sm.jpg";
 import {
 COVER_STYLES,
 buildCoverPrompts,
@@ -328,15 +318,10 @@ const STYLE_REFERENCES: Record<
   { src: string; thumbSrc: string; title: string }
 > = {
   explosive_vs: { src: coverRefVs, thumbSrc: coverRefVsSm, title: "以前的小孩 VS 现在的小孩" },
-  face_meme: { src: coverRefFace, thumbSrc: coverRefFaceSm, title: "送给朋友的祝福" },
   collage_memory: { src: coverRefCollage, thumbSrc: coverRefCollageSm, title: "小时候开智前做过的事" },
-  panorama_story: { src: coverRefPanorama, thumbSrc: coverRefPanoramaSm, title: "离谱数学答案合集2" },
-  solo_half_title: { src: coverRefSolo, thumbSrc: coverRefSoloSm, title: "当你打车打到校长的车" },
-  poster_sticker_bomb: { src: coverRefPoster, thumbSrc: coverRefPosterSm, title: "我只要\"熟\"的！" },
   multi_panel_story: { src: coverRefPanels, thumbSrc: coverRefPanelsSm, title: "当你爸是你的校长" },
   camps_vs: { src: coverRefCamps, thumbSrc: coverRefCampsSm, title: "现在的小孩VS以前的小孩大合集" },
   spectacle_effect_title: { src: coverRefSpectacle, thumbSrc: coverRefSpectacleSm, title: "离谱数学题 / 冻住全校？" },
-  market_note_quote: { src: coverRefMarket, thumbSrc: coverRefMarketSm, title: "走读生在 / 给我次机会" },
 };
 
 const PRESET_MODELS = [
@@ -411,8 +396,8 @@ export function CoverBench({
   });
   // v5.70 生图接口总设置接入：实际生效配置按「封面页单次输入 >
   // 总设置 > 已连接凭证」逐项解析（imageapi.ts）。本页两个框仍是
-  // 单次输入（只存内存、不写回总设置、刷新即失效）；总设置在顶部
-  // 「生图」面板里维护、只存本机，本页只读它并随其变化刷新解析。
+  // 单次输入（只存内存、不写回总设置、刷新即失效）；总设置在左下角
+  // 悬浮「设置」里维护、只存本机，本页只读它并随其变化刷新解析。
   const [globalApiSettings, setGlobalApiSettings] =
     useState<ImageApiSettings>(() => loadImageApiSettings());
   useEffect(() => {
@@ -433,6 +418,9 @@ export function CoverBench({
     apiBase: coverResolved.apiBase ?? "",
   };
   const [refNote, setRefNote] = useState<string | null>(null);
+  // v5.97：最近一次参考图换链接实际走的路线说明（Geeknow 自家上
+  // 传 / 公开图床回退），托管成功后亮在生成区，让用户一眼核对。
+  const [hostRouteNote, setHostRouteNote] = useState<string | null>(null);
   // v3.98 参考图部分缺失的黄色提醒（提交前由 submitCover 对账后
   // 写入：方案里有人没带上图但仍有图可交时，亮黄提醒再提交，
   // 不静默、不拦下）。
@@ -440,37 +428,11 @@ export function CoverBench({
   // v5.04 中转压缩进行态：过大原图改走分片中转时逐张亮明进度
   // （正在中转第几张、第几片），不静默等用户干等。
   const [refProgress, setRefProgress] = useState<string | null>(null);
-  // 参考图公开图床知情同意：v5.16 起按项目记忆（用户拍板改法）——
-  // 勾选存进本机 localStorage（键带项目 id），打开封面页时该项目
-  // 有记忆就默认沿用并明示状态，刷新不再归零；用户取消勾选或点
-  // 「清除这个项目的同意记忆」即清掉。v4.22–v5.15 的「只在本次
-  // 打开页面期间有效、刷新重勾」口径就此作废（作废的只是记忆方
-  // 式：同意本身仍是用户亲手勾的，工作台绝不替用户默认同意）。
-  // 提交时才据此决定是否取图上传换链接；未同意时不上传任何图
-  // 片，submitCover 自动降级纯文字（去约束句），不拦单。
-  const [refHostConsent, setRefHostConsent] = useState(false);
-  const refHostConsentKey = `coverbench.refHostConsent.v1.${project.id}`;
-  useEffect(() => {
-    let saved = false;
-    try {
-      saved = window.localStorage.getItem(refHostConsentKey) === "1";
-    } catch {
-      saved = false;
-    }
-    setRefHostConsent(saved);
-  }, [refHostConsentKey]);
-  const applyRefHostConsent = (checked: boolean) => {
-    setRefHostConsent(checked);
-    try {
-      if (checked) {
-        window.localStorage.setItem(refHostConsentKey, "1");
-      } else {
-        window.localStorage.removeItem(refHostConsentKey);
-      }
-    } catch {
-      // 存不进（隐私模式等）就只当本次打开期间有效，不报错。
-    }
-  };
+  // 参考图上传（用户要求去掉同意勾选）：不再有勾选、也不再按项
+  // 目记同意——只要选了参考图，点生成时就直接取图、由特权层把
+  // 降采样副本换链接再交给 Geeknow（v5.97：先走 Geeknow 自家上传、走不通才回退公开图床）；
+  // 没选参考图时照旧按纯文字生成（submitCover 自动去约束句、
+  // 不拦单）。参考图区只留一行简短说明写明这一点。
   // v5.18：生成用哪一版提示词由用户在第三步明确单选（中文 /
   // English），选中的那一版就是提交给图片模型的那一版——取代
   // v5.16 以前「英文框非空就优先英文」的隐式规则。选择按项目记
@@ -502,34 +464,9 @@ export function CoverBench({
       // 存不进（隐私模式等）就只当本次打开期间有效，不报错。
     }
   };
-  // v5.16 ②：无图降级提交前的一次明确确认（状态存待续的提交动
-  // 作与大白话说明；用户点确认才真正提交，点取消就不提交）。只
-  // 拦在「实际一张参考图都带不上、而提交词带人物约束」这一刻，
-  // 不强制必须带图——确认了照常纯文字提交（不拦单底线不变）。
-  const [textOnlyConfirm, setTextOnlyConfirm] = useState<{
-    detail: string;
-    proceed: () => Promise<void>;
-  } | null>(null);
-  const confirmTextOnlyAndProceed = () => {
-    const pending = textOnlyConfirm;
-    setTextOnlyConfirm(null);
-    if (!pending) return;
-    setSubmitting(true);
-    setSubmitError(null);
-    void (async () => {
-      try {
-        await pending.proceed();
-      } catch (e) {
-        setSubmitError(
-          isGatewayTimeoutError(e)
-            ? "提交时网关超时：这次提交有没有被服务商收到还不确定，先不要连点；等十几秒后看下方记录，若刚才其实已提交成功，记录里会有它。"
-            : `提交失败：${describeThrownError(e)}`,
-        );
-      } finally {
-        setSubmitting(false);
-      }
-    })();
-  };
+  // 无图提交不再弹确认：去掉同意勾选后，选了参考图点生成就直
+  // 接带图提交；没选参考图（或一张都没取到）时照旧由 submitCover
+  // 自动降级纯文字提交并亮黄色提醒，不再先弹一次确认。
   // v3.84 鉴权预检状态（设置区手动检测与提交前自动预检共用结果
   // 文案；预检结论只反映「实际将生效的凭证」在提交端点的鉴权）。
   const [probing, setProbing] = useState(false);
@@ -1115,9 +1052,6 @@ export function CoverBench({
         return { zh: "右侧", en: "right side" };
       }
       return CENTER;
-    }
-    if (forStyleId === "solo_half_title" || forStyleId === "face_meme") {
-      return { zh: "中央前景", en: "center foreground" };
     }
     if (forStyleId === "spectacle_effect_title") {
       return { zh: "前景", en: "foreground" };
@@ -2361,9 +2295,11 @@ export function CoverBench({
   // MAX_COVER_REF_IMAGES 张），取的是降采样副本（本机单张压到
   // 最长边 1024px 的 JPEG，库里原图一字不动）；本机压不动又超
   // 直塞上限的过大原图改走中转（原图字节分片送服务端拼回、特
-  // 权层 PIL 压缩后托管），尺寸不再成为丢图理由；只有真读不到
-  // / 传不上去才点名记真实原因，绝不静默丢图。取图前先过同意
-  // 门——refHostConsent 未勾时整包为空（gatePassed=false），后
+  // 权层 PIL 压缩后托管），尺寸不再成为丢图理由（v6.00 起取图
+  // 先经 scriptlib 的本地字节通道——与生图面板同一方案，中转
+  // 只剩最后兜底且分片 3 片并行，详见下方 relayReference）；只有真读不到
+  // / 传不上去才点名记真实原因，绝不静默丢图。同意勾选下线后
+  // 不再过门：withRefs 时就取图（gatePassed=true），取不到时后
   // 面一致性对账负责降级与提示。取图只是本机降采样与分片暂存，
   // 不提交、不计费（真正的上传换链接发生在特权层提交那一刻）。
   // ------------------------------------------------------------------
@@ -2375,6 +2311,13 @@ export function CoverBench({
     | { chunked: ChunkedImageRef };
   type PreparedCoverRefs = {
     referenceImages: SubmitRefArg[];
+    // v5.95：参考图已换好的托管链接（提交顺序，与
+    // referenceImages 一一对应）——托管单独一步先做完、三比例共
+    // 用同一份，提交时只带链接、不再在提交调用里现传图床。
+    hostedUrls?: string[];
+    // v5.97：这份托管链接实际走的路线（geeknow 自家上传 / uguu
+    // 公开图床回退 / mixed），随托管回执带回、亮给用户核对。
+    hostedRoute?: string | null;
     // 实际取到图的人物卡 id（提交顺序）——提示词人物行同步与
     // 提交前缺人对账都按它算，不拿卡名与方案真名硬比（v5.04）。
     fetchedRefIds: number[];
@@ -2398,12 +2341,17 @@ export function CoverBench({
     };
     const { referenceImages, fetchedRefIds, failedRefs, uploadedFailedRefs, crowdedOutNames } = prepared;
     setRefProgress(null);
-    if (withRefs && refHostConsent) {
+    if (withRefs) {
       prepared.gatePassed = true;
       // v5.04 中转压缩：画布压不动且原图超客户端直塞上限时，不
       // 再丢图——原图字节经分片送服务端（与人物资产图上传同一
       // 套分片口径），提交动作拼回后由特权层 PIL 逐档压缩再托
       // 管。进行中逐张亮进度（第几张、第几片），不静默。
+      // v6.00：urlToSubmitReference 已先走「字节回本地再画布压
+      // 缩」第二通道（与生图面板同一方案，见 scriptlib）——直连
+      // 解码被站内图片地址响应头卡住的大图在本地就能压成小副
+      // 本直塞，不再进中转；只有本地连字节都解不动的图才落到
+      // 这里的中转兜底，且中转分片已改 3 片并行（chunkedupload）。
       let relayCount = 0;
       const relayReference = async (
         url: string,
@@ -2414,11 +2362,18 @@ export function CoverBench({
         setRefProgress(
           `正在中转压缩第 ${nth} 张参考图（${label}）：原图较大，正在分片送服务端压缩……`,
         );
-        return uploadImageUrlInChunks(url, label, (done, total) => {
-          setRefProgress(
-            `正在中转压缩第 ${nth} 张参考图（${label}）：分片已送 ${done} / ${total} 片，送齐后由服务端压缩…`,
-          );
-        });
+        return uploadImageUrlInChunks(
+          url,
+          label,
+          (done, total) => {
+            setRefProgress(
+              `正在中转压缩第 ${nth} 张参考图（${label}）：分片已送 ${done} / ${total} 片，送齐后由服务端压缩…`,
+            );
+          },
+          // v6.00：中转分片改 3 片并行发送，不再一片一片串行排队
+          // （用户实报串行送到 3 / 12 片后十分钟没动静）。
+          { concurrency: 3 },
+        );
       };
       // v4.28：先取提示词下方用户直传的参考图（为这张封面专门传
       // 的，优先占位），再按生效集合的顺序取人物参考图（页面勾
@@ -2497,34 +2452,59 @@ export function CoverBench({
     setRefNote(refNotes.length ? refNotes.join(" ") : null);
   };
 
-  // v5.16 ②③ 提交前判定：这份提示词「需不需要参考图随行」——带
-  // 人物约束句的需要；风格 11（evidence_reveal）提交时必被注入人
-  // 物强化句（见 submitCover），所以风格 11 只要有词就算需要。
-  // 生成入口先取图：实际带图为 0 且需要图时，先弹一次明确确认，
-  // 不再静默降级（降级本身保留：确认后照常纯文字提交）。
-  const promptNeedsRefs = (zh: string, en: string): boolean => {
-    // v5.18：判定口径跟提交口径一致——只看将提交的那一版（用户
-    // 选的语言版），不再两版任一有约束就算数。
-    const eff = submitLang === "en" ? en.trim() : zh.trim();
-    if (!eff) return false;
-    if (promptHasCharacterConstraint(eff)) return true;
-    return styleId === "evidence_reveal";
-  };
-  // 无图确认弹窗里的大白话说明：为什么这次带不上图 + 将提交哪一版。
-  const textOnlyDetail = (prepared: PreparedCoverRefs): string => {
-    const intendedSel = refCharIds.filter((id) =>
-      charsWithImage.some((c) => c.id === id),
-    ).length;
-    const langLabel = submitLang === "en" ? "英文" : "中文";
-    const why =
-      !refHostConsent && (intendedSel > 0 || uploadedRefs.length > 0)
-        ? `你选了 ${intendedSel} 位人物参考图${uploadedRefs.length > 0 ? `、还上传了 ${uploadedRefs.length} 张参考图` : ""}，但还没勾选参考图区的图床同意，所以这次一张图都带不上`
-        : prepared.failedRefs.length > 0 || prepared.uploadedFailedRefs.length > 0
-          ? "你选好的参考图这次一张都没能取到（读取或中转失败，具体原因见上方参考图说明）"
-          : intendedSel === 0 && uploadedRefs.length === 0
-            ? "这次没有勾选任何人物参考图、也没有上传参考图"
-            : "这次没有带上参考图";
-    return `${why}。将提交的是${langLabel}版提示词。`;
+  // v5.95 参考图托管（独立一步）：把取好的参考图逐张换链接，结
+  // 果存回 prepared.hostedUrls——一键三比例共用同一份、只托管一
+  // 次；单张 / 记录重提由 submitCover 兜底调用。旧链路把托管塞
+  // 在提交调用里串行做，两步相加超过守护进程 30 秒预算、带 1
+  // 张图也被掐断；拆开后托管与提交各占一份预算。这步只换链
+  // 接、不建任务、不计费；失败抛回 {ok:false,error} 由调用方亮
+  // 红字，报错由服务端写清两条路线各败在哪、还没提交、可直接
+  // 重试。绝不自动重试。
+  // v5.97：托管主路线改走 Geeknow 自家上传——鉴权带与提交同一
+  // 套生效配置（submitCfgRef：封面页单次输入 > 总设置 > 已连接
+  // 凭证）；走不通服务端自动改走公开图床，回执 route 存回
+  // prepared.hostedRoute 并亮一行路线说明给用户核对。
+  const hostPreparedRefs = async (
+    prepared: PreparedCoverRefs,
+  ): Promise<{ ok: boolean; error: string | null }> => {
+    if (prepared.referenceImages.length === 0) return { ok: true, error: null };
+    if (prepared.hostedUrls && prepared.hostedUrls.length === prepared.referenceImages.length) {
+      return { ok: true, error: null };
+    }
+    let hostRes: Awaited<ReturnType<typeof api.hostGeeknowReferenceImages>>;
+    try {
+      const cfg = submitCfgRef.current;
+      hostRes = await api.hostGeeknowReferenceImages({
+        referenceImages: prepared.referenceImages,
+        apiKey: cfg.apiKey.trim() ? cfg.apiKey.trim() : undefined,
+        apiBase: cfg.apiBase.trim() ? cfg.apiBase.trim() : undefined,
+      });
+    } catch (e) {
+      return {
+        ok: false,
+        error: isGatewayTimeoutError(e)
+          ? "参考图换链接超时了：先走 Geeknow 自家上传、再自动改走公开图床，两条都没在时间里走完。这一步在提交之前，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。"
+          : `参考图换链接没走完，这次没有提交、不会计费：${describeThrownError(e)}。可以直接再点一次生成重试。`,
+      };
+    }
+    if (!hostRes.ok) {
+      return {
+        ok: false,
+        error: hostRes.error ?? "参考图换链接失败，这次没有提交、不会计费，可以直接再点一次生成重试。",
+      };
+    }
+    prepared.hostedUrls = hostRes.urls;
+    prepared.hostedRoute = hostRes.route;
+    setHostRouteNote(
+      hostRes.route === "geeknow"
+        ? "这次参考图走的是 Geeknow 自家上传（图传到了 Geeknow 自家空间，没走公开图床）。"
+        : hostRes.route === "uguu"
+          ? "这次 Geeknow 自家上传没走通，已自动改走公开图床换链接（拿到链接的人能打开这张图、短期后自动删除）。"
+          : hostRes.route === "mixed"
+            ? "这次参考图一部分走 Geeknow 自家上传、一部分走了公开图床回退（走公开图床的那几张，拿到链接的人能打开、短期后自动删除）。"
+            : null,
+    );
+    return { ok: true, error: null };
   };
 
   // ------------------------------------------------------------------
@@ -2589,12 +2569,11 @@ export function CoverBench({
       reportSubmitError("先选一个模型再生成");
       return fail();
     }
-    // v4.22：带参考图的提交不再拦截。取图受参考图区的公开图床同
-    // 意门控制（fetchCoverRefs 里过门：勾了同意才取图，提交时由
-    // 特权层上传图床换链接）；没勾同意就不取图、不上传，走到一
-    // 致性对账时自动降级纯文字（去掉约束句），照常提交、不报错
-    // 拦单。取图在鉴权预检之前——先把「实际能带上几张图」数清
-    // 楚，才做得了一致性检查（v3.98 口径）。
+    // 带参考图的提交不再拦截：选了参考图就取图（fetchCoverRefs，
+    // 提交时由特权层上传图床换链接）；一张都没取到时走到一致性
+    // 对账自动降级纯文字（去掉约束句），照常提交、不报错拦单。
+    // 取图在鉴权预检之前——先把「实际能带上几张图」数清楚，才
+    // 做得了一致性检查（v3.98 口径）。
     const prepared =
       input.preparedRefs ??
       (await fetchCoverRefs(effectiveRefIds, input.withRefs));
@@ -2614,8 +2593,8 @@ export function CoverBench({
     // 提交副本（以及这条记录存下的提示词）用 stripCharacter-
     // Constraint 把约束句自动去掉、按纯文字照常提交，并在生成
     // 区亮一条黄色提醒写清为什么降级、页面上的提示词原文没动。
-    // 降级原因分清：没勾图床同意 / 没选到图 / 勾了但一张都没取
-    // 到。实际带上图（≥1 张）时约束原样保留、不降级。
+    // 降级原因分清：没选到图 / 选了但一张都没取到。实际带上图
+    // （≥1 张）时约束原样保留、不降级。
     // ----------------------------------------------------------------
     setRefWarning(null);
     // v5.04：提交副本先同步人物行——名字表按实际取图的提交顺序
@@ -2698,30 +2677,26 @@ export function CoverBench({
       }
       finalPrompt = pickFinalPrompt();
       degradeLabel =
-        !refHostConsent && (intendedCount > 0 || intendedUploadCount > 0)
-          ? "无图降级：未勾选图床同意"
-          : intendedCount > 0
-            ? `无图降级：已选的 ${intendedCount} 位人物参考图一张都没取到`
-            : intendedUploadCount > 0
-              ? "无图降级：上传参考图一张都没取到"
-              : planNames.length > 0
-                ? "无图降级：封面人物没有可带上的参考图"
-                : charsWithImage.length === 0
-                  ? "无图降级：本项目没有带资产图的人物、也没有上传参考图"
-                  : "无图降级：没有勾选任何人物参考图、也没有上传参考图";
-      const reason = !refHostConsent && (intendedCount > 0 || intendedUploadCount > 0)
-        ? `你选了 ${intendedCount} 位人物参考图${intendedUploadCount > 0 ? `、还上传了 ${intendedUploadCount} 张参考图` : ""}，但还没勾选参考图区的公开图床同意——这次没有上传任何图片`
-        : intendedCount > 0
-          ? `勾选的 ${intendedCount} 位人物参考图这次一张都没取到${failedRefs.length ? `（没取到的是：${failedRefs.map((f) => `${f.name}：${f.reason}`).join("；")}）` : "（图片地址不可用）"}`
+        intendedCount > 0
+          ? `无图降级：已选的 ${intendedCount} 位人物参考图一张都没取到`
           : intendedUploadCount > 0
-            ? `上传的 ${intendedUploadCount} 张参考图这次一张都没取到${uploadedFailedRefs.length ? `（${uploadedFailedRefs.map((f) => `${f.name}：${f.reason}`).join("；")}）` : "（图片读取失败）"}`
+            ? "无图降级：上传参考图一张都没取到"
             : planNames.length > 0
-            ? `封面人物名单（${planNames.join("、")}）这次没有可带上的参考图（没勾选、或人物还没有资产图）`
-            : charsWithImage.length === 0
-              ? "本项目目前没有任何带资产图的人物、也没有上传参考图，这次带不上参考图"
-              : "这次没有勾选任何人物参考图、也没有上传参考图";
+              ? "无图降级：封面人物没有可带上的参考图"
+              : charsWithImage.length === 0
+                ? "无图降级：本项目没有带资产图的人物、也没有上传参考图"
+                : "无图降级：没有勾选任何人物参考图、也没有上传参考图";
+      const reason = intendedCount > 0
+        ? `勾选的 ${intendedCount} 位人物参考图这次一张都没取到${failedRefs.length ? `（没取到的是：${failedRefs.map((f) => `${f.name}：${f.reason}`).join("；")}）` : "（图片地址不可用）"}`
+        : intendedUploadCount > 0
+          ? `上传的 ${intendedUploadCount} 张参考图这次一张都没取到${uploadedFailedRefs.length ? `（${uploadedFailedRefs.map((f) => `${f.name}：${f.reason}`).join("；")}）` : "（图片读取失败）"}`
+          : planNames.length > 0
+          ? `封面人物名单（${planNames.join("、")}）这次没有可带上的参考图（没勾选、或人物还没有资产图）`
+          : charsWithImage.length === 0
+            ? "本项目目前没有任何带资产图的人物、也没有上传参考图，这次带不上参考图"
+            : "这次没有勾选任何人物参考图、也没有上传参考图";
       setRefWarning(
-        `提醒（已自动降级、本次照常按纯文字提交）：${reason}，已自动去掉提交词里的「外貌与服装以随附的人物资产图为准」约束（页面上的提示词原文没动）——不带图硬提这句约束，上游只会回「请上传参考图」按失败处理。封面人物这次只能按文字画；想与资产图一致，勾上参考图区的同意、选好参考图后再生成。`,
+        `提醒（已自动降级、本次照常按纯文字提交）：${reason}，已自动去掉提交词里的「外貌与服装以随附的人物资产图为准」约束（页面上的提示词原文没动）——不带图硬提这句约束，上游只会回「请上传参考图」按失败处理。封面人物这次只能按文字画；想与资产图一致，选好参考图后再生成。`,
       );
     }
     // v5.81：封面页不再做防版权拦截——v5.80 在此对最终提交副本
@@ -2771,6 +2746,15 @@ export function CoverBench({
         return fail();
       }
     }
+    // v5.95：参考图先单独托管换链接（独立一步、独占自己的时间
+    // 预算；一键三比例已在批量入口托管过一次、这里直接复用
+    // prepared.hostedUrls）。托管失败就停在这里——还没轮到提
+    // 交、任务没建、不会计费；提交只带链接、不再带图字节。
+    const hosted = await hostPreparedRefs(prepared);
+    if (!hosted.ok) {
+      reportSubmitError(hosted.error ?? "参考图换链接失败，这次没有提交、不会计费，可以直接再点一次生成重试。");
+      return fail();
+    }
     const cfg = submitCfgRef.current;
     const res = await api.submitGeeknowImageTask({
       model: model.trim(),
@@ -2780,7 +2764,8 @@ export function CoverBench({
       requestTimeoutSec: 60,
       downloadTimeoutSec: 60,
       retryCount: 5,
-      referenceImages,
+      referenceImages: [],
+      referenceImageUrls: prepared.hostedUrls ?? [],
       apiKey: cfg.apiKey.trim() ? cfg.apiKey.trim() : undefined,
       apiBase: cfg.apiBase.trim() ? cfg.apiBase.trim() : undefined,
     });
@@ -2806,7 +2791,8 @@ export function CoverBench({
     const evUploadedSelected = input.withRefs ? uploadedRefs.length : 0;
     const evFailures = [...failedRefs, ...uploadedFailedRefs];
     const refFetch = {
-      consent: refHostConsent,
+      // 同意勾选已下线：选了参考图点生成即自动上传，取图门恒开。
+      consent: true,
       gatePassed: prepared.gatePassed,
       selectedCount: evSelectedCount,
       uploadedSelected: evUploadedSelected,
@@ -2819,7 +2805,7 @@ export function CoverBench({
       failures: evFailures,
       failStep:
         evSelectedCount + evUploadedSelected > 0 && !prepared.gatePassed
-          ? "未勾选图床同意，取图未开始"
+          ? "这次没有取图（未带参考图提交）"
           : prepared.gatePassed &&
               referenceImages.length === 0 &&
               evFailures.length > 0
@@ -2900,38 +2886,22 @@ export function CoverBench({
         setSubmitError(selectedLangEmptyMessage());
         return;
       }
-      // v5.16 ②：先取图再决定——实际一张参考图都带不上、而提示词
-      // 带人物约束时，不再静默降级：先弹一次明确确认（用户确认后
-      // 才按纯文字提交；仍不拦单、不强制带图）。取图口径与此前
-      // submitCover 内部现取一字不变（同一 fetchCoverRefs、同参
-      // 数），只是提前到确认之前，取好的图包传给 submitCover 共用。
+      // 先取图：选了参考图就直接取好带上提交（不再过同意门、不
+      // 再弹无图确认）；取好的图包传给 submitCover 共用。一张都
+      // 没取到时 submitCover 照旧自动降级纯文字并亮黄色提醒。
       const prepared = await fetchCoverRefs(refCharIds, true);
       if (prepared.gatePassed) publishRefNotes(prepared);
-      const doSubmit = () =>
-        submitCover({
-          usePromptZh: promptZh.trim() ? withRatioAdapter(promptZh, ratio, "zh") : promptZh,
-          usePromptEn: promptEn.trim() ? withRatioAdapter(promptEn, ratio, "en") : promptEn,
-          useLang: submitLang,
-          usePlan: plan,
-          useRatio: ratio,
-          useStyleId: styleId,
-          useStyleName: style.label,
-          withRefs: true,
-          preparedRefs: prepared,
-        });
-      if (
-        prepared.referenceImages.length === 0 &&
-        promptNeedsRefs(promptZh, promptEn)
-      ) {
-        setTextOnlyConfirm({
-          detail: textOnlyDetail(prepared),
-          proceed: async () => {
-            await doSubmit();
-          },
-        });
-        return;
-      }
-      await doSubmit();
+      await submitCover({
+        usePromptZh: promptZh.trim() ? withRatioAdapter(promptZh, ratio, "zh") : promptZh,
+        usePromptEn: promptEn.trim() ? withRatioAdapter(promptEn, ratio, "en") : promptEn,
+        useLang: submitLang,
+        usePlan: plan,
+        useRatio: ratio,
+        useStyleId: styleId,
+        useStyleName: style.label,
+        withRefs: true,
+        preparedRefs: prepared,
+      });
     } catch (e) {
       setSubmitError(
         isGatewayTimeoutError(e)
@@ -2988,24 +2958,10 @@ export function CoverBench({
         failAll("先选一个模型再生成");
         return;
       }
-      // 参考图只取一次、三份共用；取图说明统一发布一次。
+      // 参考图只取一次、三份共用；取图说明统一发布一次。选了参
+      // 考图就直接带图提交，不再弹无图确认。
       const prepared = await fetchCoverRefs(refCharIds, true);
       if (prepared.gatePassed) publishRefNotes(prepared);
-      // v5.16 ②：与单张同一道确认门——实际一张图都带不上、而提
-      // 示词带人物约束时，先弹一次明确确认，确认后才整批按纯文
-      // 字提交（三个比例共用这一次确认，不逐个弹）。
-      if (
-        prepared.referenceImages.length === 0 &&
-        promptNeedsRefs(promptZh, promptEn)
-      ) {
-        setTextOnlyConfirm({
-          detail: `${textOnlyDetail(prepared)}（三个比例都一样，都按纯文字提交）`,
-          proceed: async () => {
-            await continueBatchAfterRefs(prepared, failAll);
-          },
-        });
-        return;
-      }
       await continueBatchAfterRefs(prepared, failAll);
     } catch (e) {
       setSubmitError(isGatewayTimeoutError(e) ? "一键三比例提交时网关超时：已提交成功的比例会在下方记录里出现，先不要重复点一键生成，避免重复计费。" : `一键三比例失败：${describeThrownError(e)}`);
@@ -3027,6 +2983,13 @@ export function CoverBench({
       const probe = await runProbe();
       if (probe && probe.ok && !probe.authOk) {
         failAll(probeFailText(probe));
+        return;
+      }
+      // v5.95：参考图托管也只做一次——三个比例共用同一份托管链
+      // 接，托管失败整批停在这里（还没提交、不会计费）。
+      const hosted = await hostPreparedRefs(prepared);
+      if (!hosted.ok) {
+        failAll(hosted.error ?? "参考图换链接失败，这次没有提交、不会计费，可以直接再点一次生成重试。");
         return;
       }
       // 三个比例并行提交：互不等待、互不拖累。
@@ -3083,8 +3046,8 @@ export function CoverBench({
   // （旧版按卡名逐字比对，代号卡对真名名单一位都配不上、重提
   // 会带 0 张参考图）。v5.08：再升级为 resolvePlanCharForPlan
   // （名字三层 + 消元兜底）并按卡去重，理由见下方实现处。
-  // v4.22：方案名单一位都匹配不到图、或用户没勾图床同意时不再
-  // 拦下——交给 submitCover 自动降级（去掉约束句、纯文字提交）。
+  // v4.22：方案名单一位都匹配不到图时不再拦下——交给
+  // submitCover 自动降级（去掉约束句、纯文字提交）。
   const resubmitRecord = async (rec: CoverRecord) => {
     if (submitting) return;
     setConfirmResubmitId(null);
@@ -3137,18 +3100,16 @@ export function CoverBench({
         refCharIdsOverride: useRefIds,
       });
       if (ok) {
-        // 实际带上图 = 有可匹配的参考图且已勾图床同意；有名单图
-        // 但没勾同意时 submitCover 已自动降级，提示按降级说。
-        const broughtRefs = useRefIds.length > 0 && refHostConsent;
+        // 有可匹配的参考图就自动带上（不再需要勾同意）；一张都没
+        // 取到时 submitCover 已自动降级，黄色提醒里写了原因。
+        const broughtRefs = useRefIds.length > 0;
         setRecMsg(
           rec.id,
           broughtRefs
             ? planNames.length > 0
-              ? `已按这条记录的设置重新提交了一个新任务，并带上 ${useRefIds.length} 位人物的参考图（按记录方案的封面人物名单重新匹配，副本按你的同意临时上传公开图床换链接）：新任务在记录列表最上面，独立计费、独立轮询；这条旧记录保留作历史。`
-              : `已按这条记录的设置重新提交了一个新任务，并带上页面当前勾选的 ${useRefIds.length} 位人物的参考图（这条记录没有存封面方案，副本按你的同意临时上传公开图床换链接）：新任务在记录列表最上面，独立计费、独立轮询；这条旧记录保留作历史。`
-            : useRefIds.length > 0
-              ? "已按这条记录的设置重新提交了一个新任务：你还没勾选参考图区的公开图床同意，这次没带参考图，已自动去掉提示词里的人物约束、按纯文字提交（降级原因见第三步上方的黄色提醒）：新任务在记录列表最上面，独立计费、独立轮询；这条旧记录保留作历史。"
-              : "已按这条记录的设置重新提交了一个新任务（这条记录没有可带的人物参考图，按纯提示词提交）：新任务在记录列表最上面，独立计费、独立轮询；这条旧记录保留作历史。",
+              ? `已按这条记录的设置重新提交了一个新任务，并带上 ${useRefIds.length} 位人物的参考图（按记录方案的封面人物名单重新匹配，副本临时上传公开图床换链接）：新任务在记录列表最上面，独立计费、独立轮询；这条旧记录保留作历史。`
+              : `已按这条记录的设置重新提交了一个新任务，并带上页面当前勾选的 ${useRefIds.length} 位人物的参考图（这条记录没有存封面方案，副本临时上传公开图床换链接）：新任务在记录列表最上面，独立计费、独立轮询；这条旧记录保留作历史。`
+            : "已按这条记录的设置重新提交了一个新任务（这条记录没有可带的人物参考图，按纯提示词提交）：新任务在记录列表最上面，独立计费、独立轮询；这条旧记录保留作历史。",
         );
       }
     } catch (e) {
@@ -3362,7 +3323,7 @@ export function CoverBench({
               onChange={(e) => {
                 const nextId = e.target.value;
                 setStyleId(nextId);
-                // v3.93 锁定版式的风格（风格2/3）：已有方案直接跟
+                // v3.93 锁定版式的风格（风格3 等）：已有方案直接跟
                 // 着切到该风格的固定版式，不留串味的 VS 版式。
                 const nextStyle = coverStyleById(nextId);
                 if (plan && nextStyle.forceLayout) {
@@ -3532,13 +3493,13 @@ export function CoverBench({
 
         {/* v5.70 当前生效来源：单次输入 > 总设置 > 已连接凭证，一眼
             看清这次封面生成走哪份设置（不露 Key）。总设置本身只在
-            顶部「生图」面板里维护，这里不另设一份。 */}
+            左下角悬浮「设置」里维护（v5.88 起），这里不另设一份。 */}
         <p className="text-xs leading-5" role="status">
           <span className="font-bold" style={{ color: "var(--olive)" }}>
             {coverResolved.sourceLabel}
           </span>
           <span className="text-[var(--dim)]">
-            。上面两个框是封面页单次输入：填了只对本次提交优先、刷新就没了，也不会改总设置；不填时用「生图接口总设置」（在顶部「生图」面板里，填一次生图面板和封面生成都用），总设置也没填才走已连接凭证。
+            。上面两个框是封面页单次输入：填了只对本次提交优先、刷新就没了，也不会改总设置；不填时用「生图接口总设置」（在左下角悬浮「设置」里，填一次生图面板和封面生成都用），总设置也没填才走已连接凭证。
           </span>
         </p>
 
@@ -3852,40 +3813,9 @@ export function CoverBench({
             </p>
           ) : (
             <>
-            <label
-              className="mb-2 flex cursor-pointer items-start gap-2 rounded-[var(--radius)] border p-2 text-xs leading-5"
-              style={{ borderColor: "var(--border)", background: "var(--surface-alt)" }}
-            >
-              <input
-                type="checkbox"
-                className="mt-1.5 h-4 w-4 shrink-0"
-                checked={refHostConsent}
-                onChange={(e) => applyRefHostConsent(e.target.checked)}
-                aria-label="同意把所选参考图的副本临时上传到公开图床uguu.se换取链接（带参考图生成必须勾选，会按项目记住，刷新后仍有效）"
-              />
-              <span>
-                <span className="font-bold">同意上传参考图副本换链接（带参考图生成先勾这里）：</span>
-                Geeknow 只收 https 图片链接、本站图片它读不到。勾选后，点生成时所选参考图的降采样副本（最长边 1024px，库里原图不动）会被临时上传到公开图床 uguu.se 换成链接、再交给 Geeknow——<span className="font-bold">任何拿到这个链接的人都能打开这张图</span>；文件是临时托管，短期后由图床自动删除。勾选会按这个项目记住：以后打开这个项目的封面页默认就是已同意，刷新不用重勾；你可以随时取消勾选，取消即清掉记忆。不勾选也不会拦下生成：点生成时会先弹一次确认，确认后自动去掉提示词里的「以随附的人物资产图为准」约束、按纯文字生成。
-              </span>
-            </label>
-            <p className="mb-2 text-xs leading-5" role="status" style={{ color: refHostConsent ? "var(--olive)" : "var(--dim)" }}>
-              当前图床同意状态：{refHostConsent ? "已同意（已按项目记住，刷新后仍有效）" : "未同意——不勾的话，点生成时会先确认、确认后按纯文字生成"}。
-              {refHostConsent && (
-                <button
-                  type="button"
-                  className="btn btn-sm ml-2"
-                  aria-label="清除这个项目的图床同意记忆（同时取消勾选）"
-                  onClick={() => applyRefHostConsent(false)}
-                >
-                  清除这个项目的同意记忆
-                </button>
-              )}
+            <p className="mb-2 text-xs leading-5 text-[var(--dim)]" role="note">
+              点「生成封面」时，已选参考图会自动上传换链接再交给 Geeknow：先走 Geeknow 自家上传（图传到 Geeknow 自家空间），自家上传走不通时才自动改走公开图床换链接（只有走公开图床那条路时，才是拿到链接的人能打开这张图、短期后自动删除），不用再勾选；没选参考图时按纯文字生成。
             </p>
-            {refCharIds.length > 0 && !refHostConsent && (
-              <p className="mb-2 text-xs leading-5 text-[var(--dim)]" role="note">
-                已选 {refCharIds.length} 位参考图，但还没勾上面的同意：现在点「生成封面」会先弹一次确认，确认后按纯文字降级（不上传任何图片、自动去掉约束句）；要带参考图，先勾同意。
-              </p>
-            )}
             <div className="mb-2 flex flex-wrap items-center gap-2">
               <span className="text-sm font-bold" role="status">已选参考图 {refCharIds.length} 位</span>
               <button type="button" className="btn btn-sm" aria-label="按封面人物名单选用参考图（与上方上封面人物一一对应）" onClick={() => {
@@ -4158,10 +4088,8 @@ export function CoverBench({
         {/* v4.28 上传参考图片：就在提示词正下方。用户为这张封面直
             接上传的参考图（不限于人物资产图），与第二步的人物参
             考图一起提交：上传图优先、合计最多 MAX_COVER_REF_IMAGES
-            张（v5.03 前写死 4 张）；同样要先勾
-            图床同意（勾选在第二步参考图区；项目没有带图人物时
-            第二步不渲染勾选，这里补同一份勾选）。只存本页内存，
-            刷新即清空、不进项目与备份。 */}
+            张（v5.03 前写死 4 张）；点生成时自动上传，不用勾选。
+            只存本页内存，刷新即清空、不进项目与备份。 */}
         <div>
           <span className={labelCls}>上传参考图片（可选 · 和人物参考图一起提交，上传图优先，合计最多 {MAX_COVER_REF_IMAGES} 张）</span>
           <input
@@ -4215,32 +4143,9 @@ export function CoverBench({
               {uploadRefMsg}
             </p>
           )}
-          {uploadedRefs.length > 0 && !refHostConsent && charsWithImage.length === 0 && (
-            <label
-              className="mt-2 flex cursor-pointer items-start gap-2 rounded-[var(--radius)] border p-2.5 text-sm leading-6"
-              style={{ borderColor: "var(--border)", background: "var(--surface-alt)" }}
-            >
-              <input
-                type="checkbox"
-                className="mt-1.5 h-4 w-4 shrink-0"
-                checked={refHostConsent}
-                onChange={(e) => applyRefHostConsent(e.target.checked)}
-                aria-label="同意把上传参考图的副本临时上传到公开图床uguu.se换取链接（带参考图生成必须勾选，会按项目记住，刷新后仍有效）"
-              />
-              <span>
-                <span className="font-bold">同意上传参考图副本换链接（带参考图生成先勾这里）：</span>
-                Geeknow 只收 https 图片链接、本站图片它读不到。勾选后，点生成时这些上传图的降采样副本（最长边 1024px）会被临时上传到公开图床 uguu.se 换成链接、再交给 Geeknow——<span className="font-bold">任何拿到这个链接的人都能打开这张图</span>；文件是临时托管，短期后由图床自动删除。勾选会按这个项目记住，刷新不用重勾，随时可以取消（取消即清掉记忆）。不勾选也不会拦下生成：点生成时会先弹一次确认，确认后这次不带这些图、按纯文字生成。
-              </span>
-            </label>
-          )}
-          {uploadedRefs.length > 0 && !refHostConsent && charsWithImage.length > 0 && (
+          {uploadedRefs.length > 0 && (
             <p className="mt-1 text-xs leading-5 text-[var(--dim)]" role="note">
-              还没勾图床同意：现在点「生成封面」不会带上这些上传图（会先弹一次确认，确认后按纯文字降级）；要带图，先勾第二步「人物参考图」区的同意。
-            </p>
-          )}
-          {uploadedRefs.length > 0 && refHostConsent && (
-            <p className="mt-1 text-xs leading-5 text-[var(--dim)]" role="note">
-              已勾图床同意：点生成时，这些图的降采样副本会和人物参考图一样，临时上传公开图床换链接再提交。
+              点「生成封面」时，这些上传图会自动和人物参考图一起上传提交，不用再勾选。
             </p>
           )}
         </div>
@@ -4257,6 +4162,11 @@ export function CoverBench({
         {refNote && (
           <p className="text-sm leading-6" style={{ color: "var(--bad)" }} role="note">
             {refNote}
+          </p>
+        )}
+        {hostRouteNote && (
+          <p className="text-sm leading-6 text-[var(--dim)]" role="status">
+            {hostRouteNote}
           </p>
         )}
         {refWarning && (
@@ -4437,7 +4347,7 @@ export function CoverBench({
                     行不显示，不回填、不猜（记录 id 43 原样保留）。 */}
                 {rec.refFetch && (
                   <p className="mt-1 text-xs leading-5 text-[var(--dim)]" role="note">
-                    {`取图过程：图床同意${rec.refFetch.consent ? "已勾选" : "未勾选"} · 已选人物 ${rec.refFetch.selectedCount} 位${
+                    {`取图过程：${rec.refFetch.consent ? "选图即自动上传" : "旧记录：当时未勾图床同意"} · 已选人物 ${rec.refFetch.selectedCount} 位${
                       rec.refFetch.uploadedSelected > 0
                         ? `、上传图 ${rec.refFetch.uploadedSelected} 张`
                         : ""
@@ -4529,28 +4439,6 @@ export function CoverBench({
         </div>
       </section>
       </div>
-
-      {/* v5.16 ② 无图降级提交前确认：实际一张参考图都带不上、而
-          提交词带人物约束时弹这一次——大白话写清「按纯文字提交、
-          人物不会像资产图」，用户亲手点确认才提交（仍不拦单、
-          不强制带图）；点「先不提交」就停在原地，什么都不发。 */}
-      {textOnlyConfirm && (
-        <ConfirmDialog
-          title="这次没带上参考图，确认按纯文字提交？"
-          body={
-            <>
-              <p>{textOnlyConfirm.detail}</p>
-              <p className="mt-2">
-                本次将按纯文字提交、不会上传任何图片：封面人物不会像人物资产图，只能按文字画。确认后照常提交、照常计费；想带图就点「先不提交」，先勾上图床同意、选好参考图再生成。
-              </p>
-            </>
-          }
-          confirmLabel="确认按纯文字提交"
-          cancelLabel="先不提交"
-          onConfirm={confirmTextOnlyAndProceed}
-          onCancel={() => setTextOnlyConfirm(null)}
-        />
-      )}
 
       {/* v3.89 封面大图预览：记录里只放小图，点小图在这里看大图。
           v5.57 起大图固定加载原图全质（此前误用预览图，看大图也是

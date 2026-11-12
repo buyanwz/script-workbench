@@ -16,12 +16,14 @@ import { api, type ApiResponse } from "./api";
 import { CharacterBench, type CharWindow } from "./charbench";
 import { MonitorBench } from "./monitorbench";
 import { ArchiveBench } from "./archivebench";
+import { PromptCheckBench } from "./promptcheck";
 import { AnalysisBench, type AnalysisPrefill } from "./analysisbench";
 import { ModeSection } from "./modebench";
 import { ConfirmDialog } from "./confirm";
 import { ScriptImportDialog } from "./scriptimport";
 import { GenProgress } from "./genprogress";
 import { ImageGenPanelHost, openImageGenPanel } from "./imagegen";
+import { SettingsDock } from "./settingsfloat";
 import { CoverBench } from "./coverbench";
 import { PreviewImg } from "./previewimg";
 import { BackupControls } from "./backup";
@@ -29,13 +31,6 @@ import {
 uploadImageFileInChunks,
 uploadErrorText,
 } from "./chunkedupload";
-import {
-CopyrightGuardControl,
-formatGuardHits,
-guardTextNow,
-useCopyrightGuard,
-type CopyrightGuardHit,
-} from "./copyrightguard";
 import {
 callWithGatewayRetry,
 describeThrownError,
@@ -51,13 +46,14 @@ beatTiming,
 buildDialogueBook,
 buildFormat01,
 buildGenChecklist,
-buildH3DurationVersion,
 buildH3FullText,
 buildH3PlotVersion,
+buildH3ShortVersion,
 buildLensPromptPack,
 buildMarkdown,
 buildReviewMarkdown,
 buildSeedanceDurationVersion,
+buildSeedanceForced30Version,
 buildSeedanceFullText,
 buildSeedancePlotVersion,
 buildSrt,
@@ -89,6 +85,7 @@ buildStoryboardGroups,
 charPendingHasAnalysis,
 charPendingHasFields,
 charPendingHasManual,
+charPendingHasMatch,
 flattenStoryboardBeats,
 fmtTc,
 globalSpecData,
@@ -99,6 +96,7 @@ isDefaultFilmStyle,
 isGroupTempName,
 lensMappingDiff,
 lensPlan,
+mappingImageFilterEnabled,
 parseScript,
 rawLensIndexByFlat,
 resolveCharacterInfo,
@@ -115,12 +113,14 @@ urlToThumbnail,
 VIDEO_MODELS,
 videoModelById,
 VIRAL_CATEGORY_LABELS,
+visibleMappingCharacters,
 visibleSceneMappings,
 type AutoAddedCharacter,
 type Beat,
 type CharacterRow,
 type CharPendingMap,
 type CharPendingRecord,
+type CharPendingSource,
 type DualTimingInfo,
 type DurationSummary,
 type H3LensPrompt,
@@ -221,7 +221,7 @@ export const tiltCardHandlers = {
   onMouseLeave: (_e: ReactMouseEvent<HTMLElement>) => {},
 };
 
-type Bench = "script" | "character" | "monitor" | "archive";
+type Bench = "script" | "character" | "monitor" | "archive" | "promptcheck";
 type ScriptWindow =
   | "mode"
   | "characters"
@@ -1317,6 +1317,13 @@ export function App() {
             >
               储存箱{archivedCount > 0 ? `（${archivedCount}）` : ""}
             </button>
+            <button
+              type="button"
+              aria-pressed={bench === "promptcheck"}
+              onClick={() => switchBench("promptcheck")}
+            >
+              提示词检查
+            </button>
           </div>
           <div className="flex min-w-0 items-center">
             <label className="sr-only" htmlFor="topbar-project-select">
@@ -1348,7 +1355,9 @@ export function App() {
                   ? "人物资产储存库窗口列表"
                   : bench === "archive"
                     ? "储存箱窗口列表"
-                    : "监控账号窗口列表"
+                    : bench === "promptcheck"
+                      ? "提示词检查窗口列表"
+                      : "监控账号窗口列表"
             }
           >
             {bench === "script"
@@ -1379,7 +1388,15 @@ export function App() {
                       () => {},
                       "当前窗口：项目储存箱",
                     )
-                  : MONITOR_WINDOWS.map((w) =>
+                  : bench === "promptcheck"
+                    ? navBtn(
+                        true,
+                        "提示词检查",
+                        "粘贴提示词，查版权风险",
+                        () => {},
+                        "当前窗口：提示词检查",
+                      )
+                    : MONITOR_WINDOWS.map((w) =>
                       navBtn(
                         monitorWindow === w.id,
                         w.label,
@@ -1691,6 +1708,17 @@ export function App() {
           </div>
           )}
 
+          {/* 提示词检查（v5.92）：与项目无关的独立检查页——粘贴任意
+              提示词查版权风险，逐处给问题与解决办法 + 改好的提示词；
+              两条硬性规则（台词意思不改、人物造型不改）写死在服务端
+              检查指令里。首次切到才挂载（打开提速），挂载后不卸载，
+              粘贴内容与结果在本页内存里保留。 */}
+          {mountedBenches.has("promptcheck") && (
+          <div hidden={bench !== "promptcheck"}>
+            <PromptCheckBench />
+          </div>
+          )}
+
           {/* 四窗口回归点验清单：可展开、逐项打勾（只记本机） */}
           <RegressionChecklist />
 
@@ -1705,6 +1733,11 @@ export function App() {
           按钮、储存库卡「生成图」、剧本人物卡缺图「生成图」）打开的
           都是它；只手动打开、绝不自动弹，挂载在这里常驻待命。 */}
       <ImageGenPanelHost activeProjectId={activeId} />
+
+      {/* 左下角悬浮「设置」（v5.88）：常驻左下角，点开向上展开；
+          里面是全站唯一一份生图接口总设置（API 地址 + 密钥），
+          从生图面板顶部整份搬来，存储与生效顺序不变。 */}
+      <SettingsDock />
 
       {whatsNewOpen && activeGuide && whatsNewSteps.length > 0 && (
         <WhatsNewTour
@@ -9278,7 +9311,7 @@ function StepThree({
   // 全部从人物表数据现算（角色映射造型句、说话人锁定句、四档
   // Seedance、通用版与各导出），保存成功即全部跟随新数据，不
   // 动剧本正文与分镜结构。v5.31 起 MiniMax H3 两版也在工作台内
-  // 拼装（scriptlib buildH3PlotVersion / buildH3DurationVersion，
+  // 拼装（scriptlib buildH3PlotVersion / buildH3ShortVersion，
   // 同样从 characterRows 现算），保存成功即与其它版本一起按新
   // 数据重拼、纳入同步范围，回执按实写明。改性别时
   // （目标性别 ≠ 原行有效性别）按 swapGenderWords 把造型 /
@@ -9389,7 +9422,7 @@ function StepThree({
     setScriptDraft(next);
     return {
       ok: true,
-      message: `已同步：${(changedNames.length > 0 ? changedNames : edits.map((e) => e.name)).join("、")} 的造型 / 性别 / 音色 / 语气基调已存回人物表，全部提示词版本已按新数据重新生成（四档 Seedance、通用版、导出，以及本页下方「MiniMax H3 提示词（两版）」的按剧情版与每镜 20–30 秒版）——到下方 Seedance 区或 H3 区里点「复制」粘出来就是新版。`,
+      message: `已同步：${(changedNames.length > 0 ? changedNames : edits.map((e) => e.name)).join("、")} 的造型 / 性别 / 音色 / 语气基调已存回人物表，全部提示词版本已按新数据重新生成（四档 Seedance、通用版、导出，以及本页下方「MiniMax H3 提示词（两版）」的按剧情版与每镜 10–15 秒版）——到下方 Seedance 区或 H3 区里点「复制」粘出来就是新版。`,
     };
   };
 
@@ -11398,13 +11431,11 @@ function StepThree({
                   file: `${scriptDraft.title}_生成清单.md`,
                   mime: "text/markdown;charset=utf-8",
                   build: (ann: boolean) =>
-                    // v5.80：AI 视频清单导出走防版权拦截开关（开时
-                    // 替换 + 末尾原创声明，只改导出的这份文本）。
-                    guardTextNow(
-                      buildGenChecklist(sbScript, project.name, mappingCtx, {
-                        pendingLines: ann ? exportPendingLines : [],
-                      }),
-                    ),
+                    // v5.93：防版权拦截开关已下线，导出按原文（版权
+                    // 风险检查改走顶栏「提示词检查」页）。
+                    buildGenChecklist(sbScript, project.name, mappingCtx, {
+                      pendingLines: ann ? exportPendingLines : [],
+                    }),
                 },
               ] as const
             ).map((item) => (
@@ -11476,12 +11507,10 @@ function StepThree({
                   requestExport("分镜文档", (ann) => {
                     downloadText(
                       `${scriptDraft.title}.md`,
-                      // v5.80：Markdown 导出走防版权拦截开关。
-                      guardTextNow(
-                        (ann
-                          ? `> ⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
-                          : "") + buildMarkdown(sbScript, mappingCtx),
-                      ),
+                      // v5.93：防版权拦截开关已下线，导出按原文。
+                      (ann
+                        ? `> ⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
+                        : "") + buildMarkdown(sbScript, mappingCtx),
                       "text/markdown;charset=utf-8",
                     );
                     setExportMsg("分镜版 Markdown 已导出");
@@ -11497,12 +11526,10 @@ function StepThree({
                 onClick={() =>
                   requestExport("分镜文档", (ann) => {
                     void copyText(
-                      // v5.80：复制全文同样走防版权拦截开关。
-                      guardTextNow(
-                        (ann
-                          ? `⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
-                          : "") + buildMarkdown(sbScript, mappingCtx),
-                      ),
+                      // v5.93：防版权拦截开关已下线，复制按原文。
+                      (ann
+                        ? `⚠️ 导出时仍有待确认事项：${exportPendingLines.join("；")}\n\n`
+                        : "") + buildMarkdown(sbScript, mappingCtx),
                     ).then((ok) =>
                       setExportMsg(ok ? "分镜全文已复制" : "复制失败，请改用下载"),
                     );
@@ -12465,7 +12492,7 @@ function StoryboardSettingsPanel(props: {
           <li>镜头数 = 总时长 ÷ 每镜头秒数，向上取整；最后一个镜头按剩余时长。</li>
           <li>镜头内节拍按剧情分析切分（场景变化、人物出入场、说话人轮换、动作 / 情绪转折、悬念反转点），每拍时长 = 台词字数 ÷ 语速 + 无台词动作时长，不均分。</li>
           <li>节拍进度按镜头内 0%–100% 计算，同时保留绝对时间码。</li>
-          <li>除第一个镜头外，每个镜头首帧与上一镜头重叠 1 秒（首帧 = 上一镜头末帧）；生成时长 = 故事时长 + 1 秒，重叠不计入故事时长。</li>
+          <li>镜头之间不重叠、时间码首尾连续；每个镜头的生成时长 = 它的故事时长。</li>
         </ul>
       </FoldHelp>
       <div className="mt-3 max-w-xs">
@@ -12506,7 +12533,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v5.82";
+const WORKSPACE_VERSION = "v6.00";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12518,9 +12545,117 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
+    version: "v6.00",
+    date: "2026-11-12",
+    current: true,
+    text: "这一版专治你报的「封面提交卡住、10 分钟没动静」。查清了卡点：不是 Geeknow 慢，是封面取参考图时掉进了一条老路——你的人物图是 8K 三视图大图（一张约 9MB），封面页在浏览器里压小图时，直连图片地址这条路压不动（站内图片地址带的安全响应头会卡住一部分浏览器的直连解码），于是改走「中转压缩」：把 9MB 原图切成 12 片、一片一片慢慢送，你截图里就卡在第 3 片。生图那边刚换的新方案（图在浏览器本地压成小副本、再走 Geeknow 自家上传换链接、提交只带链接）没覆盖到这条老路，所以封面没跟上。现在封面也用同一方案：取图时先把图片字节拿回浏览器本地、在本地压成最长边 1024px 的小副本——字节在本地解码，不受图片地址响应头的影响，压好后直接走和生图完全一样的托管与提交（先 Geeknow 自家上传换链接、提交只带链接），绝大多数大图在这一步就办完了，不再走中转。万一本地实在压不动，中转保留作最后兜底，但分片改成 3 片同时送，不再一片一片排队干等。原图、人物卡、封面记录都没动，提交绝不自动重试的老规矩也没变。这一版没有替你提交任何真实生图。真机等你亲验：打开项目 44 的封面页选好参考图，亲手点一次生成——应该很快走完取图、亮出「Geeknow 自家上传」的路线行，不再出现「正在中转压缩…分片已送 3 / 12」那种卡住的画面。",
+    features: "封面取图改走与生图同一方案：本地字节通道压缩 + 中转兜底提速（v6.00，用户报障「封面提交的很慢、提交了 10 分钟没动静」+ 点名「刚刚生图改的什么方案，这个封面也用同样的方案」；纯客户端 scriptlib.ts / chunkedupload.ts / coverbench.tsx + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作与特权层变更；NO real image generation submitted）：【根因实查】用户截图卡在「正在中转压缩第 1 张参考图（B）：分片已送 3 / 12 片」——12 片 × 768KiB ≈ 9.2MB，即 B 的 8K 三视图原图（项目 44 人物卡 id 185，沙箱数据核对）；coverbench 取图先调 scriptlib 的 urlToSubmitReference 直连图片地址画布降采样，该图直连解码失败（站内 blob 地址带 CSP sandbox + nosniff 响应头，直连 <img> 解码在用户浏览器里没走通）且原图 Base64 远超 3M 字符直塞上限 → 返回 null → 掉进 v5.04 中转：原图切 12 片经动作网关逐片串行送服务端（每片一次往返 + 失败重试），慢且卡死在第 3 片。生图面板没有这条中转路：它的参考图字节本就在浏览器本地（dataRefToSubmitReference 本地画布压缩），v5.95 拆步 + v5.97 Geeknow 自家上传托管都建在「本地小副本直塞」之上，封面唯独大图取图这一步没跟上。【改法一：scriptlib urlToSubmitReference 加第二通道】直连画布降采样失败后，不再直接回落原图直塞判定：先 fetch 把图片字节取回本地（blob.type 为空或 image/* 才继续），用 URL.createObjectURL 的本地对象地址喂给同一套 urlToThumbnail 画布降采样（最长边 1024、JPEG，口径与第一通道逐字一致，用完 revokeObjectURL）；本地仍压不动且原图字节 ≤ 直塞上限（按字节数换算 Base64 ≤ 3M 字符）时用 FileReader 把手头字节直接编码返回，不再重取一遍；字节通道也解不动才返回 null。封面分析取图（coverbench runAnalyse 的 characterImages）与人物分析取图（charbench）共用此函数、同步受益，口径不变。【改法二：中转兜底提速】chunkedupload 的 uploadImageBytesInChunks / uploadImageUrlInChunks 新增可选 concurrency（默认 1 = 原串行口径，人物图上传与备份等既有调用方一字不变；上限钳 4）：worker 池抢片发送，服务端按 uploadId + 片号独立暂存、assembleChunkedImage 按片号排序拼回，乱序到达不影响拼装；逐片 3 次重试与失败清理口径不变，onProgress 的 done 改报已送达片数；coverbench 的 relayReference 传 concurrency 3。【封面侧】fetchCoverRefs 其余口径一字未变（上传图优先、16 张上限、取图顺序、真实原因记名）；取到的内联小副本照旧走 hostPreparedRefs 独立托管步（v5.95 拆步 + v5.97 Geeknow 自家上传主路线 / uguu 回退，与生图面板完全同一条），提交只带链接。【不动】服务端全部动作与特权层、托管双路线、提交与轮询、提示词同步与降级、风格库 6 款、封面记录 id 43、全部项目与剧本数据。【删除清单】零删除（中转链路保留作最后兜底、只提速不下线）。基线升 v6.00（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 带参考图提交规则尾补 v6.00 口径、DATA-PLAN 本条）。真机待核：用户在项目 44 封面页带参考图亲手生成一次——应不再出现中转进度、直接亮路线行；若某张图仍进中转，进度应明显快于从前。",
+  },
+  {
+    version: "v5.99",
+    date: "2026-11-12",
+    text: "这一版按你批准的设计稿，把封面风格 11「证物揭晓」改成了你的招牌风格——以后每一张风格 11 封面都是一份「证物档案」：画框、标题、标签、证物框、红章的位置和颜色永远钉死不变，变的只是每集的证物、标题文字和出场人物，发到平台上主页一排拼起来整整齐齐、一眼就认出是你的。具体钉死了这些：整张底色是档案米纸色；最上面一条红色斜纹封条横贯全宽；最下面一条藏青色条，上面「证物档案」四个字居中；标题永远两行、顶部居中、微微倾斜——上面一行小字是表面名（白字黑边），下面一行大一号是真相名（金黄大字、红色描边），中间的等号做成红色爆炸徽章斜贴在正中；证物永远在正中央一个固定大小的方框里、藏青描边、超写实特写；证物左边一张灰标签写表面名、右边一张红标签写真实名；人物还是分列证物左右两侧当证人，脸和造型跟你的资产图一模一样、绝不改，这条老规矩一个字没动；右下角固定盖一枚红章，字固定就是「已验真」三个字。全套只用 5 个颜色，提示词里写死了不许生图模型自己换色、换底色、挪标题位置，标题和标签的字也必须逐字准确、不许改字漏字。其他 5 款风格一个字没动，你的项目、封面草稿、生成记录也都没动。风格 11 的参照图还是空的——等你亲手用新版生成第一张封面、看着满意了，把它发我，我再设成参照图。真机等你亲验：打开任意项目的封面页，风格选到风格 11，看规则和模板是不是这套新版式；然后亲手生成一张（会计费），核对画框、标题、双标签、红章是不是都在说好的位置上。",
+    features: "封面风格 11「证物揭晓」按批准设计稿改成独一无二的招牌风格（v5.99，用户 2026-11-12 审过设计稿《封面风格11-独一无二设计稿.html》后亲口批准动手；只动服务端共享模块 server/src/coverstyles.ts 的 evidence_reveal 一款 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无动作变更、无客户端页面变更；NO real image generation submitted）：【核心理念】每张封面都是一份「证物档案」——画框、标题格式、标签、证物框、红章的位置与配色永远不变，只换证物、标题文字与出场人物，主页拼图整齐统一。【改了哪些定义字段】EVIDENCE_REVEAL_TRAITS 整段重写（6 条主特点：固定画框米纸底+红封条+藏青「证物档案」底条 / 揭晓式标题两行微倾 -2 度·上行表面名白字黑边小字·下行真相名金黄渐变大一号红描边·「=」红色爆炸徽章白描边斜贴正中 / 双标签灰左红右位置大小颜色钉死 / 证物居中固定方框藏青描边超写实特写·框内主色随证物 / 人物两侧当证人左右对称·加强版资产图口径 / 右下角「已验真」红章 + 配色钉死 5 色）+ 适用条件条（反转揭晓或价格/价值错位；不适合纯对话梗、无反转日常梗、回忆合集）；EVIDENCE_REVEAL_RULES_ZH / RULES_EN 整段重写为新版模板（【画框】【标题】含位置与两行风格、【证物】【表面/真相双标签】【人物站位】【红章】【配色钉死】/ 英文 【Frame】【Title】【Evidence】【Surface / Truth labels】【Character positions】【Red stamp】【Locked palette】），5 个色值 #F5EDDC / #C0392B / #1F2A44 / #F7C948 / #E8E0CC 在中英文模板与 palette 里逐个写死，并写明不许换色、换底色、换标题位置，标题与标签文字逐字准确不得改字漏字多字错字；条目字段 shortDesc / analysisSummary / negativeZh / negativeEn / digestZh / digestEn / paletteZh / paletteEn / negativeShortZh / negativeShortEn 全部按新版改写。【逐字保留】label「风格11 · 证物揭晓」、shortNameZh/En、id evidence_reveal、forceLayout slogan 不变；【人物站位】强化句在新模板中逐字保留（与 EVIDENCE_REVEAL_REINFORCE_ZH/EN 同一句），v5.16 提交兜底检测 promptHasEvidenceReinforcement 对新模板中英两版均命中、不叠加。【下线旧元素】旧版的证物编号签（证物 001）、黄色封条、红色撕裂线、标题旁「真相」印章、暗底/牛皮纸底、气泡口径随新版整体替换删除（仅风格 11 定义内）。【不动】其余 5 款风格（1 explosive_vs / 3 collage_memory / 7 multi_panel_story / 8 camps_vs / 9 spectacle_effect_title）定义与模板逐字未动（沙箱改前/改后全字段 JSON 对比一致）；封面页风格下拉仍 6 款；STYLE_REFERENCES 不加风格 11（参照图仍为空，不拿别的风格图冒充，等用户生成第一张新版封面后补）；项目数据、封面草稿、生成记录、人物卡、封面记录 id 43 一字未动。【沙箱证据】构建（含 strict 类型检查）通过；函数级断言全过：新模板中英两版含全部固定元素句（画框/封条/藏青底条/两行标题/爆炸徽章/双标签左右/证物框/红章已验真/配色钉死）与 5 个色值、旧元素清除干净、其余 5 款逐字不变、风格仍 6 款且顺序不变。未提交真实生图，未产生扣费。真机待核：用户亲手生成一张新版风格 11 封面核对版式（画框、标题、标签、红章位置），满意后把这张设为风格 11 的参照图。",
+  },
+  {
+    version: "v5.98",
+    date: "2026-11-12",
+    text: "这一版按你说的，把人物储存库里「人物和服装」的关系打通了。你把人物想成主文件、人物下面的服装想成子文件——现在两个方向都能走。第一个方向：把服装拆出来当独立人物。打开任意一张人物卡的详情，右边每件服装那一行多了一个「拆成独立人物」按钮，点它先弹确认框，框里能改新卡的名字（默认名已经写好：原人物名加上性别、年龄分类，再加「服装几」，拆完一眼认得出是谁的哪套衣服）；确认后，这件服装的图连同它自己的造型一起从原卡移出去、单独成为一张新人物卡——新卡的性别、年龄分类和原卡一样，音色、语气基调也跟着过来，因为本来就是同一个人换了套衣服。拆走的如果是原卡的主体图，下一张图自动接任主体、原卡造型跟着换，和删图时一个规矩；拆走最后一张图，原卡还在、造型文字保留。想把一张卡的服装全拆出去，就逐行点过去，每件一件卡。第二个方向反过来：任意一张人物卡都能加到另一张卡下面当服装。详情窗图片区下方多了一块「把别的人物加进来当服装」：下拉选任意一张其他带图的人物卡，点「加进来」，对方的主体图连同它的造型就挂到这张卡的图片列表最后、当一件服装用；对方那张卡本身还在储存库里、还是独立人物，不受影响。两边共用同一张图的字节，不会把图复制出一份占地方；以后删掉其中一边的这张图，另一边照常显示。这样你既可以把一个人的几套衣服拆成几张卡分别用，也可以把几张卡临时拼到一个人名下当换装。这一版没有提交任何生图，你的项目、剧本和已有卡片数据一个字没动（拆和加都是你亲手点了确认才执行）。真机等你亲验：找一张多件服装的卡，拆一件出去看新卡在不在、造型对不对；再打开另一张卡，把刚拆出的卡加进来当服装，看图片列表最后是不是多了它。",
+    features: "储存库主文件 ⇄ 子文件双向打通（v5.98，用户亲口定：人物 = 主文件、卡上服装图 = 子文件——①把子文件都拉出来做成主文件（服装做成单独的人物）；②任意主文件可添加到另一个主文件里成为子文件；服务端 actions.ts 新增两动作 + 客户端 charbench.tsx + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration——复用 asset_presets / asset_preset_images 既有两表；NO real image/video generation submitted）：【①拆出 promotePresetImage{presetId, imageId, newName}】图片行整体改挂新建卡下当主体图（sortOrder 0、同一 blob 引用不复制字节，删除仍走 deleteBlobIfUnreferenced 引用检查）；新卡字段从原卡全量继承（10 部位中英文字段 / cardRole / category / gender / ageGroup / classUncertain / classNote），cardNote 经 setNoteSegmentValue 把造型段换成这张图自己的造型（图行 look 优先、主体图空 look 时取卡片造型段）、音色 / 语气基调与其余段原样继承，pending 七列不继承（新卡无待确认），fromCard=0；原卡接任口径与 deleteAssetPresetImage 逐字同路：拆走主体图且还有图 → 剩余第一张接任（有自己造型则卡片造型段换它的、没造型则沿用卡片现有造型并回填存成它的造型）、剩余 sortOrder 排紧，拆走唯一图 → cardNote 不动造型文字保留；回 {source, created} 两份 assetPresetOut。【②挂靠 attachPresetAsSubImage{sourcePresetId, targetPresetId}】同卡自挂拒绝（报错明说）；来源卡无图拒绝并点名先加图；来源主体图（images[0]）在目标卡末尾复制一条图片行（blob 共享引用、fileName 沿用来源图文件名、空时用来源卡名），子文件造型 = 来源主体图 look、空回落来源卡备注造型段；来源卡一字不动仍是独立卡；回 {target}。【客户端 charbench】LibraryCard 新增 allPresets prop（CharacterBench 传 presets 全量）；详情悬浮窗图片区每行在「删除这张图」下加「拆成独立人物」按钮（主体行也有）→ ConfirmDialog（主体 / 唯一图 / 普通图三分支文案写清两边后果 + 新卡名 input，默认名 = 原卡名＋（性别年龄分类拼接，如「女成年」）＋「·服装N」，空名回落默认名，maxLength 80）→ promoteMut 成功后左侧造型 setDLook 成服务端回的原卡值、回执写 imgLookNotice（新卡名 + 原卡剩余图数）、invalidate 列表；图片区下方（图片列表与 imgLookNotice 之间）加「把别的人物加进来当服装」区块（shrink-0、独立于滚动列表）：下拉列其他带图卡（名＋图数、排除本卡），无候选给空态文案，本卡无图时区块照常显示；「加进来」走 attachMut，成功清空选择、回执写明加的是对方主体图连同造型且来源卡保留；详情窗顶部说明段补两句新能力口径。【不动】设为主体 / 删图 / 单图造型分析与待确认 / 上传服装图 / 6 项保存 / 发布到剧本 / 一键匹配 / 系统分类 / 备份导入导出（新卡与新图片行随既有全量拼装自动进包）、封面记录 id 43；不自动生图；除用户亲手确认的拆 / 加外不改任何数据。基线升 v5.98（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 储存库详情悬浮窗规则尾补 v5.98 段、DATA-PLAN 本条）。真机待核：正式工作台找一张多图卡逐行拆一件核对新卡（名带分类、造型 = 该图造型、原卡剩余图数与接任）；再把拆出的卡加进另一张卡当服装核对列表末尾新行与造型；删掉挂靠行后来源卡图仍在。",
+  },
+  {
+    version: "v5.97",
+    date: "2026-11-12",
+    text: "这一版按你说的换了个思路，专治「带参考图点生成就卡在传图那一步」。以前参考图要先传到一家公开图床（uguu.se）换个链接再交给 Geeknow，那家图床这会儿又慢又不稳，传一张图都能超时，上一版把步骤拆开也没治本——慢的是图床本身。现在改成：参考图先走 Geeknow 自家上传——图直接传进 Geeknow 自家的空间，拿它自家的链接去生成，不再求第三方图床。自家上传万一走不通（比如它临时抽风），机器会自动改走原来的公开图床再试一次，你只点一次生成、不用自己反复点重试；两条路都走不通才会报错，报错里会写清两条路各卡在哪、并且明说这次还没提交、任务没建、不会计费。生成成功后，页面上会亮一行字写明这次实际走的是哪条路（Geeknow 自家上传，还是公开图床回退），你一眼就能核对。有一点要说清：走公开图床回退时，老提醒照旧成立——拿到链接的人能打开那张图、短期后自动删除；走自家上传时图只进 Geeknow 自家空间，没有这回事。封面生成走同一条通道，一键三比例还是只传一次、三个比例共用。参考图先压成小副本再传的老规矩没变（原图不动），提交绝不自动重试的老规矩也没变。这次在沙箱里用一张无关的测试图实测过新通道：向 Geeknow 申请上传地址约半秒到一秒、传图约一秒、拿到的自家链接能原样把图下载回来，整条是通的；但你的真机第一次带图生成才算最后验收——点一次后看页面亮的那行路线字，写的是不是「Geeknow 自家上传」。这一版没有替你提交任何真实生图，你的项目、剧本、台词一个字没动。",
+    features: "参考图托管换主路线：Geeknow 自家上传优先 + uguu.se 自动回退（v5.97，用户截图报障「参考图传到图床（uguu.se）超时」+ 点名「换一个思路」；服务端 privileged.ts + actions.ts + 客户端 imagegen.tsx / coverbench.tsx + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted——presign 探测与全链路实测只用合成测试图）：【根因】v5.95 只拆步没换通道，托管仍走 uguu.se 一家，其慢/不稳是真机仍失败的根因；主代理实测其他匿名图床同样不可靠。【presign 合同（沙箱带凭证实测）】POST {apiBase}/api/upload/presign，请求体 {file_name:「cover-ref.jpg」, content_type:「image/jpeg」}（空体也能过、file_name 决定 object_key 后缀）；返回 data{upload_url（R2 预签名）, public_url（https://r2.geeknow.ai/…）, method:「PUT」, content_type, object_key, expires_in:900}；PUT 字节时只带 Content-Type（与签名一致）+ Connection: close、不带鉴权头；实测 presign 0.5–1.1 秒、PUT 0.8–1.4 秒（urllib 首连冷启动曾有 5–20 秒抖动、热后稳定约 1 秒）、GET public_url 200 且字节与测试图逐字一致。【特权层改法】新 upload_ref_geeknow（presign 钳 4 秒 / PUT 钳 6 秒）；host_reference_images 改三元组返回 (urls, err, route) 并逐张双路线：primary 截止内先自家上传、失败立刻用整步剩余时间走 uguu（原降采样阶梯与 uguu 上传代码逐字保留）；route = geeknow / uguu / mixed 按逐张实际路线汇总；两条都败时 error 合并写清两条各败在哪、stage 取回退路线口径（host_timeout / host_error）。hostrefs 模式 primary 段 = min(16, 6+2×图数) 秒、整步仍 24 秒；submit 内联兜底 primary 段 7 秒、托管段仍 14 秒，两段相加不超各自预算。【鉴权打通】特权契约 geeknowHostReferenceImages 新增可选 apiKey / apiBase，TS 处理器透传；动作 hostGeeknowReferenceImages 同步加入参并透传（生效顺序与 submit 一致、由客户端解析后传入：生图页 imgCfgRef 总设置口径、封面页 submitCfgRef 单次>总设置>凭证口径）；presign 复用 effective_base + apply_auth（含白名单）：自定义线路不在白名单且没自填 Key 时自家路线标 unavailable、直接回退不报错。【提交契约】geeknowSubmitImageTask 回执新增 hostRoute（内联兜底路径实际路线），refImageUrls 口径不变。【客户端】imagegen / coverbench 托管调用带同一套 apiKey/apiBase；托管成功后亮一行路线说明（自家上传 / 公开图床回退 / 混合，写明回退时「拿到链接的人能打开」只对回退成立）；两页参考图区说明文案改双路线大白话（先自家上传、走不通才公开图床）；托管步 catch 与动作层报错去掉只写 uguu.se 的旧文案、改双路线合并口径。【不动】降采样阶梯（1024/q85 起、目标 ≤2.5MB）、24 秒整步截止、提交绝不自动重试、托管失败绝不静默丢图、封面三比例只托管一次共用、无参考图纯文字提交、预检、轮询、锁脸句、记录溯源、封面记录 id 43、全部项目与剧本数据。基线升 v5.97（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 带参考图提交规则尾补 v5.97 口径）。真机待核：生图面板带 1 张参考图点一次生成——应一次点通、页面亮「这次参考图走的是 Geeknow 自家上传」；封面带图生成与一键三比例各一次。",
+  },
+  {
+    version: "v5.96",
+    date: "2026-11-12",
+    text: "这一版按你定的给提示词检查页提速了。以前长提示词按约 1200 字切成小段后，是一段查完才查下一段，五千多字要查 5 次、时间一段段累加；现在改成最多 3 段同时查，哪段先查完就立刻补上下一段，总时间能省下一大半。检查结果和以前完全一样：问题清单、改动清单、改好的全文都还是按原文段落的顺序排，两条硬规矩（台词意思不改、只许谐音换字；人物造型不改、只换造型里夹带的 IP 名字）和 AI 自检标记都没变；某一段要是没查成，还是先单独重试一次，再不行就如实在结果上方标出来、那一段在改好的提示词里保持原样，不会拖垮整篇。检查中的进度显示也改了：按钮上和右边结果框里都会显示「已查完 x / 共 y 段」，一眼能看到查到哪了。切段的规则（约 1200 字一段）、2 万字上限、粘贴时本机先扫一遍已知风险词，都和以前一样。这一版没有提交任何生图，你的项目数据一个字没动。真机等你亲验：去提示词检查页贴一篇长提示词（比如上次那篇五千多字的）点检查，看看是不是比以前明显快了、进度数字对不对、结果和以前一样完整。",
+    features: "提示词检查分段并行提速（v5.96，用户 2026-11-12 亲口定提速：提示词检查查长提示词太慢；纯客户端 promptcheck.tsx + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【并发改法】runCheck 的逐段串行循环改为并发池：并发上限 3 个 worker 抢段执行，某段查完立刻补下一段（nextSeg 游标 + Promise.all），不再一段查完才轮下一段；每段逻辑与 v5.93 逐字一致——一段调一次 checkPromptCopyright、本机命中词按该段过滤后随请求带 knownHits、失败（抛错或 ok:false）单独重试一次、仍失败该段记 null（未查完）。【合并口径不变】全部段跑完后仍按原文段序合并：issues / changes 按段拼接（上限 30 / 40 不变）、summary 去重拼接、fixedText 按原文偏移把各段改好文本与段间原文拼回整篇（未查完段原文占位）、dialogueIntact / lookIntact 取各段与、未查完段数写进结果 note 红字如实告知；全部段失败才进失败态，超时大白话文案不变。【进度文案】progress 状态由 {current, total} 改 {done, total}（已完成段数，含查完与失败收尾的段）：开始检查按钮多段时显示「正在检查，已查完 x / 共 y 段…」，右框检查中显示「已查完 x / 共 y 段，逐处找风险点…」，按钮下说明与右框小字同步改口径（长提示词切成小段、最多 3 段同时查）；单段时文案与以前一致。【不动】切段规则（splitSegments 约 1200 字、单行超长硬切、偏移记录）、两条硬性规则与服务端 checkPromptCopyright 单段动作一字未动、AI 自检标记、本机替换表预扫、复制改好的提示词与放回左框、20000 字上限、全部项目与剧本数据、封面记录 id 43、生图禁令。基线升 v5.96（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 提示词检查条目补并行口径）。真机待核：提示词检查页贴一篇长提示词核对速度与结果（进度显示已完成段数、结果与以前一致）。",
+  },
+  {
+    version: "v5.95",
+    date: "2026-11-12",
+    text: "这一版修好了「点生成图片总是失败、报一串英文超时错」的问题。原因是出在提交的走法上：以前点一次生成，机器要在同一次调用里连着做两件事——先把参考图一张一张传到图床（uguu.se）换链接，再把提示词提交给 Geeknow；图床传一张图慢的时候能等上 30 秒，Geeknow 那边再等一等，两件加起来就超过了系统给一次调用的 30 秒上限，调用被直接掐断，所以哪怕只带 1 张参考图也照样失败，而且被掐断时你根本不知道任务到底建没建，重点一次又怕重复扣费。现在把两件事拆开了：点生成后，先单独走一步把参考图传到图床换好链接（这一步自己有自己的时间预算，传图慢也只慢这一步），换好之后再提交——提交那一步只剩把提示词和现成的链接发给 Geeknow 一件事，几秒就能拿到任务号，不会再被超时掐断。封面生成走的是同一条提交通道，这次一起修了；一键三比例的参考图只传一次图床、三个比例共用同一份链接，不重复传。报错也改清楚了：万一图床这会儿太慢，会明说是图床那一步超时、这次还没轮到提交、任务没建、不会计费，可以直接再点一次；万一是提交发出去后等回复超时，会明说这次任务到底建没建没法确认、先别马上重点（防重复计费）、等一两分钟先看记录里有没有新任务冒出来；要是根本没连上 Geeknow，会明说请求没送达、可以直接重试。Key 不对的那类报错还是老样子、和超时分得清清楚楚。提交绝不自动重试这条老规矩没变（自动重试等于可能重复计费），只有你亲手再点才再提交。这次在沙箱里实测过：图床那一步确实是慢的那一步（测试网络下传一张不大的图都要好几秒、还时有传一半断掉的情况），拆开之后这一步就算超时也会在十几秒内干脆地报清原因，不再拖垮整个提交。这一版没有提交任何真实生图。真机等你亲验：打开生图面板，带 1 张参考图点一次生成——应能正常拿到任务并开始出图，不再报那串英文超时错；封面页带参考图生成、一键三比例也请各试一次。",
+    features: "修生图提交总是超时（v5.95，用户报障「提交生成图片总是出现【生图提交失败：web artifact daemon request exceeded 30000ms wall-clock budget】」，取件员附图核查：生图面板只带 1 张参考图（人物卡「D」）、提示词 965 字也照样超时；服务端 privileged.ts + actions.ts + 客户端 imagegen.tsx / coverbench.tsx + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【根因（代码实证）】submitGeeknowImageTask 整段跑在守护进程 30 秒预算里，特权层 submit 分支串行两步——①host_reference_images 逐张传 uguu.se（每张 timeout=30 秒）②Geeknow 异步提交（sub_timeout 钳 25 秒只管第②步）；两步相加必超 30 秒被掐断，被掐断后客户端不知道任务建没建、重点可能重复计费。【实测结论】沙箱网络下实测：uguu.se 上传是慢且不稳的那一步——照片级 30KB 测试图一次 IncompleteRead 失败、一次 6.13 秒才成，724KB 噪声图 60 秒没传完（写超时）；Geeknow 端只读预检通道正常（authOk、HTTP 503 model_not_found 如设计）。生产网络数值会不同，但「托管 30 秒 + 提交 25 秒串行 > 30 秒预算」的结构性超预算与网络无关。【拆步】新特权契约 geeknowHostReferenceImages（Python mode=hostrefs）+ 新动作 hostGeeknowReferenceImages（入参同提交的参考图联合类型、服务端 resolveSubmitReferenceImages 拼回归一）：只换链接不建任务不计费，整步共用 24 秒截止、逐张超时钳 min(15, 剩余)；失败回 stage（host_timeout / host_error）+ 逐张点名的大白话，动作层再补「还没提交、不会计费、可直接重试」并校验链接数与图数一致（少一张整步失败、防静默丢图）；链接只随回执返回不落库。submitGeeknowImageTask 与特权契约新增 referenceImageUrls（≤16、https 过滤）：带链接时动作跳过参考图解析、特权层直接用作 payload.image；提交回执新增 stage 字段。【提交步兜底】特权层 submit 分支改共享截止（开始后 24 秒）：旧内联图路径托管只准用前 14 秒、余量全留提交，超时钳 min(请求超时, 25, 剩余) 且剩余 <3 秒直接按 host_timeout 停（没提交不计费）；异常分阶段——等回复超时 stage=submit_timeout（文案明说建没建没法确认、先核对记录/控制台再重试、防重复计费）、URLError 连接层失败 stage=submit_unreachable（明说没送达、确定没建、可直接重试）、HTTPError 保留原文与 authFailed（401/403 stage=auth，鉴权区分不变）；动作层 executePrivileged 被守护进程掐断的兜底文案改大白话「建没建不确定」版（stage=daemon_timeout），不再甩英文原文。【客户端接线】imagegen submitAndRecord：preparedRefs 非空先调 hostGeeknowReferenceImages（抛错按网关超时/其他分开写托管步文案、!ok 直接亮服务端原文并停），成功后 submit 只带 referenceImageUrls、referenceImages 传 []；回执 refImageUrls 溯源口径不变。coverbench：PreparedCoverRefs 加 hostedUrls 缓存位 + hostPreparedRefs 共用函数，submitCover 在预检后、提交前托管（失败 reportSubmitError + fail），continueBatchAfterRefs 在三比例 Promise.all 前只托管一次共用；提交只带 prepared.hostedUrls。【不自动重试】提交与托管都绝不自动重试（v3.60 规则不变），只读轮询不受影响；同步 generate 契约、轮询、预检一字未动。【不动】参考图同意与降级口径、锁脸句、提示词同步与记录溯源、封面记录 id 43、全部存量数据。基线升 v5.95（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + v4.22 带参考图提交规则尾补 v5.95 口径）。【沙箱证据】见本版回执：内嵌 Python py_compile 通过；抽出脚本实跑 hostrefs（合成图、真实图床）15.4 秒内回 stage=host_timeout 的分阶段报错（沙箱网络慢，未传成）；构建后沙箱动作级断言（托管动作分阶段报错不甩守护进程英文错、假 Key 提交仍报鉴权、带链接+假 Key 走鉴权失败证明链接路径已接通）。真机待核：生图面板带 1 张参考图点生成能拿到任务号、封面带图生成与一键三比例各一次。",
+  },
+  {
+    version: "v5.94",
+    date: "2026-11-12",
+    text: "这一版按你定的改了一件事：没有提取人物资产图的人，不再出现在角色映射里。起因是你截图里的项目 44《这个村子离大谱》——C、F、G 三个人物卡已经删掉了，但他们的台词还在分镜里，于是每个镜头的角色映射还按出场列着他们、写「C=造型：未填写」这种占位。现在改成：角色映射只列真正提取了人物资产图的人（人物卡上有图才算；卡删了、或者卡还在但没图，都不算），没图的人整条不出现、不再写「未填写」占位；某个镜头过滤后一个人都不剩时，整个「角色映射」块就不出现（和场景、道具没数据时整块不出现的老口径一致）。覆盖的出口是同一套、不许两套：分镜页 Seedance 各版与逐镜头复制文本、Markdown 导出、AI 视频清单导出、分镜+人物表导出、逐镜头提示词包，还有全局规范里的角色映射行、音色行（资产说明里的人数也只数有图的人）；每个镜头后面的人物称呼对照表也同步只列留下的人。（H3 两版是另一套主体写法、跟附图清单同源，这次按口径没动它。）分镜页顶部的全局规范显示同步同口径（音色那几个修改输入框是改数据的入口、不是映射，照旧逐人都在）。没动的东西说清楚：台词一个字没动，人物卡、人物表、审查页的「待确认人物」提示都没动，也没删任何数据——C、F、G 的台词还在，该由谁说话还是谁说话（说话人锁定行、附图清单这些内部判定照旧认他们），只是不再把没图的人写进给视频模型看的角色映射正文。AI 解剖结果页不受影响：那边的临时人物没有人物卡，这条过滤不会在那边启用，解剖分镜表里的人物照旧全列。项目 39 那种全员有图的项目，映射和以前逐字一样。这一版没有提交任何生图或视频生成。真机等你亲验：打开项目 44 分镜页，任意镜头复制一段——角色映射里应只剩 A、B、D、H（以及该镜出场的 E、I），C、F、G 不再出现、也没有「未填写」占位；再打开项目 39 复制一镜，应与以前逐字一致。",
+    features: "角色映射只列已提取人物资产图的人物（v5.94，用户点名「没有提取的人物资产图请不要出现在角色映射当中」+ 取件员附图核查：项目 44 分镜页角色映射里 C/F/G 三行写「造型：未填写」——三人人物卡已于 2026-11-12 删除、只留 A/B/D/E/H/I 六卡，但台词还在分镜里、映射仍按出场列出；纯客户端 scriptlib.ts + App.tsx 页面版全局规范 + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无数据变更；NO real image/video generation submitted）：【判定】scriptlib 新增 mappingImageFilterEnabled（上下文人物带人物卡 id 才启用过滤）与 visibleMappingCharacters（启用时只留 resolveCharacterInfo 已算的 hasImage 为真者——人物卡 imageUrl 非空才为真，卡被删或卡在无图都是假）；没图人物整条不出现、不写「造型：未填写」占位。【覆盖出口（同一口径）】lensMappingBlocks 与页面版 lensMappingLines 的角色块（分镜页显示、逐镜头一键复制、四档 buildSingleGroupTextForModel 经 lensCharacterMappingLines / mappingLinesForModel、镜头包正文同源）——条目只列过滤后人物、人物称呼对照表行同步只列留下的人（inLens 改取 visChars）；buildMarkdown（全部导出 + 分镜+人物表导出 buildStoryboardExportMarkdown 同源）、buildGenChecklist 经 lensCharacterMappingLines 自动同口径；buildLensPromptPack 每镜人物行改走 visChars，过滤后为空时「人物映射：」行整行不出现、可粘贴提示词的人物段同步省去；globalSpecLines 的资产说明人数只计有图人物、角色映射行与音色行只列有图人物、无有效人物时两行整行不出现（与 v4.85 场景映射行同口径）；App.tsx 分镜页全局规范块（globalSpecData 直渲染）同步——资产说明计数与角色映射行走 specChars、过滤后为空整行不渲染，音色只读展示走 specChars，音色编辑输入（onUpdateVoice）是数据修改入口、非映射正文，逐人全列不动。【整块不出现】过滤后某镜头一人不剩时整个「角色映射：」块不出现（与 v4.85 场景/道具同口径）；过滤未启用时保持旧口径（无人出场仍写 未填写）。【例外守卫】AI 解剖临时上下文（analysisbench mappingCtxOf）的人物没有人物卡 id、也没有 imageUrl → 过滤不启用、映射保持原样全列，解剖结果页分镜表与解剖 Markdown、解剖页 globalSpecLines 调用一字不变。【不动】lensMappings 本身（出场判定、描述词替换、附图清单 lensCastEntries、参考图绑定行、切镜核对、说话人锁定行）、H3 两版的主体定义（走 lensCastEntries 附图清单同源、按派工口径不在本版出口清单内）、台词、人物卡、人物表、审查页「待确认人物」提示、collectMappingGaps 待补充提示、别名推导与人物称呼对照（别名）编辑面板、封面记录 id 43 与全部存量数据。【删除清单】仅删映射正文里的无图人物条目与随之而来的「未填写」占位呈现（呈现层过滤、数据零删除），其余零删除。基线升 v5.94（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 分镜人物锁定规则尾补 v5.94 口径）。【沙箱证据】见本版回执：构建（含 strict 类型检查）通过；bun 函数级断言以沙箱项目 44 / 39 真实数据 + buildMappingContext 同口径 ctx 直调上线函数（C/F/G 从全部出口消失、A/B/D/H/E/I 逐字不变、项目 39 逐字不变、解剖临时上下文不变、合成无图卡被滤掉）。真机待核：项目 44 分镜页逐镜复制核对 C/F/G 消失、项目 39 逐字不变。",
+  },
+  {
+    version: "v5.93",
+    date: "2026-11-12",
+    text: "这一版做了两件事。第一，把分镜页的「防版权拦截」开关删掉了：以前分镜页提示词区上方有一排开关和「管理替换词」按钮，打开后导出和复制的提示词会自动换词、末尾加原创声明；现在有了专门的「提示词检查」页，这个开关就不需要了，已经连同它在导出上的全部作用一起删干净——分镜页 H3 / Seedance 两个版本区的显示、逐镜头复制、「复制全部」，还有 AI 视频清单导出、分镜文档的下载和复制全文，从这一版起全部按原文，不再自动换词、不再在末尾加原创声明。要查版权风险，就把提示词粘到顶栏「提示词检查」页里查。有一点要如实说明：你以前在「管理替换词」里自己加过的词还存在这台设备上，提示词检查页粘贴时的本机预扫还会照常用它们标出风险词；但加词的入口随开关一起没了，以后没法再往里加新词了——真遇到新的会被拦的词，粘到检查页里让 AI 通读检查就行。第二，修好了提示词检查查长提示词时超时的问题：以前粘一篇五千多字的提示词点检查，右边只会报一串英文错误、什么结果都没有；原因是整篇检查挤在一次调用里、网关等不了那么久就把调用掐断了。现在改成一段一段查：页面在本机先把长提示词按约 1200 字切成小段，一段查一次、查完一段再查下一段，检查中会显示「正在检查第 x / y 段」让你知道进度；万一某一段没查成，也不会拖垮整篇——其余段照常出结果，没查完的段数会如实在结果上方红字写清，那一段在改好的提示词里保持原样。超时报错也不再甩英文原文了，会用大白话告诉你 AI 那边这会儿比较慢、可以过一会儿再点一次。五千字以上的长提示词现在应该能一次查完了。这一版没有提交任何生图或视频生成。真机等你亲验：打开任一项目分镜页，H3 / Seedance 区上方应已没有开关条，复制任意一镜应为原文（比如项目 43 镜头 7 里应还是「无限手套」原词、末尾没有原创声明）；再去提示词检查页粘一篇五千字以上的长提示词点检查，应能看到逐段进度并一次查完出结果。",
+    features: "删除分镜页防版权拦截开关 + 修提示词检查长文超时（v5.93，用户 2026-11-12 亲口定：有了「提示词检查」页后，把分镜页的「防版权拦截」开关和「管理替换词」功能删除；并报障提示词检查查 5357 字提示词报「Gateway request timed out: spaces.vm.post」无结果；客户端 App.tsx + promptcheck.tsx + 服务端 actions.ts checkPromptCopyright 改单段动作 + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【删除范围】App.tsx 删除：ScriptDocument 里 CopyrightGuardControl 开关条渲染（含「管理替换词」面板）、useCopyrightGuard 状态与 guardLens 替换层（h3Shown / sdShown 两层 useMemo 整段删除，H3 / Seedance 逐镜显示与逐镜头复制改回 h3Lenses / sdLenses 原文）、两处「复制全部」由 guard.apply(拼全文).text 改回 buildH3FullText / buildSeedanceFullText 原文直拼、每张镜头卡下方的替换清单行（guard.enabled && formatGuardHits）两处删除；StepThree 导出三处 guardTextNow 删除——AI 视频清单导出（buildGenChecklist）、分镜文档 Markdown 下载、复制分镜文档全文，全部按原文导出、不再替换、不再末尾加原创声明；App.tsx 的 copyrightguard import（CopyrightGuardControl / formatGuardHits / guardTextNow / useCopyrightGuard / CopyrightGuardHit）整段删除。【保留不动】copyrightguard.tsx 模块本身一字未动（内置替换表、COPYRIGHT_GUARD_STATEMENT 原创声明、loadCopyrightGuardCustom 全部保留）：提示词检查页的本机预扫与改好提示词末尾的原创声明继续用它；本机已存的自定义替换词（localStorage copyrightGuard.custom.v1）不删、检查页预扫照旧用，但「管理替换词」入口随开关删除、以后加不了新自定义词（本条更新日志 text 已如实说明）；服务端 checkPromptCopyright 兜底文案「你分镜页的防版权替换表」改为「防版权替换表（提示词检查页粘贴时本机预扫用的那张）」。【检查超时根因】旧 checkPromptCopyright 在单次动作调用里串行跑多段推理（5357 字约 5 段、每段 90 秒封顶），整次调用时长超过网关等待上限被掐断（Gateway request timed out），服务端分段救不了——必须把调用本身拆开。【新调用方式】照工作台解剖分批的老路子：客户端 promptcheck.tsx 按行切段（每段约 1200 字、单行超长按字数硬切、记录每段在原文中的起止偏移），一段调一次 checkPromptCopyright（服务端改单段动作：只查入参这一段、只按这一段产出 issues / changes / 本段 fixedText 与两枚自检，确定性兜底与硬性规则口径不变），逐段串行；检查中右框显示真实进度「正在检查第 x / y 段」；每段失败（抛错或 ok:false）自动单独重试一次，仍失败记为未查完段、不拖垮整单；客户端合并——issues / changes 按段拼接（上限仍 30 / 40）、summary 去重拼接、fixedText 按原文偏移把各段改好文本与段间原文拼回整篇（未查完段用原文占位）、dialogueIntact / lookIntact 取各段与、没查完段数写进结果 note 红字如实告知；全部段都失败才进失败态。【报错大白话】客户端对网关超时（isGatewayTimeoutText 命中 res.error 或抛出的错误经 describeThrownError 后命中超时口径）统一改显「这次检查超时了，AI 那边这会儿比较慢，可以过一会儿再点一次，或把提示词拆成两段分别检查」，不再把 Gateway request timed out 英文原文甩给用户；服务端单段动作自身的超时兜底文案同步保留大白话口径。【不动】提示词检查页布局与结果三段、两条硬性规则与 AI 自检标记、本机预扫、全部项目与剧本数据、封面记录 id 43、生图禁令、其他导出（剧本格式01 / 台词本 / SRT / 逐镜头提示词包本就不走开关、未动）。基线升 v5.93（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 防版权拦截开关规则改写为已下线 + 提示词检查条目补分段调用口径）。真机待核：分镜页 H3/Seedance 区上方无开关条、逐镜复制与复制全部为原文、导出三处无替换无声明；提示词检查页粘 5000+ 字长提示词能看到逐段进度并一次查完。",
+  },
+  {
+    version: "v5.92",
+    date: "2026-11-11",
+    text: "这一版按你定的，把提示词的检查方式改成点进页面来查：顶栏多了一个「提示词检查」页，点进去就是左右两个框。把要检查的提示词粘到左框，点「开始检查」，右边会逐处告诉你：哪一句有问题、在哪儿、是什么版权或商标、为什么会被豆包拦、应该怎么改；下面给一份改好的完整提示词，一键复制就能拿去用，到底改了哪几处也逐条列出来给你对账。检查时有两条硬规矩写死在检查里，页面上方也常驻标着：一是台词的意思不许改——台词里有风险词只能换同音字（谐音），意思和读出来的效果不变，不许删台词、不许换说法；二是人物造型不许改——发型、穿搭这些描写原样保留，造型里夹带的 IP 名字只换名字本身（比如「钢铁侠铠甲」换成说同一个样子的通用说法），人物看起来还是同一个人。结果下面还有两枚 AI 自检标记（台词意思未改 / 人物造型未改），哪一枚没过会红字提醒你先人工核对、别直接用。另外，粘贴时左框会先用你分镜页那张防版权替换表在本机扫一遍，扫到的已知风险词当场标出来、也会一并交给检查，保证不漏。原来的「防版权拦截」开关和替换表照旧没动：开关继续管分镜导出，这个新页是手动粘贴、手动检查，两边互不影响；检查不保存任何内容，粘贴的文本和结果只在本页里、刷新就没了，也不动任何项目数据。这一版没有提交任何生图或视频生成。真机等你亲验：顶栏点「提示词检查」，把项目 43 镜头 7 的提示词粘进去点检查——右边应逐处指出漫威相关的词并给出改好的版本，台词和人物的造型描写应原样保留、自检两枚都显示未改。",
+    features: "新增「提示词检查」页：点击进入式查违规（v5.92，用户亲口定：把提示词的检查方式改成点击进入页面的方式防版权拦截；页面左右框、粘贴后查询违规；查完要告诉用户哪里违规哪里侵权、同时给解决方案和解决出的提示词；硬性规则 = 台词意思不可以改（允许谐音代替）、人物造型不允许更改；客户端新增 promptcheck.tsx + App.tsx 顶栏接线（Bench 加 promptcheck、第五个台切换按钮、窗口标签与渲染区）+ 服务端新动作 checkPromptCopyright + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、不存任何数据（粘贴文本与结果只在页面内存）；NO real image/video generation submitted）：【入口与布局】顶栏台切换加第五项「提示词检查」（Bench = promptcheck，v5.13 同口径首次切到才挂载、挂载后 hidden 常驻保住粘贴内容与结果）；页面 = 页头（大白话说明 + 两条硬性规则常驻徽章）+ 左右两框（桌面 lg 两列、手机上下堆叠）：左框 = 原始提示词 textarea（20000 字上限 + 字数、粘贴 / 清空按钮）+ 本机词表即时扫描区 + 「开始检查」主按钮；右框 = 检查结果（空态 / 检查中进度 / 失败红字带真实原因与重试 / 结果三段）。【本机即时扫描】打字时用 copyrightguard 同一份合并表（自定义优先 + 内置 9 条）纯本机 includes 扫描，命中以红字胶囊逐词列出（from → to，删词写作（删掉），超 12 处折行计数），不联网不调 AI；点检查时命中清单作为 knownHits 随请求发给服务端。【服务端 checkPromptCopyright】{text（trim、1–20000 字）, knownHits≤40} → ctx.inference 分段逐段通读（整段一次通读在稍长文本上生成太慢、实测时通时断，改按行切成每段约 1200 字以内、单段 90 秒封顶、段数上限 10，逐段查完再合并；某段失败不拖垮整单——其余段照常出结果、没查完的段数写进结果 note 在页面红字告知、改好的提示词里没查完的部分保持原样；全部段都失败才回大白话超时提示、页面带重试入口）：检查指令写死五类风险（影视动漫游戏 IP 名 / 角色名 / 专有道具与招式、品牌商标、真实人物姓名、照搬的知名台词歌词广告语、其他明确指向受保护作品或人物的说法）与三组硬性规则（①台词意思不许改：语义信息语气全一致、风险词只许同音近音谐音替换、不许删台词换说法增减信息；②造型不许改：外貌发型发色服装配饰体型描写逐字保留、颜色款式材质不动，只许把造型句夹带的 IP 名称换成描述同一外观的通用词且 changes 须注明「造型句里的 IP 名称替换、外观未动」；③其余内容逐字保留、不增删不调序、fixedText 不许加原文没有的句子（声明也不加，声明走页面开关）；非台词非造型的风险词换最接近的通用说法、无通用说法的 IP 专有名词可删词保通顺）；出参 = summary 一句话结论 + issues[]（quote 必须原文逐字片段 / location 位置 / kind 五选一 / reason 大白话讲清是什么版权商标与为何被拦 / solution 与 fixedText 实际改法一致）+ changes[]（from / to（删词为空）/ note 分类：台词谐音 / 造型句IP名称 / 普通替换 / 删除）+ fixedText 由服务端按 changes 逐处替换原文确定性拼出（模型不重印全文：输出更短、检查更快、改动清单与成品天然一致；无改动时与原文逐字相同）+ dialogueIntact / lookIntact 两枚 AI 自检布尔。【服务端确定性兜底】①AI 报的 issues / changes 片段必须在原文里逐字找得到，找不到的（模型改写或拼接的假片段）直接丢弃；②knownHits 服务端再验一遍（原文确含才算；命中清单不发给模型——表里与台词硬规则冲突的条目会让模型反复权衡把检查拖到超时，覆盖改由这层确定性兜底保证），AI 漏报的强制补进 issues（kind = 已知风险词、reason 点明在替换表里、solution 按表给），AI 完全没碰过的非删词类命中由服务端在 fixedText 里按表 split/join 补改并补记 changes（note = 按你的防版权替换表替换）；删词类只点名不自动删（防误删台词信息、违反台词硬规则），AI 已按硬规则处理过的以 AI 改法为准、不覆盖；③fixedText 为空回落原文；issues ≤30、changes ≤40 截断；推理失败回 ok:false + genErrorMessage（「生成失败」改写为「检查失败」）原文，不假装查过。【右框结果三段】结论行（共查出 N 处风险 / 没查出会被拦的风险点 + summary）→ 逐处问题卡（类型徽章 + 位置 + 「原文片段」+ 问题：… + 解决办法：…）→ 硬性规则自检两枚 chip-check（台词意思未改 ✓ / 人物造型未改 ✓，任一 false 转红 + 红字提醒先人工核对别直接用）→ 改动清单（from 红 → to 绿（删词写作（删掉））+ note 小字）→ 改好的提示词只读框 + 「末尾附原创声明」开关（默认开，复用 COPYRIGHT_GUARD_STATEMENT 常量、已含声明不重复加）+ 「复制改好的提示词」（scriptlib copyText）+「放到左框再检查一遍」（放回的是不带声明的 fixedText）；左框在检查后被改动时结果区顶部红字提醒「下面是上一次检查的结果」（checkedText 对照）。【不动】分镜页防版权拦截开关与内置 / 自定义替换表（本页只读复用同一份表做即时扫描与 knownHits，不写回）、封面页、全部项目与剧本数据、封面记录 id 43、生图禁令、导出链路；本页不落库、无新表。基线升 v5.92（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + workbenches 加第五台条目）。真机待核：顶栏点「提示词检查」能打开；粘项目 43 镜头 7 提示词——左框即时扫应先标出替换表命中的词，点检查后右框逐处列出漫威相关风险与改法、改好的提示词里台词与造型描写原样、自检两枚皆绿；复制后粘去豆包试生成看还拦不拦（须用户亲手生成）。",
+  },
+  {
+    version: "v5.91",
+    date: "2026-11-11",
+    text: "这一版给上一版（问题 #23）新改的提示词版本补上一条你追加的规矩：同一个动作没做完，别切新镜头。落到三个「重新分组」的版本上（按剧情版是你确认好的分镜，不动）：第一，MiniMax H3「每镜 10–15 秒版」：切点要是正赶上一个动作做到一半，就不切、等动作做完再切，所以个别镜头可能到 18 秒左右；一个动作实在比 18 秒还长，才在节拍与节拍之间切开（节拍本身还是不拆）。第二，Seedance「每镜 20–30 秒版」和「强制 30 秒版」：装镜头时同一个动作的几拍整段装进同一镜，整段装不下就整段挪到下一镜——强制 30 秒版宁可这一镜多留几秒纯白，也不把动作拆到两镜里；动作本身超过 30 秒时才在节拍之间拆。第三，这三个版本的每段提示词里都写死了一句给视频模型看的切镜规则：同一个动作没有做完不要切到下一个镜头，必须等动作完整做完、落到结束姿态之后再切。怎么认「同一个动作没做完」：同一段、同一个场景里，下一拍接着上一拍的动作往下做——两拍都没台词的无声动作相连、画面里写了「继续 / 接着」这类续接词、或者画面是「边…边…」（一个动作还在进行中），都算没做完；场景转场、反转、人物出入场这种地方是新动作的开始，照常能切。只改这里的分组和提示词，不动已确认的分镜、剧本和台词，你的项目数据一个字没动。这一版没有提交任何生图或视频生成。真机等你亲验：打开任一项目分镜页，H3 切到「每镜 10–15 秒版」、Seedance 切到「每镜 20–30 秒版」或「强制 30 秒版」，展开任意一段提示词看全文——H3 版的「切镜规则」在正文开头（[Shot 1] 之前），Seedance 版在末尾（强制版在纯白留白之前）；再对着节拍看切点，有没有哪一刀正好切在一个动作中间。",
+    features: "重分组版本加「动作没做完不切镜」（v5.91，用户 2026-11-11 问题 #23「111220」追加要求，原话「同一个动作没做完别切新镜头」；纯客户端 scriptlib.ts + App.tsx + monitorbench.tsx + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【动作链判定】scriptlib 新增 beatContinuesAction + actionUnits：下一拍相对上一拍同段（sectionTitle）同场（sceneName）、cutReason 不在强信号集 {场景转场，悬念/反转点，人物出入场，开场节拍}、且命中任一续接证据（两拍均无台词 / 下一拍 visual 命中 ACTION_CONTINUE_RE 继续|接着|紧接着|随后|仍然|仍在|还在|同全景|同机位|同画面 / 下一拍 visual 命中 ACTION_WHILE_RE「边…边…」）→ 同一动作链；actionUnits(flat, splitAboveSec) 把动作链并成一个装组单元（整段同进同出），链长超上限时退回逐拍单元且共用 chainId。【H3 10–15 秒版】h3ShortGroups 改按 actionUnits(flat, 18) 装组：单元边界照旧口径（≥10 秒 + 转折点切 / ≥15 秒兜底切，转折点按单元首拍算），链内边界（超 18 秒链拆出的逐拍单元之间）转折点不切、只认 ≥15 秒兜底切；buildH3ShortVersion 经 buildH3Version/buildH3TextForGroup 新增 opts.actionCutRule 在 detailed_description 开场（风格句 + 场景句之后、[Shot 1] 之前）加一句「切镜规则：同一个动作没有做完不要切到下一个镜头，必须等当前动作完整做完、落到结束姿态之后再切镜。」；按剧情版 buildH3PlotVersion 不传该开关、输出逐字不变。【Seedance 两版】h3DurationGroups 改按 actionUnits(flat, 30) 装组（目标秒数 / 组数口径不变、单元时长代替单拍时长，无链时逐字一致）；seedanceForced30Groups 改按 actionUnits(flat, 30) 装组（链装不进当前镜整段挪下一镜、当前镜 pad 因此变大，pads 计算口径不变）；buildSingleGroupTextForModel 新增 opts.actionCutRule，开启时在 ASSET_PRIORITY_RULE 之后追加 ACTION_CUT_RULE_LINE 常量一行（v5.91 切镜规则定稿句）；buildSeedanceDurationVersion / buildSeedanceForced30Version 强制开启（强制版规则行在纯白留白段之前、留白段仍是全文末段），buildSeedancePlotVersion 不开启、逐字不变；buildH3DurationVersion（已下线兼容导出）随 h3DurationGroups 同步新口径、无规则行。【界面文案】H3 10–15 秒版说明、Seedance 20–30 秒版与强制 30 秒版说明各补动作链口径一句（等动作做完再切 / 整段挪镜宁可多留白 / 超长才在节拍边界切）。【聊天解剖指令】monitorbench DISSECT_CHAT_RULES 第 8 条 H3 第 2 版口径补「同一个动作没做完不切新镜头（切镜等动作做完、动作链整段同镜）」。【不动】按剧情版（H3 + Seedance）分组与文本逐字不变、已确认分镜结构 / 剧本 / 台词原文、人物表与同步通道、视频模型四档格式、封面记录 id 43、生图禁令；不删数据、不自动生图。基线升 v5.91（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + H3 / Seedance 两条功能规则补 v5.91 口径）。【沙箱证据】见本版回执。",
+  },
+  {
+    version: "v5.90",
+    date: "2026-11-11",
+    text: "这一版按你说的改了分镜页两边的提示词版本。第一，MiniMax H3 的第 2 版换了：原来是「每镜 20–30 秒版」，现在改成「每镜 10–15 秒版」——全片节拍按剧情重新并成每镜 10–15 秒，换镜优先落在剧情转折点上：攒够 10 秒后，遇到场景转场、悬念/反转、人物出入场、情绪转折、说话人切换或换段处就切，新镜头从转折点开始；没攒够 10 秒不切，一直没等到转折点、满 15 秒才切。节拍不能拆，所以转折点来得晚时个别镜头可能略超 15 秒、最后一镜可能不足 10 秒，每段标题上都标了实际秒数。H3 还是两版（按剧情版 + 每镜 10–15 秒版）。第二，Seedance 多了第 3 版「强制 30 秒版」：节拍按顺序装进每镜 30 秒，装到下一拍装不下时就停——比如内容只有 27 秒、下一拍是 4 秒、装进来会超 30 秒，这一镜就停在 27 秒，剩下的 3 秒在提示词末尾写成纯白留白（画面纯白、没有人物没有场景没有文字），凑满 30 秒，下一拍从下一镜开始；最后一镜不足 30 秒的同样用纯白补满。镜头卡上会分开标「内容约 X 秒 + 纯白 Y 秒 = 30 秒」。Seedance 现在是三版（按剧情版 / 每镜 20–30 秒版 / 强制 30 秒版），视频模型下拉三版共用、照旧。监控页「发送到聊天解剖」的指令里 H3 第 2 版也同步改成了 10–15 秒版。只改这里的分组和提示词，不动已确认的分镜、剧本和台词，你的项目数据一个字没动。这一版没有提交任何生图或视频生成。真机等你亲验：打开任一项目分镜页，H3 切到「每镜 10–15 秒版」看每段秒数和切点是不是落在转折处；Seedance 切到「强制 30 秒版」，找一段内容不足 30 秒的镜头展开看全文，末尾应该有一段「纯白留白」写清补几秒。",
+    features: "H3 第 2 版改 10–15 秒按转折点切 + Seedance 新增强制 30 秒版（v5.90，用户 2026-11-11 问题 #23（编号 111217）亲口定：H3 第2版改为 10s—15s、根据剧情在转折点换镜时切割；Seedance 增加强制 30s 版、剧情只能到 27s 且下一镜 4s 装不进时最后 3s 留白纯白；改完 H3 仍 2 版、Seedance 3 版；附图未打开、只按文字做；纯客户端 scriptlib.ts + App.tsx + monitorbench.tsx + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【H3 新分组】scriptlib 新增 h3ShortGroups + buildH3ShortVersion：flattenStoryboardBeats 摊平后逐拍累积，转折点 = 下一拍 cutReason 强信号 ∈ {场景转场， 悬念/反转点， 人物出入场}（rules.shotCutReason / suggestPlotCuts 同口径）、或下一拍换段 / 换场、或说话人交接（相邻两拍说话人不同且至少一拍有台词）、或情绪变化（相邻两拍情绪不同且至少一拍有台词）；当前组 ≥10 秒且下一拍是转折点 → 在转折点前收组、新组从转折拍开始；<10 秒遇转折不切；一直没等到转折点且当前组 ≥15 秒才收组；节拍不可拆，个别组可略超 15 秒、末组可不足 10 秒。buildH3DurationVersion 保留导出兼容、界面不再调用；h3DurationGroups 只剩 Seedance 20–30 秒版使用。【H3 界面】ScriptDocument 的 h3Version 状态改 «plot | short»，第二页签改「每镜 10–15 秒版」，版说明换新口径（转折点清单 + 例外说明），h3VersionLabel 同步；同步成功回执与人物表说明里的 H3 第 2 版说法同步改 10–15 秒版。【Seedance 强制 30 秒版】scriptlib 新增 seedanceForced30Groups + buildSeedanceForced30Version：节拍按序装组、再装下一拍 >30.05 秒即收组，pad = round((30 − 内容秒数)×10)/10（<0.05 记 0），末组同样补满，单拍超 30 秒不留白；逐镜文本仍调 buildSingleGroupTextForModel（同函数同 opts），pad>0 时末尾追加「【纯白留白】本镜头剧情内容到约 X 秒结束，最后 Y 秒（Xs–30.0s）画面纯白处理：纯白画面，不出现任何人物、场景、物品、文字或字幕，无台词、无动作、无声音，保持纯白直到本镜头满 30.0 秒结束。」；SeedanceLensPrompt 加 contentDuration / padSeconds 可选字段，duration = 内容 + 留白；buildSeedanceFullText 头行在有留白时注「含纯白留白 Y 秒」。【Seedance 界面】sdVersion 状态扩 «plot | duration | forced30»，区标题改「Seedance 提示词（三版）」，seg 加第三页签「强制 30 秒版」，版说明写清 27+4 例与末镜补满口径，逐镜头卡小字在有留白时改「内容约 X 秒 + 纯白 Y 秒 = 30.0 秒 · N 拍」，视频模型下拉 aria-label 改三版、三版共用同一 videoModel。【聊天解剖指令】monitorbench DISSECT_CHAT_RULES 第 8 条 H3 第 2 版改「每镜 10–15 秒版：按剧情切割、攒够 10 秒后在转折点换镜、每镜 10–15 秒」，文件头注释同步。【不动】按剧情版与 Seedance 前两版的拼装与分组一字未动、已确认分镜结构 / 剧本 / 台词原文、人物表与同步通道本身、视频模型四档格式、封面记录 id 43、生图禁令；不删数据、不自动生图。基线升 v5.90（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + H3 / Seedance 功能规则与分镜窗口描述补 v5.90 口径）。【沙箱证据】见本版回执。",
+  },
+  {
+    version: "v5.89",
+    date: "2026-11-11",
+    text: "这一版按你定的，把 5 个一次都没用过的封面风格删掉了：风格2「怼脸梗贴纸」、风格4「全景故事感」、风格5「单人半身大标题」、风格6「海报式贴纸轰炸」、风格10「烟火气纸条金句」。封面页的风格下拉和参照图里不再有这 5 个。剩下的 6 个（风格1、3、7、8、9、11）编号照旧不重排，空出来的号就空着。以前的封面生成记录和存过的草稿一条没动；这次删除不会触发任何生图。",
+    features: "删除 5 款未用过的封面风格（v5.89，用户 2026-11-11 亲口定删：先按封面生成记录 53 条 / 分析任务 54 条 / 提示词草稿 6 条三处核对，五款均零使用记录，用户看过名单后确认「就删这5个」；服务端共享模块 server/src/coverstyles.ts + 客户端 coverbench.tsx + App 版本/日志 + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image generation submitted）：【删除清单】coverstyles.ts 删除五款的全部定义——风格2 face_meme「怼脸梗贴纸」、风格4 panorama_story「全景故事感」、风格5 solo_half_title「单人半身大标题」、风格6 poster_sticker_bomb「海报式贴纸轰炸」、风格10 market_note_quote「烟火气纸条金句」：各自的 traits / rulesZh / rulesEn 常量与 COVER_STYLES 条目整段删除；coverbench.tsx 同步删除 STYLE_REFERENCES 五条映射、十个参照图导入（原图 + 小图）与 client/src/assets 里对应的 10 张本地图片文件（cover-ref-face/panorama/solo/poster/market 及 -sm 版），删除站位兜底里 solo_half_title / face_meme 的专属分支（两款已不存在、分支永不命中，删后落回默认中央）。【顺带订正】风格3「拼贴回忆」主特点里「单集单梗用风格2」一句删去该分句（风格2 已不存在，避免误导）；CoverPlan.subtitle 注释「风格 9/10」改「风格 9」；文件头加 v5.89 删除说明。【编号口径】保留 6 款编号不重排（风格1 爆款VS对抗 / 风格3 拼贴回忆 / 风格7 多格故事拼贴 / 风格8 多方阵营 VS / 风格9 奇观特效大标题 / 风格11 证物揭晓），2 / 4 / 5 / 6 / 10 留空号。【不动】保留 6 款的定义正文（除风格3 上述一句）、封面分析 / 拼词 / 提交 / 记录流程、历史封面记录与 cover_prompt_drafts 草稿数据一条未动（旧记录 styleId 找不到风格时 coverStyleById 既有回落风格1、不报错）、封面记录 id 43、生图禁令、其他页面全未动。基线升 v5.89（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE）。真机待核：封面页风格下拉只剩 6 款且编号为 1/3/7/8/9/11、参照图只剩 5 张（风格11 本就无参照图）；随便打开一个老项目封面页不报错。",
+  },
+  {
+    version: "v5.88",
+    date: "2026-11-11",
+    text: "这一版按你说的，在页面左下角加了一个悬浮的「设置」（跟豆包左下角那种一样）：平时左下角就一个「设置」按钮，点一下向上展开一个小框，框里就是「设置」。原来放在生图面板顶部的那份「生图接口总设置」（API 地址 + 密钥）整份搬进了这个框里——全站还是只有这一份，存的地方和生效顺序一个字没变：还是只存在这台设备的浏览器本机里（不进数据库、不进备份包、不进任何记录和日志，密钥还是密码框、永不明文），封面页单次输入 > 总设置 > 已连接凭证的顺序也不变，「检测这份设置（只读预检）」和「清除」按钮跟着一起搬过来了。生图面板顶部不再另放一份，只留一行「当前用：…」告诉你现在走的是哪份，并写明去左下角「设置」里改。每个框旁边都用大白话写清了是干什么用的：API 地址是生图请求发去的服务器地址（去哪家店生成图片），不填就用默认的 Geeknow 地址、一般不用改；密钥相当于生图账户的密码，填了扣你自己的账户、不填就用已连接的 Geeknow 凭证和以前一样。这一版没有提交任何生图，你的项目数据一个字没动。真机等你亲验：点左下角「设置」能展开、两个框都在；在里面改一次地址或密钥，打开生图面板和封面页看「当前用：…」那行应该跟着变；点「清除」确认后应回到用已连接凭证。",
+    features: "左下角悬浮「设置」+ 生图接口总设置搬家（v5.88，用户 2026-11-11 亲口定：参考豆包在左下角做展开悬浮框架、里面包含「设置」、设置里存放 API 地址和 Key 密钥并表明干什么用的；补充定：按现有做法把 v5.70 生图接口总设置整份搬进去、全站只留一份、存储与读取优先级不变、生图面板顶部不再另放一份、每个框旁大白话写清干什么用 / 填了有什么用 / 不填怎么样、Key 照旧只存本机不进备份/日志/记录；纯客户端 settingsfloat.tsx 新模块 + App.tsx 外壳挂载 + imagegen.tsx 摘除设置区 + coverbench.tsx / imageapi.ts 文案改指新位置 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image generation submitted）：【悬浮框架】App 外壳在 ImageGenPanelHost 旁常驻挂载 SettingsDock（fixed bottom-4 left-3/4、z-[55]，低于生图面板 z-[60] 与确认弹窗、高于主内容）：收起态是一枚「⚙ 设置」圆角按钮（min-height 44px、aria-expanded），点开向上展开悬浮框（宽 min(380px, 100vw-24px)、max-h 100dvh-120px 框内滚动、标题「设置」+「收起」按钮），任何页面都在、点按钮或「收起」关闭。【设置内容】框内是 ImageApiSettingsForm——v5.70 表单整份平移：当前生效来源行（resolveImageApiConfig 的 sourceLabel，不露 Key）、API 地址文本框、密钥密码框、只读预检按钮、清除按钮（ConfirmDialog 二次确认、文案同步改称「生图接口设置」），状态与事件同步（loadImageApiSettings 初值 + IMAGE_API_SETTINGS_EVENT / storage 监听）与提交解析逻辑一字未动；每个框下加大白话说明：地址 = 生图请求发去的服务器地址（去哪家店生成图片）、填了按填的发、不填用默认 https://api.geeknow.top、一般不用改、换服务才填；Key = 生图账户的密码、填了扣自己账户、不填用已连接 Geeknow 凭证和以前一样、密码框永不明文；另保留护栏说明（地址换其他域名必须同时填该地址的 Key、已连接凭证绝不发去陌生地址、没填 Key 提交前拦下）与总说明（全站一份、生图面板与封面生成共用、只存本机不进数据库/备份/记录/日志）。【生图面板摘除】imagegen.tsx 删除顶部设置区整块（两输入框 + 预检 + 清除 + 清除确认弹窗 + runApiProbe / updateApiSettings 与相关状态和不再用的导入），同位置改留一行来源行（imgResolved.sourceLabel + 一句「API 地址和密钥在页面左下角的『设置』里改」）；面板自身的 apiSettings 只读镜像与事件监听、imgCfgRef 解析、提交 / 续查接线保留不动；两处鉴权失败文案改指左下角「设置」。【文案改指】coverbench 来源行说明与文件头注释、imageapi.ts 文件头注释里「总设置在顶部生图面板」的说法全改左下角悬浮「设置」；封面页单次输入框本身与优先级行为一字未动。【不动】存储键 imagegen.apiSettings.v1、备份白名单口径（Key 照旧不进备份包）、生效顺序与逐项解析、v3.83 服务端护栏、生图禁令（只有亲手点生成才提交、打开/刷新/切换不自动提交、失败不自动重提）、封面记录 id 43、全部项目数据。基线升 v5.88（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + v3.83/v5.70 规则条补 v5.88 修订段、DATA-PLAN 一条）。真机待核：左下角「设置」点开收起顺畅、两框与预检/清除都在；改一次设置后生图面板与封面页来源行即时跟着变；手机端展开框不溢出、不挡生图面板最小化条。",
+  },
+  {
+    version: "v5.87",
+    date: "2026-11-11",
+    text: "这一版按你 111209 说的把打包备份改了三件事。第一，只下数据包：以前点一次「打包备份」会下载两个文件——数据包再加一个独立复刻页（把工作台的样子和功能又抄了一份的网页文件）。现在工作台本身已经在 GitHub 上了，不用再抄进备份，所以点一次只下载一个数据包文件，不再生成复刻页，也没有了预览复刻页的按钮。第二，储存箱里的剧本一起打包：以前打包时，放在储存箱里的剧本，它的「在储存箱里、属于哪个分类、打了几颗星、什么时候存进去的」这些状态是不跟包走的，导入回来会变成普通项目、跑出储存箱。现在这些状态跟着每个项目一起打包，储存箱的分类名单也一起带走，导入后这些剧本原样回到储存箱，导入完成的核对清单里还单列了一行「储存箱项目」让你对数。第三，打包窗口里的说明换成了新规则，打开就能看清：会打包的是全部剧本项目（含储存箱）、训练进度（训练记录、模式和基因卡）、人物资产库的人物图片与信息、生图记录与暂存图、本机设置和未保存草稿；不会打包的是监控账号和监控视频（一直不打包）、工作台程序本身、还有任何 Key（照旧不打包）。导入恢复没变，还是在工作台里点「导入备份」上传数据包就行。这一版没有提交任何生图或视频生成，你的项目数据一个字没动。真机等你亲验：点一次打包备份，应该只下载一个文件；在储存箱里放一个剧本再打包、导入到空工作台后，它应该还在储存箱里、分类和星级都对。",
+    features: "打包备份只下数据包 + 储存箱项目连状态打包（v5.87，用户 2026-11-11 问题 #17（编号 111209，111207 后续）亲口定；服务端 actions.ts + 客户端 backup.tsx / fingerprint.ts / replication.ts + App 版本/日志 + replication 基线；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【只下数据包】backup.tsx finalizeExport 删除独立复刻页生成与第二个下载（buildReplicaHtml 调用、replicaHtml/previewOpen 状态、应用内预览复刻页弹层整段下线，replicaview.ts 文件保留但打包流程不再调用），下载文件名改「剧本工作台数据包_日期.json」；包内仍带执行单 / README / 复刻说明 / replicationSpec / 内容指纹 / 本机设置与草稿（恢复与重建对照用），服务端与客户端两份执行单、README、复刻说明文本同步改口径（第 0 步与边界说明写明只一个文件、工作台已在 GitHub、包里只有用户数据）。【储存箱随包】服务端 backupManifest：projects 每项新增 archived / archiveCategory / stars / archivedAt 四项（导出本来查全部项目行、储存箱项目一直在清单里，缺的只是状态）、顶层新增 archiveCategories 储存箱分类名单、counts 新增 archivedProjects；importBackupProjects 入参加四项（optional、旧包兼容）+ 顶层 archiveCategories，handler 先补建本台缺的储存箱分类、再按四项原样落库（未存入的 archivedAt 置空）。客户端：组包带 archiveCategories、导入逐项目透传四项状态、tally 新增 archivedExpected/archivedOk、核对清单在包里真有储存箱项目时单列「储存箱项目（导入后仍在储存箱）」一行、选包信息行显示储存箱项目数；fingerprint 项目指纹新增 archiveSha（储存箱状态规范串哈希、比对时包内带了才查），内容指纹数量清单加 archivedProjects 一行。【说明文字】打包页导出页签改新规则：首段写明只下载一个数据包、恢复用导入备份；新增常驻「打包范围说明」框（会打包的四条 / 不会打包的三条，监控账号与程序本身、Key 明列），细节收进 help-fold；完成清单改单文件口径并单列储存箱项目数；导入页签首段与选包信息行同步提储存箱。【不动】训练记录 / 模式与基因卡 / 储存库卡与图片真实字节 / 生图记录与暂存图 / 本机设置与草稿的打包口径一字未动；监控数据与封面生成记录照旧不打包；Key 照旧不进包；导入的新增不覆盖、失败隔离、指纹核对口径不变；封面记录 id 43 未动；不自动生图。基线升 v5.87（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 打包备份功能规则补 v5.87 修订段 + 验收清单两条替换、DATA-PLAN 一条）。真机待核：点打包只下一个文件；储存箱放一个剧本打包后导入空台核对仍在储存箱且分类星级对上；导入核对清单有储存箱项目一行。",
+  },
+  {
+    version: "v5.86",
+    date: "2026-11-11",
+    text: "这一版只做一件事：页底的「更新日志」可以删了。每条日志右边多了一个「删除」按钮，点了会先弹确认窗，写清楚只是把这一条在当前浏览器里隐藏起来、不删你的任何项目和剧本数据、删了没有恢复按钮找不回来，确认后这条就不再显示。标题行还多了一个「清空」按钮，同样先弹确认，确认后全部条目都隐藏，标题旁的「共 N 条」会按实际剩下的条数算；全删空了会显示一句「更新日志已清空」，不会留一片空白。删掉的状态只记在这台设备的浏览器里（和顶部「指引档案」删过的编号不复活是同一套办法）：刷新页面、以后发新版，删过的都不会自己回来；新版本新加的日志会照常出现，不受影响。日志原文一条没改，你的项目数据一个字没动。这一版没有改打包备份，也没有提交任何生图或视频生成。真机等你亲验：展开页底更新日志，删掉任意一条再刷新页面，那条应该还在隐藏状态；点「清空」确认后应显示已清空提示。",
+    features: "更新日志可删除 / 清空（v5.86，用户 2026-11-11 问题 #15（编号 111207）亲口定「把更新日志可以进行删除了」；纯客户端 App.tsx UpdateLogFooter + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【单条删除】每条日志条目头行在「展开全文」按钮旁加「删除」按钮（btn-danger-ghost、aria-label 点名版本并写明只隐藏显示不删数据），点后先弹 ConfirmDialog 二次确认（大白话写明：只隐藏这一条显示、不删项目 / 剧本 / 任何数据、日志原文仍在工作台里、删后当前浏览器内找不回来且无恢复按钮、只有清掉本站浏览器存储数据才会全部重新出现、新版本新日志照常出现），确认才隐藏。【清空】标题行（展开切换按钮同行右侧）加「清空」按钮（无可显示条目时不渲染），同样二次确认（文案带当前显示条数），确认后全部条目隐藏。【本机过滤机制】删除状态只存本机 localStorage 键 scriptbench.changelogDeleted.v1（已删版本号字符串数组，load/save 带 try/catch 兜底），渲染时 WORKSPACE_CHANGELOG 先过滤已删再渲染——与指引档案 GUIDE_ARCHIVE_STORE_KEY 的 deletedIds 本机过滤同制式：刷新 / 发新版已删不复活，新版本新加条目不在已删名单里照常出现。【计数与空态】标题行「共 N 条」改按过滤后实际显示条数（visibleEntries.length）；全部删空时列表区显示大白话提示「更新日志已清空。删掉的条目只是不在这台设备上显示了，你的项目和剧本数据一点没动；以后有新版本时，新加的日志会照常出现在这里。」不留空白。【不动】WORKSPACE_CHANGELOG 全部历史条目原文一字未改（仅 v5.85 的 current 标记按历版惯例移给新条目）、打包备份与导入备份一字未动、全部项目与剧本存储数据、封面记录 id 43、生图禁令。基线升 v5.86（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 更新日志规则补 v5.86 口径、DATA-PLAN 一条）。真机待核：删一条后刷新不复活；清空后显示已清空提示且计数为 0；下个版本新条目正常出现。",
+  },
+  {
+    version: "v5.85",
+    date: "2026-11-11",
+    text: "这一版接着上一版（删「首帧重叠」）把剩下的一句也删掉：逐镜头提示词包里每个镜头末尾的「末帧」行，后面还挂着一句括号说明「（定格作为下一镜头首帧衔接）」——意思是把这一镜头的最后一帧定住、当成下一镜头的第一帧接着生成，这正是上一版已经删掉的那套衔接说法留下来的尾巴。现在这句括号删掉了，「末帧」行只留最后一拍的画面内容本身，不再提定格、不再提拿它当下一镜头首帧。只删这一句：镜头内容、台词、时长、提示词包里其他行（首帧衔接、镜头切换、空镜控制、可直接粘贴的提示词、禁用项）一个字都没动；你存着的剧本和项目数据也没动。这一版没有提交任何生图或视频生成。真机等你亲验：打开任一项目，导出或复制逐镜头提示词包粘出来看，每个镜头末尾的「末帧」行应该只剩画面内容、后面不再有那句括号。",
+    features: "删除提示词包「末帧」行尾的衔接句（v5.85，用户 2026-11-11 在问题 #11（编号 111204）后续亲口定「提示词包里每个镜头末尾还留了一句『末帧定格作为下一镜头首帧衔接』，把它也删掉」；纯客户端 scriptlib.ts + App.tsx + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删除点】scriptlib buildLensPromptPack 每镜头「- 末帧：{最后一拍画面}」行尾的括号后缀「（定格作为下一镜头首帧衔接）」整句删除，行本身与末帧画面内容保留——这是 v5.83 删「首帧重叠」整套说法后在提示词包里残留的最后一处同义表述（定格末帧充当下一镜头首帧），删后提示词包再无任何首帧/末帧衔接生成口径。【核查范围】全仓 grep「定格作为 / 末帧定格」确认生成拼装只此一处；buildSingleGroupText / buildSingleGroupTextForModel（四档）/ H3 两版 / buildMarkdown / buildGenChecklist 的节拍行里「末帧：{finalFrame}」是节拍画面内容本身、不带衔接句，不在删除范围；buildLensPackageText 操作清单的「首帧图」attach 说明是图生视频双图输入的操作指引（v5.21 锁人链路、用户未点名），保留不动；提示词包内「首帧衔接」行（v5.83 已改为按本镜头第一拍画面生成）与「镜头切换」行不动。【不动】镜头内容 / 台词 / 每镜头与每拍时长、全部项目与剧本存储数据、封面记录 id 43、生图禁令。基线升 v5.85（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 精简规则补 v5.85 修正段）。真机待核：任一项目导出逐镜头提示词包，逐镜头核对「末帧」行尾无括号衔接句。",
+  },
+  {
+    version: "v5.84",
+    date: "2026-11-11",
+    text: "这一版按你说的，把分镜页「一键匹配资产图」改成不再自动确认同步。以前点它，图挂上的同时，卡上的造型、音色会被直接存进人物行、分镜提示词立刻跟着变，等于系统替你点了「确认并同步」——你昨天遇到的就是这个。现在改成：点「一键匹配资产图」只做两件事，一是把图挂到人物上（连同「这张图来自哪张卡」的来源记录，照旧当场记好），二是把卡上的造型、音色填进这个人的『待确认』里——人物按钮上会多一个「匹配待确认」标记，打开人物面板能逐项看到「已存值 → 待确认值」的对照（来源写「一键匹配」），刷新也不会丢。人物表里的已存值和四档 Seedance、通用版、MiniMax H3 两版、导出，一个字都不会变；只有你检查完、亲手点「确认并同步到分镜提示词」，这些待确认的造型、音色才转正、提示词才重拼。回执也改了口径：逐人写清挂了哪张卡、造型和音色是「已填进待确认」「卡上为空未填」还是「有你未确认的手改、没覆盖」（你亲手改过还没确认的字段，匹配不会盖掉它），句尾会明说还没同步、点确认才转正。卡上哪项是空的，那项就不填；语气基调照旧不填、保持剧本原值。旁边的说明文字也同步改了口径。「匹配后自动分析」开关和面板里的单人「AI 分析」没动：开关开着时匹配完照样自动接着分析，只是刚填进待确认的造型、音色这轮分析不覆盖、只分析语气基调。这一版没有提交任何生图。真机等你亲验：找个还没图的人点一次「一键匹配资产图」，应该看到图挂上了、人物按钮多了「匹配待确认」，但分镜提示词里的造型还是原来的；再点「确认并同步到分镜提示词」，提示词才变成卡上的造型、音色。",
+    features: "一键匹配资产图不再自动确认同步、造型/音色改进待确认（v5.84，用户 2026-11-11 亲口定「点击一键匹配资产图之后，系统不应该自动确认并同步，这个操作应该由我自己手动点击才执行」；客户端 App.tsx + scriptlib.ts + 服务端 actions.ts 仅 charPendingRecordIn 来源枚举加 match + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【核心改动】runAssetMatch 删除 v5.60 的立即落盘整段（不再直调 onSyncCharBasics、不再 setCharSync、不再清编辑态 / 收敛待确认 / 写 rollback）；写图成功后逐人把卡的造型（主体图造型，缺失回落备注「造型：」/「外貌：」段）与音色（备注「音色：」段，取值口径与 v5.60 一字不变）写进 charEdits 编辑态，经 derivePendingRecord 生成待确认记录（来源新增 match）、updateCharPending + persistPendingNow 走既有 saveCharPending 深存（刷新不丢），与 AI 分析回填同一制式；人物行已存值与全部提示词出口（四档 Seedance / 通用版 / H3 两版 / 导出，拼装永不读 charPending）一字不动，只有用户亲手点「确认并同步到分镜提示词」（或面板「只确认此人」）才经 doCharSync 既有通道转正重拼。【字段级口径】与分析回填一致：字段已有未确认手改（来源 manual）时匹配不覆盖、回执点名「有未确认的手改、没覆盖」；卡上为空不填；语气基调一字不填；造型 / 音色写入后性别种子按新文字重推（refreshCharGenderSeed，只动显示种子、永不写性别字段）。【来源 match 全链】scriptlib CharPendingSource 加 \"match\"、parseScript asSource 认 match、新增 charPendingHasMatch；服务端 charPendingRecordIn 四字段来源枚举加 \"match\"（storedScript 与 saveCharPending 共用同一入参，自动跟随）；储存库卡那套 presetPendingRecordIn 不动。【标记与对照】人物按钮阵新增第三色标「匹配待确认」（charPendingHasMatch，与 AI 待确认 / 已改可同现、按钮描边高亮条件同步纳入）；面板待确认对照块来源文案加「一键匹配」（analysis=AI 分析、match=一键匹配、其余=手改）。【回执改口径】已匹配逐人：「代号→卡卡（性别、年龄段）：图片已挂，来源已记为X卡，造型已填进待确认、音色为空未填 / 音色已填进待确认 / 造型有未确认的手改、没覆盖 …」；未找到后缀改「，造型/音色未填」、已跳过改「，已有图片，造型/音色未动」；句尾在有匹配成功者时明说「只填进了待确认、还没同步进分镜提示词，亲手点确认才转正」，恒加「语气基调未填，保持剧本原值」；ok 只看挂图失败（原 syncFailedNote 判据下线）。【联动保护保留】protectedFieldsByCode 机制不变：按本轮实际填进待确认的字段建表、递给联动批量，applyCharAnalysisResult 的 mayWrite 照旧挡下，批量总回执文案改「刚从资产卡匹配进待确认的字段…这轮分析没覆盖」；「匹配后自动分析」开关与单人 AI 分析流程一字未动。【说明文字】人物表按钮行上方说明段的一键匹配部分改口径：写明只挂图 + 造型/音色进待确认、不自动同步、点确认才转正。【不动】v5.59 匹配规则（性别＋年龄段、同代号优先、A–R 顺序、一卡一轮一人、E / I 存疑卡不参与）、写图与来源记录链路（v5.63）、按钮位置与文案、busy 互斥、确认同步通道本身、封面记录 id 43；不删数据、不自动生图。基线升 v5.84。【沙箱证据】见本版回执。",
+  },
+  {
+    version: "v5.83",
+    date: "2026-11-11",
+    text: "这一版按你说的，把分镜提示词里的「首帧重叠」整套删掉了。以前每个镜头（第一个除外）的提示词里都有一段：和上一镜头重叠 1 秒、首帧就是上一镜头最后一帧、生成时提前 1 秒开始、那 1 秒不算台词不算时长；时间轴第一拍后面还跟着一句「其中 1 秒是重叠帧」。现在这些全没了：不写重叠段、不写首帧等于上一镜头末帧、不写提前 1 秒，时间轴里也不再提重叠帧。时间码就按不重叠、一个镜头接一个镜头连续算，生成总时长和故事总时长一样，不再多出「镜头数减 1」秒。删的范围是所有出口一起删：Seedance 四档（2.5 / 2.0 / 2.0 Fast / 2.0 Mini）、通用版、MiniMax H3 两版、分镜文档 Markdown、AI 视频生成清单、逐镜头提示词包，还有页面上的全局规范说明和「生成总时长」那一行，都同步改了。只删这套重叠说法——镜头内容、台词、每个镜头本身的时长，一个字都没动；你存着的剧本和项目数据也没动。这一版没有提交任何生图或视频生成。真机等你亲验：打开任一项目分镜页，复制第二个镜头的提示词粘出来看，应该再也没有「首帧重叠」那一段，时间轴第一行也不再提重叠帧。",
+    features: "删除分镜提示词「首帧重叠」整套说法（v5.83，用户 2026-11-11 亲口定「把分镜提示词里的首帧重叠删掉、它没起到什么作用」；纯客户端 scriptlib.ts + App.tsx + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【拼装层删除】scriptlib 删 lensOverlapLines / lensOverlapInfo / LensOverlapInfo / lensGenerationSeconds 四个导出与整段注释（旧口径：后续镜头生成提前 1 秒、首帧=上一镜头末帧原文照搬、重叠秒不重复台词不计入故事时间码）；formatBeatLines 删 firstBeatOverlap 入参与「其中1秒为与上一镜头重叠帧（首帧=上一镜头末帧，不重复计台词、不计入故事时长）」注脚，lensBeatLines 不再传该标记；beatLinesForModel（Seedance 2.5 时间轴标题）删同一句 overlapNote；overlapLinesForModel 删除。【出口逐处】buildSingleGroupText（通用版）与 buildSingleGroupTextForModel（四档）删映射块后的重叠行整段；buildMarkdown 删每镜头重叠行、基本信息「生成总时长」行改「与故事总时长一致，镜头之间不重叠、时间码连续」；buildGenChecklist 删抬头生成总时长公式与每镜头「生成时长 = 故事时长 + 首帧重叠 1 秒（生成从 X 起，首帧=上一镜头末帧）」行、统一为「生成时长 = 故事时长」；buildLensPromptPack（逐镜头提示词包）的「首帧衔接」行改「首帧按本镜头第一拍画面生成，镜头之间不做首帧重叠，生成时长 = 本镜头故事时长」；globalSpecLines 删「首帧重叠」规范条一行。H3 两版拼装本就不带重叠段（六段结构无此项），随 formatBeatLines / 时间码连续口径自动一致、无悬空引用。【页面文案】App 分镜设置「切分规则」说明把重叠条改「镜头之间不重叠、时间码首尾连续；生成时长 = 故事时长」；分镜文档全局规范展示删「首帧重叠」一条；基本信息表「生成总时长」改只显示故事总时长并注「与故事总时长一致」。【保留不动】镜头包 buildLensPackageText 的操作清单「首帧图」attach 说明（图生视频双图输入的操作指引、不是提示词正文里的重叠说法，用户未点名、属 v5.21 锁人链路）；importlib 对旧导出文件里「首帧重叠」行的跳过识别（老文件仍能导入）；镜头内容 / 台词 / 每镜头与每拍时长本身、全部项目与剧本存储数据、封面记录 id 43、生图禁令。基线升 v5.83（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 精简规则补 v5.83 修正段）。真机待核：任一项目分镜页复制第 2 个镜头（Seedance 任一档与 H3）粘出核对无重叠段、时间轴首行无重叠帧字样；Markdown 与 AI 清单导出核对生成总时长 = 故事总时长。",
+  },
+  {
     version: "v5.82",
     date: "2026-11-11",
-    current: true,
     text: "这一版按你定的，把「问题处理」这个页面整个删掉——页面和数据一起删。顶栏的「问题处理」入口没了，那个页面（存问题、自动编号、看进度、复制、传图）整个下线；里面存的问题也全删干净了，包括问题 #2「测试」和全部附图，删了就恢复不了了。其他页面、你的项目和剧本、生图、封面，还有分镜页的「防版权拦截」开关和替换表，一个字都没动。以后有问题直接在聊天里发我就行。这一版没有提交任何生图或视频生成。",
     features: "问题处理页整页下线 + 数据全删（v5.82，用户 2026-11-11 亲口定「把问题处理这个页面进行删除」并点选「页面和数据一起删」确认删除范围；客户端 App.tsx + 删 issuesbench.tsx 整文件 + 服务端 actions.ts / privileged.ts + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration（两表结构保留、只清记录）；NO real image/video generation submitted）：【删页面】顶栏「问题处理」入口按钮、Bench 类型 issues 值、顶栏窗口列表的 issues 分支（aria-label 与 navBtn 两处）、问题页渲染区整块全删；issuesbench.tsx 整文件删除（自由添加 / 自动编号 / 进度三态未解决·进行中·已完成切换 / 复制按钮 / 附图区随之全下线）。【删动作】服务端问题页 12 个动作全下线：listIssues / createIssue / updateIssue / deleteIssue / addIssueImage / deleteIssueImage / sendIssueToChat（v5.79 兼容壳）/ recordIssueDelivery / getIssueSendStatus / checkAgentTaskStatus / buildIssueShareText / setIssueStatus；帮助函数 issueOut / loadIssueOut / buildShareText 整块删除；特权层 exportIssueImages 契约 + 处理器删除（随之无用的 node:crypto createHash 导入一并删）；原唯一调用方就是问题页，全站再无死引用。【删数据】新增一次性动作 purgeIssueData（先读两表计数 → 删 issue_images 全部行 → 删 issue_reports 全部行 → 逐个 ctx.blobs.delete 附图 blob，回三项删除计数），经提交后一次性调用在正式库执行，走应用自身删除路径、不直接操作数据库文件；两表结构与 schema 定义保留、记录清零，其他表一行未动。【不动】其他四台全部页面与功能、全部项目数据、生图／封面链路、分镜页防版权拦截开关与内置／自定义替换表、封面记录 id 43、生图禁令。基线升 v5.82（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + workbenches 删第五台条目、DATA-PLAN 一条）。动作总数 185 → 174（删 12、新增 purgeIssueData 1）。真机待核：打开工作台核对顶栏已无「问题处理」入口；其余四台照常打开使用。",
   },
@@ -14639,6 +14774,33 @@ function RegressionChecklist() {
   );
 }
 
+// 更新日志本机隐藏（v5.86）：用户删掉的日志条目只记在本机
+// localStorage（已删版本号数组），渲染时过滤掉——与顶部「指引档案」
+// 的已删编号本机过滤同一机制：刷新 / 发新版后已删的不复活，新版本
+// 新加的条目不在已删名单里、照常出现。只影响显示：WORKSPACE_CHANGELOG
+// 原文与任何项目数据一字不动。
+const CHANGELOG_DELETED_KEY = "scriptbench.changelogDeleted.v1";
+
+function loadDeletedChangelogVersions(): string[] {
+  try {
+    const raw = window.localStorage.getItem(CHANGELOG_DELETED_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === "string");
+  } catch {
+    return [];
+  }
+}
+
+function saveDeletedChangelogVersions(versions: string[]) {
+  try {
+    window.localStorage.setItem(CHANGELOG_DELETED_KEY, JSON.stringify(versions));
+  } catch {
+    /* private mode */
+  }
+}
+
 function UpdateLogFooter() {
   const [expanded, setExpanded] = useState(false);
   // 每条日志各自展开全文（v3.32）：以前展开页底日志会把 50 条长文
@@ -14651,6 +14813,35 @@ function UpdateLogFooter() {
   });
   const toggleEntry = (version: string) =>
     setOpenEntries((prev) => ({ ...prev, [version]: !prev[version] }));
+  // v5.86：删除 / 清空只记本机隐藏名单，确认弹窗点名版本后才执行。
+  const [deletedVersions, setDeletedVersions] = useState<string[]>(() =>
+    loadDeletedChangelogVersions(),
+  );
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [pendingClearAll, setPendingClearAll] = useState(false);
+  const deletedSet = new Set(deletedVersions);
+  const visibleEntries = WORKSPACE_CHANGELOG.filter(
+    (e) => !deletedSet.has(e.version),
+  );
+  const hideEntry = (version: string) => {
+    const next = deletedVersions.includes(version)
+      ? deletedVersions
+      : [...deletedVersions, version];
+    setDeletedVersions(next);
+    saveDeletedChangelogVersions(next);
+    setPendingDelete(null);
+  };
+  const clearAllEntries = () => {
+    const next = [
+      ...deletedVersions,
+      ...WORKSPACE_CHANGELOG.map((e) => e.version).filter(
+        (v) => !deletedSet.has(v),
+      ),
+    ];
+    setDeletedVersions(next);
+    saveDeletedChangelogVersions(next);
+    setPendingClearAll(false);
+  };
   return (
     <footer
       className="mt-12 border-t pt-4 pb-2"
@@ -14667,32 +14858,49 @@ function UpdateLogFooter() {
           换账号靠它恢复
         </span>
       </div>
-      <button
-        type="button"
-        data-tour="update-log"
-        className="flex w-full flex-wrap items-center gap-2 text-left"
-        style={{ minHeight: 40 }}
-        aria-expanded={expanded}
-        aria-label={expanded ? "收起更新日志" : "展开更新日志"}
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <span className="font-display text-lg font-bold">
-          更新日志（{WORKSPACE_VERSION}）
-        </span>
-        <span className="text-sm text-[var(--dim)]">
-          共 {WORKSPACE_CHANGELOG.length} 条
-        </span>
-        <span className="text-sm font-medium" style={{ color: "var(--accent)" }}>
-          {expanded ? "▾ 点击收起" : "▸ 点击展开"}
-        </span>
-      </button>
+      <div className="flex w-full flex-wrap items-center gap-2">
+        <button
+          type="button"
+          data-tour="update-log"
+          className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-left"
+          style={{ minHeight: 40 }}
+          aria-expanded={expanded}
+          aria-label={expanded ? "收起更新日志" : "展开更新日志"}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <span className="font-display text-lg font-bold">
+            更新日志（{WORKSPACE_VERSION}）
+          </span>
+          <span className="text-sm text-[var(--dim)]">
+            共 {visibleEntries.length} 条
+          </span>
+          <span className="text-sm font-medium" style={{ color: "var(--accent)" }}>
+            {expanded ? "▾ 点击收起" : "▸ 点击展开"}
+          </span>
+        </button>
+        {visibleEntries.length > 0 && (
+          <button
+            type="button"
+            className="btn btn-sm btn-danger-ghost"
+            aria-label="清空更新日志（把全部条目都隐藏，只影响显示、不删任何数据）"
+            onClick={() => setPendingClearAll(true)}
+          >
+            清空
+          </button>
+        )}
+      </div>
       {expanded && (
         <>
           <p className="mt-1.5 text-sm leading-6 text-[var(--dim)]">
             这里只记录工作台本身的每次变更（不存剧本内容）。剧本备份与工作台版本历史窗口已按要求删除，稿件没有恢复手段，改稿前请先导出当前稿。每条日志点「展开全文」可逐条核对全文，当前版本默认已展开。
           </p>
+          {visibleEntries.length === 0 ? (
+            <p className="mt-3 text-sm leading-6 text-[var(--dim)]">
+              更新日志已清空。删掉的条目只是不在这台设备上显示了，你的项目和剧本数据一点没动；以后有新版本时，新加的日志会照常出现在这里。
+            </p>
+          ) : (
           <div className="mt-3 space-y-2.5">
-            {WORKSPACE_CHANGELOG.map((e) => {
+            {visibleEntries.map((e) => {
               const entryOpen = !!openEntries[e.version];
               return (
                 <article
@@ -14723,6 +14931,14 @@ function UpdateLogFooter() {
                     >
                       {entryOpen ? "收起全文 ▴" : "展开全文 ▾"}
                     </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-danger-ghost"
+                      aria-label={`删除${e.version}这条更新日志（只隐藏显示、不删任何数据）`}
+                      onClick={() => setPendingDelete(e.version)}
+                    >
+                      删除
+                    </button>
                   </div>
                   <p className="mt-1 text-sm leading-6 text-[var(--dim)]">
                     功能特点：{e.features}
@@ -14739,7 +14955,45 @@ function UpdateLogFooter() {
               );
             })}
           </div>
+          )}
         </>
+      )}
+      {pendingDelete !== null && (
+        <ConfirmDialog
+          title={`删除 ${pendingDelete} 这条更新日志？`}
+          body={
+            <>
+              <p>
+                只是把这一条从页面上隐藏起来，不会删你的任何项目、剧本和数据，日志原文也还留在工作台里。
+              </p>
+              <p className="mt-2">
+                删掉之后，这条日志在当前浏览器里就找不回来了（没有恢复按钮）；只有把这个浏览器里本站的存储数据整个清掉，删过的条目才会全部重新出现。以后新版本发布时，新加的日志会照常出现，不受影响。
+              </p>
+            </>
+          }
+          confirmLabel="删除这一条"
+          onConfirm={() => hideEntry(pendingDelete)}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
+      {pendingClearAll && (
+        <ConfirmDialog
+          title="清空全部更新日志？"
+          body={
+            <>
+              <p>
+                会把现在显示的 {visibleEntries.length}{" "}
+                条更新日志全部从页面上隐藏起来。只是隐藏显示，不会删你的任何项目、剧本和数据，日志原文也还留在工作台里。
+              </p>
+              <p className="mt-2">
+                清空之后，这些日志在当前浏览器里就找不回来了（没有恢复按钮）；只有把这个浏览器里本站的存储数据整个清掉，删过的条目才会全部重新出现。以后新版本发布时，新加的日志会照常出现，不受影响。
+              </p>
+            </>
+          }
+          confirmLabel="全部清空"
+          onConfirm={clearAllEntries}
+          onCancel={() => setPendingClearAll(false)}
+        />
       )}
     </footer>
   );
@@ -16489,6 +16743,13 @@ const spec = globalSpecData(script, mappingCtx);
 // v4.85：全局规范的场景映射只列有数据、非特写 framing 的条目；
 // 一条都没有时整行不渲染（与 scriptlib globalSpecLines 同口径）。
 const specScenes = visibleSceneMappings(spec.scenes);
+// v5.94：页面版全局规范与 scriptlib globalSpecLines 同口径——
+// 资产说明人数、角色映射行与音色展示只列已提取人物资产图的
+// 人物（visibleMappingCharacters）；过滤后一人不剩时角色映射
+// 行整行不渲染。音色编辑输入（onUpdateVoice）是修改入口、不
+// 是映射正文，仍逐人全列，不受过滤影响。
+const specChars = visibleMappingCharacters(spec.characters, mappingCtx);
+const specFilterOn = mappingImageFilterEnabled(mappingCtx);
 // 群演与未自动加入人物状态（分镜页只读展示）：与审查页同一份检出。
 // 群演只出画面、无音色映射（全局规范的音色里不会有他）；已进正式
 // 人物表的人自带音色映射，这里不再重复列。
@@ -16569,8 +16830,9 @@ setCharEdits(next);
 // 一个人。写入走与 v4.90 储存库选图完全同一条链路（fetch 主图
 // blob → File → uploadImageFileInChunks →
 // setCharacterImageChunked / 无卡时 addCharacterChunked 按行自
-// 动建卡），只写人物图片字段，不动人物行任何文字字段、不保存
-// 剧本；写完 invalidate 项目查询，人物表 / 封面绑定 / 分镜提
+// 动建卡），只写人物图片字段；卡的造型 / 音色只填进待确认
+// （v5.84，来源 match），不动人物行已存文字、不自动确认同
+// 步；写完 invalidate 项目查询，人物表 / 封面绑定 / 分镜提
 // 示词都从同一份人物卡数据现算、自动跟随。
 const assetMatchQueryClient = useQueryClient();
 const [assetMatch, setAssetMatch] = useState<{
@@ -16757,7 +17019,7 @@ const derivePendingRecord = (
 r: CharacterRow,
 entry: { look: string; voice: string; gender: string; tone: string },
 sourceHints: Partial<
-Record<"look" | "voice" | "tone" | "gender", "analysis" | "manual">
+Record<"look" | "voice" | "tone" | "gender", CharPendingSource>
 >,
 extra?: { jobId?: number | null; hasImage?: boolean },
 ): CharPendingRecord => {
@@ -17088,19 +17350,23 @@ return "";
 // 其余行，记「没挂上」在回执里点名。全部处理完必给一句回执：
 // 已匹配逐人写「代号→卡（性别、年龄段）」、未找到逐人写推断结
 // 果与原因、已跳过写代号，不静默。
-// v5.60 起匹配成功顺手同步造型 / 音色：卡的造型（主体图造型，
-// 缺失回落备注「造型：」段）写进人物行造型、卡的音色（备注
-// 「音色：」段）写进人物行音色，直接覆盖并立即经「确认并同步
-// 到分镜提示词」同一通道落盘；语气基调一字不动；卡上某项为空
-// 那项不同步、回执逐人写清；已跳过 / 未找到 / 没挂上的行不同
-// 步。同步落盘成功后，本轮「匹配后自动分析」对刚同步的字段按
-// v5.49 字段级口径保护（protectedFieldsByCode 递给批量核心），
-// 分析不覆盖它们、语气基调照常分析。
+// v5.60 起匹配成功顺手带造型 / 音色：卡的造型（主体图造型，
+// 缺失回落备注「造型：」段）、卡的音色（备注「音色：」段）。
+// v5.84 改口径（用户亲口定）：匹配只挂图 + 把造型 / 音色填进
+// 「待确认」（来源记 match、与 AI 分析同制式深存），绝不自动
+// 调用确认同步——人物行已存值与全部分镜提示词一字不动，只有
+// 用户亲手点「确认并同步到分镜提示词」才转正重拼。语气基调
+// 一字不填；卡上某项为空那项不填、回执逐人写清；字段已有未
+// 确认的手改值（来源 manual）时不覆盖、回执点名；已跳过 /
+// 未找到 / 没挂上的行不填。本轮「匹配后自动分析」对刚填进待
+// 确认的字段按字段级口径保护（protectedFieldsByCode 递给批量
+// 核心），分析不覆盖它们、语气基调照常分析。
 const runAssetMatch = async () => {
 if (projectId == null || assetMatch?.busy) return;
 setAssetMatch({ busy: true, ok: false, message: "" });
 // v5.60：匹配成功先记信息（人物行 / 代号 / 卡代号 / 卡的造型
-// 与音色），造型 / 音色同步落盘之后再按真实结果拼回执。
+// 与音色），造型 / 音色填进待确认之后再按真实结果拼回执
+// （v5.84，不再同步落盘）。
 const matchedInfos: {
 row: CharacterRow;
 code: string;
@@ -17272,147 +17538,108 @@ failed.push(code);
 await assetMatchQueryClient.invalidateQueries({
 queryKey: ["project", projectId],
 });
-// v5.60 同步落盘：把匹配到的卡的造型 / 音色写进人物行并立即
-// 保存——走「确认并同步到分镜提示词」同一条通道（onSyncChar-
-// Basics 整份落盘 + 待确认收敛 + 同步前已存值进 rollback，与
-// runCharRollback 直调同款），存完人物表 / 四档 Seedance / 通
-// 用版 / H3 两版 / 导出全部从人物表现算、自动跟随新值。语气
-// 基调传人物行现值、一字不动；性别传当前编辑值（没动下拉就
-// 与基线一致、不触发性别词互换）。同步失败不回滚已挂的图，
-// 回执如实写「没存上」。
-let syncFailedNote = "";
+// v5.84 待确认写入（取代 v5.60 的立即落盘）：把匹配到的卡
+// 的造型 / 音色填进「待确认」——与 AI 分析回填同一制式：写
+// charEdits 编辑态 + derivePendingRecord（来源记 match）+
+// saveCharPending 深存，刷新不丢；人物行已存值与全部分镜提
+// 示词一字不动，绝不自动调用 onSyncCharBasics，只有用户亲
+// 手点「确认并同步到分镜提示词」才经 doCharSync 既有通道转
+// 正重拼。字段级口径与分析回填一致：该字段已有未确认的手
+// 改值（来源 manual）时不覆盖、回执点名保留手改；卡上为空
+// 的字段不填；语气基调一字不填、保持剧本原值。深存失败走
+// 既有 charPendingSaveError 提示（面板里可「再存一次」），
+// 值仍留在编辑态里不丢。
 const protectedFieldsByCode = new Map<string, Set<"look" | "voice">>();
-if (matchedInfos.length > 0) {
-if (!onSyncCharBasics) {
-syncFailedNote =
-"当前页面没有同步通道，造型 / 音色没存上（图片已挂好）。";
-} else {
-const syncEdits: {
-name: string;
-look: string;
-voice: string;
-gender: string;
-tone: string;
-}[] = [];
-const preSyncStored = new Map<
+const matchFieldState = new Map<
 string,
-{ look: string; voice: string; tone: string; gender: string }
+{
+look: "pending" | "empty" | "kept";
+voice: "pending" | "empty" | "kept";
+}
 >();
 for (const info of matchedInfos) {
-const entry = charEditsRef.current[info.code] ?? charBaseOf(info.row);
-const newLook = info.cardLook !== "" ? info.cardLook : entry.look;
-const newVoice = info.cardVoice !== "" ? info.cardVoice : entry.voice;
-if (newLook === info.row.look && newVoice === info.row.voice)
-continue;
-syncEdits.push({
-name: info.code,
-look: newLook,
-voice: newVoice,
-gender: entry.gender,
-tone: entry.tone,
-});
-preSyncStored.set(info.code, {
-look: info.row.look,
-voice: info.row.voice,
-tone: info.row.tone,
-gender: info.row.gender ?? "",
-});
-}
-let syncOk = syncEdits.length === 0;
-if (syncEdits.length > 0) {
-setCharSync({ busy: true, ok: false, message: "" });
-try {
-const res = await onSyncCharBasics(
-syncEdits,
-charPendingRef.current,
-);
-if (res.ok) {
-syncOk = true;
-// 与 doCharSync 同款收尾：清这些人的编辑态，待确认
-// 记录收敛为「已清 + rollback = 同步前已存值」。
-const codes = new Set(syncEdits.map((e) => e.name));
-updateCharEdits((prev) => {
-const next = { ...prev };
-for (const c of codes) delete next[c];
-return next;
-});
-updateCharPending((prev) => {
-const next = { ...prev };
-for (const c of codes) {
-const old = next[c];
-const pre = preSyncStored.get(c);
-if (!pre) continue;
-next[c] = {
-look: "",
-voice: "",
-tone: "",
-gender: "",
-source: {
-look: null,
-voice: null,
-tone: null,
-gender: null,
-},
-jobId: old?.jobId ?? null,
-hasImage: old?.hasImage ?? false,
-updatedAt: new Date().toISOString(),
-rollback: pre,
+const state: {
+look: "pending" | "empty" | "kept";
+voice: "pending" | "empty" | "kept";
+} = {
+look: info.cardLook === "" ? "empty" : "pending",
+voice: info.cardVoice === "" ? "empty" : "pending",
 };
+const srcRec = charPendingRef.current[info.code];
+const entry = {
+...(charEditsRef.current[info.code] ?? charBaseOf(info.row)),
+};
+let wrote = false;
+if (info.cardLook !== "") {
+if (srcRec?.source.look === "manual") state.look = "kept";
+else {
+entry.look = info.cardLook;
+wrote = true;
 }
-return next;
+}
+if (info.cardVoice !== "") {
+if (srcRec?.source.voice === "manual") state.voice = "kept";
+else {
+entry.voice = info.cardVoice;
+wrote = true;
+}
+}
+matchFieldState.set(info.code, state);
+if (!wrote) continue;
+// 造型 / 音色变了，性别种子按新文字重推（与分析回填同口
+// 径，只动显示种子，匹配永不写性别字段）。
+entry.gender = refreshCharGenderSeed(info.row, entry);
+updateCharEdits((prev) => ({ ...prev, [info.code]: entry }));
+const rec = derivePendingRecord(info.row, entry, {
+look: "match",
+voice: "match",
 });
-for (const c of codes)
-charGenderTouchedRef.current.delete(c);
-} else {
-syncFailedNote = res.message;
-}
-setCharSync({ busy: false, ok: res.ok, message: res.message });
-} catch (e) {
-syncFailedNote = `同步失败：${describeThrownError(e)}。图片已挂好，造型 / 音色还是原来的值，打开人物面板改完点「确认并同步到分镜提示词」也能存。`;
-setCharSync({ busy: false, ok: false, message: syncFailedNote });
-}
-}
-if (syncOk) {
-// 本轮「匹配后自动分析」保护表：刚同步落盘的字段按手
-// 动修改口径保护（批量回填字段级跳过），只在本轮页面
-// 内递给联动批量；值已落盘，之后用户主动点分析仍走
-// 既有待确认流程、不受此表影响。
-for (const info of matchedInfos) {
+updateCharPending((prev) => ({ ...prev, [info.code]: rec }));
+void persistPendingNow(info.code);
+// 本轮「匹配后自动分析」保护表：刚填进待确认的字段按手动
+// 修改口径保护（批量回填字段级跳过），这轮联动分析不覆盖
+// 它们、语气基调照常分析；保护只在本轮联动内有效，之后用
+// 户主动点一键 / 单人分析仍走既有待确认流程。
 const fields = new Set<"look" | "voice">();
-if (info.cardLook !== "") fields.add("look");
-if (info.cardVoice !== "") fields.add("voice");
+if (state.look === "pending") fields.add("look");
+if (state.voice === "pending") fields.add("voice");
 if (fields.size > 0) protectedFieldsByCode.set(info.code, fields);
 }
-}
-}
-}
+
 const seg = (label: string, entries: string[], suffix = "") =>
 `${label} ${entries.length} 位${entries.length > 0 ? `：${entries.join("、")}${suffix}` : ""}`;
-// v5.60 已匹配逐人回执：挂了哪张卡 + 造型 / 音色同步了哪几项
-// （卡上为空的点名未同步；整轮同步没存上时如实写没存上）。
+// v5.84 已匹配逐人回执：挂了哪张卡 + 造型 / 音色填进待确认
+// 的情况（卡上为空的点名未填；有未确认手改的点名没覆盖）。
 const matched = matchedInfos.map((info) => {
-let syncDesc: string;
-if (syncFailedNote) syncDesc = "造型、音色没存上";
-else if (info.cardLook !== "" && info.cardVoice !== "")
-syncDesc = "造型、音色已同步";
-else if (info.cardLook !== "")
-syncDesc = "造型已同步、音色为空未同步";
-else if (info.cardVoice !== "")
-syncDesc = "音色已同步、造型为空未同步";
-else syncDesc = "卡上造型、音色都为空，未同步";
+const st = matchFieldState.get(info.code);
+const fieldDesc = (
+label: string,
+s: "pending" | "empty" | "kept" | undefined,
+) =>
+s === "empty"
+? `${label}为空未填`
+: s === "kept"
+  ? `${label}有未确认的手改、没覆盖`
+  : `${label}已填进待确认`;
+const syncDesc = `${fieldDesc("造型", st?.look)}、${fieldDesc("音色", st?.voice)}`;
 return `${info.code}→${info.presetCode}卡（${info.gender}、${info.age}）：图片已挂，来源已记为${info.presetCode}卡，${syncDesc}`;
 });
 const parts = [
 seg("已匹配", matched),
-seg("未找到", notFound, "，未同步造型/音色"),
-seg("已跳过", skipped, "，已有图片，未同步造型/音色"),
+seg("未找到", notFound, "，造型/音色未填"),
+seg("已跳过", skipped, "，已有图片，造型/音色未动"),
 ];
 if (failed.length > 0) parts.push(seg("没挂上", failed));
 setAssetMatch({
 busy: false,
-ok: failed.length === 0 && syncFailedNote === "",
-message: `一键匹配资产图完成：${parts.join("；")}。语气基调未同步，保持剧本原值。${syncFailedNote ? ` ${syncFailedNote}` : ""}`,
+ok: failed.length === 0,
+message: `一键匹配资产图完成：${parts.join("；")}。${
+matchedInfos.length > 0
+? "造型 / 音色只填进了待确认（人物按钮上标「匹配待确认」，打开人物面板能逐项对照），还没同步进分镜提示词——人物表与全部提示词都还是原来的值，检查后亲手点「确认并同步到分镜提示词」才会转正。"
+: ""
+}语气基调未填，保持剧本原值。`,
 });
+
 // v5.47 联动：「匹配后自动分析」开着时，匹配回执已出，接着
 // 自动跑同一轮批量分析（同口径、同进度、同总回执）；关着时
 // 到此为止、两者互不干扰。整轮拉库失败走 catch 分支，不触发。
@@ -17420,8 +17647,8 @@ if (autoAnalyzeAfterMatch) {
 void runBatchCharAnalysis({
 imageUrlByCode: matchedImageUrl,
 fromMatch: true,
-// v5.60：刚同步落盘的造型 / 音色字段级保护，联动分析
-// 只填语气基调、不覆盖这两项（见同步落盘处保护表）。
+// v5.60：刚带过来的造型 / 音色字段级保护，联动分析
+// 只填语气基调、不覆盖这两项（见待确认写入处保护表）。
 protectedFieldsByCode:
 protectedFieldsByCode.size > 0 ? protectedFieldsByCode : undefined,
 });
@@ -17461,7 +17688,7 @@ hadImage: boolean,
 imageFetchFailed: boolean = false,
 // v5.49：这次分析的任务号，随待确认记录一起深存（便于追溯与续取）。
 jobId: number | null = null,
-// v5.60：本轮受保护的字段（刚经一键匹配从资产卡同步落盘的造
+// v5.60：本轮受保护的字段（刚经一键匹配从资产卡带进待确认的造
 // 型 / 音色）——分析产出了也不写进编辑态，与 manual 来源同一
 // 级的字段级跳过；只由联动批量经核心函数递进来，面板单点不传。
 protectedFields?: ReadonlySet<"look" | "voice" | "tone">,
@@ -17714,7 +17941,7 @@ const runCharAnalysisCore = async (
 r: CharacterRow,
 report: CharAnalysisReport,
 imageUrlOverride?: string,
-// v5.60：受保护字段（联动批量递进：一键匹配刚同步落盘的造型
+// v5.60：受保护字段（联动批量递进：一键匹配刚带进待确认的造型
 // / 音色），透传给回填与驱动；面板单点不传、行为不变。
 protectedFields?: ReadonlySet<"look" | "voice" | "tone">,
 ): Promise<CharAnalysisOutcome | null> => {
@@ -17895,8 +18122,9 @@ fromMatch?: boolean;
 // 重跑（只跑剩下的人），回执单列「已出结果」点名。
 resume?: boolean;
 // v5.60：字段级保护表（代号 → 受保护字段集）——一键匹配联动
-// 专用：刚从资产卡同步落盘的造型 / 音色这轮分析不覆盖，逐人
-// 递给核心；手动点「一键AI分析」不传、行为不变。
+// 专用：刚从资产卡带过来的造型 / 音色这轮分析不覆盖（v5.84
+// 起它们在待确认里、还没转正），逐人递给核心；手动点「一键
+// AI分析」不传、行为不变。
 protectedFieldsByCode?: Map<string, ReadonlySet<"look" | "voice" | "tone">>;
 }): Promise<void> => {
 if (projectId == null) return;
@@ -18059,8 +18287,9 @@ if (genderConflicts.length > 0)
 parts.push(
 `提醒：${genderConflicts.join("、")}——性别跟音色对不上，这轮跳过没有动，请打开对应人物面板核对、在性别下拉里亲手定`,
 );
-// v5.60：联动保护点名——刚从资产卡同步落盘的字段这轮没被分
-// 析覆盖（语气基调照常分析、照常进待确认）。
+// v5.60：联动保护点名——刚从资产卡带过来的字段这轮没被分
+// 析覆盖（语气基调照常分析、照常进待确认）。v5.84 起这些字
+// 段在待确认里，文案随之改口径。
 if (opts?.protectedFieldsByCode && opts.protectedFieldsByCode.size > 0) {
 const FIELD_CN: Record<string, string> = { look: "造型", voice: "音色" };
 const desc = [...opts.protectedFieldsByCode.entries()]
@@ -18070,7 +18299,7 @@ const desc = [...opts.protectedFieldsByCode.entries()]
 )
 .join("、");
 parts.push(
-`刚从资产卡同步过来的字段已按手动修改口径保护、这轮分析没覆盖：${desc}；这些人的语气基调照常分析`,
+`刚从资产卡匹配进待确认的字段已按手动修改口径保护、这轮分析没覆盖：${desc}；这些人的语气基调照常分析`,
 );
 }
 const runNote =
@@ -18110,7 +18339,7 @@ return true;
 // 分镜页显示、不改任何导出（导出仍是完整通用版）。选择按项目持久
 // 化（localStorage 键带 projectId，换项目不串），默认 Seedance
 // 2.5。v5.40 主镜头卡片删除后，逐镜头下拉随卡片下线，只剩
-// 「Seedance 提示词（两版）」区内的下拉用这一个项目级状态。
+// 「Seedance 提示词（三版）」区内的下拉用这一个项目级状态。
 // projectId 缺失时用 default 桶，只保本机。
 const videoModelKey = `scriptbench.videoModel.${projectId ?? "default"}.v1`;
 const [videoModel, setVideoModel] = useState<VideoModelId>(() => {
@@ -18145,21 +18374,22 @@ window.localStorage.setItem(videoModelKey, next);
 // v5.31 MiniMax H3 两版拼装：与四档 Seedance 同源现算（人物表 /
 // 人物卡数据），人物表点「同步到分镜提示词」保存后这两版自动
 // 跟着新数据重拼，没有第二份缓存。按剧情版 = 已确认分镜原样；
-// 20–30 秒版 = 同一批节拍在 scriptlib 里重新并组（只影响这里
-// 的输出，不动已确认的分镜）。只在分镜阶段渲染这一节。
-const [h3Version, setH3Version] = useState<"plot" | "duration">("plot");
+// v5.90 起第 2 版 = 每镜 10–15 秒版：同一批节拍在 scriptlib 里
+// 按剧情转折点重新并组（只影响这里的输出，不动已确认的分镜）。
+// 只在分镜阶段渲染这一节。
+const [h3Version, setH3Version] = useState<"plot" | "short">("plot");
 const [h3Copied, setH3Copied] = useState<string | null>(null);
 const [h3CopyFail, setH3CopyFail] = useState<string | null>(null);
 const h3PlotLenses = useMemo<H3LensPrompt[]>(
 () => (script.stage === "storyboard" ? buildH3PlotVersion(script, mappingCtx) : []),
 [script, mappingCtx],
 );
-const h3DurationLenses = useMemo<H3LensPrompt[]>(
-() => (script.stage === "storyboard" ? buildH3DurationVersion(script, mappingCtx) : []),
+const h3ShortLenses = useMemo<H3LensPrompt[]>(
+() => (script.stage === "storyboard" ? buildH3ShortVersion(script, mappingCtx) : []),
 [script, mappingCtx],
 );
-const h3Lenses = h3Version === "plot" ? h3PlotLenses : h3DurationLenses;
-const h3VersionLabel = h3Version === "plot" ? "按剧情版" : "每镜 20–30 秒版";
+const h3Lenses = h3Version === "plot" ? h3PlotLenses : h3ShortLenses;
+const h3VersionLabel = h3Version === "plot" ? "按剧情版" : "每镜 10–15 秒版";
 const copyH3 = (key: string, text: string) => {
 void copyText(text).then((ok) => {
 if (ok) {
@@ -18173,15 +18403,16 @@ window.setTimeout(() => setH3CopyFail((c) => (c === key ? null : c)), 3000);
 }
 });
 };
-// v5.38 Seedance 提示词（两版）：与 H3 两版同构的汇总区，渲染在
-// 镜头卡片之后（v5.39 起与 H3 区左右并排：H3 左、Seedance 右，
-// 窄屏上下堆叠 H3 在上）。每镜头文本由 scriptlib
-// buildSeedancePlotVersion / buildSeedanceDurationVersion 现算——
-// 内部就是 buildSingleGroupTextForModel，与逐镜头「一键复制」同
-// 函数、同 opts（expandLook + videoModel），按剧情版逐字一致。
-// 视频模型与逐镜头下拉共用同一个 videoModel 状态（同一项目级选
-// 择，切任意一处全部一起变，两版一起变）。只在分镜阶段渲染。
-const [sdVersion, setSdVersion] = useState<"plot" | "duration">("plot");
+// v5.38 Seedance 提示词（v5.90 起三版）：与 H3 区并排的汇总区
+// （v5.39 起左右并排：H3 左、Seedance 右，窄屏上下堆叠 H3 在
+// 上）。每镜头文本由 scriptlib buildSeedancePlotVersion /
+// buildSeedanceDurationVersion / buildSeedanceForced30Version 现
+// 算——内部就是 buildSingleGroupTextForModel，与逐镜头「一键复
+// 制」同函数、同 opts（expandLook + videoModel），按剧情版逐字
+// 一致；强制 30 秒版只在内容装不满 30 秒的镜头末尾多一段纯白
+// 留白说明。视频模型共用同一个 videoModel 状态（同一项目级选
+// 择，切任意一处全部一起变，三版一起变）。只在分镜阶段渲染。
+const [sdVersion, setSdVersion] = useState<"plot" | "duration" | "forced30">("plot");
 const [sdCopied, setSdCopied] = useState<string | null>(null);
 const [sdCopyFail, setSdCopyFail] = useState<string | null>(null);
 const sdPlotLenses = useMemo<SeedanceLensPrompt[]>(
@@ -18192,28 +18423,15 @@ const sdDurationLenses = useMemo<SeedanceLensPrompt[]>(
 () => (script.stage === "storyboard" ? buildSeedanceDurationVersion(script, mappingCtx, { expandLook: lookExpanded, videoModel }) : []),
 [script, mappingCtx, lookExpanded, videoModel],
 );
-const sdLenses = sdVersion === "plot" ? sdPlotLenses : sdDurationLenses;
-const sdVersionLabel = sdVersion === "plot" ? "按剧情版" : "每镜 20–30 秒版";
-// v5.80 防版权拦截：开关打开时，H3 / Seedance 两版区里显示与逐镜
-// 头复制的都是过完替换表 + 末尾原创声明的文本，每张镜头卡下方带
-// 本块的替换清单；「复制全部」先拼未处理全文再整体过一次处理
-// （替换照常、声明只在全文末尾一份）。关掉立刻恢复原文。原始拼装
-// 结果（h3Lenses / sdLenses）一字不动，替换只发生在这层副本上。
-const guard = useCopyrightGuard();
-const guardLens = <T extends { text: string }>(
-l: T,
-): T & { hits: CopyrightGuardHit[] } => {
-const r = guard.apply(l.text);
-return { ...l, text: r.text, hits: r.hits };
-};
-const h3Shown = useMemo(
-() => h3Lenses.map(guardLens),
-[h3Lenses, guard],
+const sdForcedLenses = useMemo<SeedanceLensPrompt[]>(
+() => (script.stage === "storyboard" ? buildSeedanceForced30Version(script, mappingCtx, { expandLook: lookExpanded, videoModel }) : []),
+[script, mappingCtx, lookExpanded, videoModel],
 );
-const sdShown = useMemo(
-() => sdLenses.map(guardLens),
-[sdLenses, guard],
-);
+const sdLenses = sdVersion === "plot" ? sdPlotLenses : sdVersion === "duration" ? sdDurationLenses : sdForcedLenses;
+const sdVersionLabel = sdVersion === "plot" ? "按剧情版" : sdVersion === "duration" ? "每镜 20–30 秒版" : "强制 30 秒版";
+// v5.93：防版权拦截开关已下线（版权风险检查改走顶栏「提示词检
+// 查」页）——H3 / Seedance 两版区显示与复制一律按拼装原文
+// （h3Lenses / sdLenses），不再过替换表、不再加原创声明。
 const copySeedance = (key: string, text: string) => {
 void copyText(text).then((ok) => {
 if (ok) {
@@ -18315,7 +18533,7 @@ watermark（画面内禁止烧录任何文字/字幕/水印/logo，字幕后期�
 </li>
 <li>
 <strong>资产说明：</strong>人物资产=人物资产图（共{" "}
-{spec.characters.length} 位，见项目人物资产图）；场景资产=
+{specChars.length} 位，见项目人物资产图）；场景资产=
 {spec.scenes.some((s) => s.asset.trim())
 ? spec.scenes
 .map((s) => s.asset.trim())
@@ -18323,14 +18541,16 @@ watermark（画面内禁止烧录任何文字/字幕/水印/logo，字幕后期�
 .join("；")
 : "大纲与剧本中的场景描写"}
 </li>
+{(!specFilterOn || specChars.length > 0) && (
 <li>
 <strong>角色映射：</strong>
-{spec.characters.length > 0
-? spec.characters
+{specChars.length > 0
+? specChars
 .map((c) => `${c.name}=${c.name}（${c.role || "未填写"}）`)
 .join("；")
 : "未填写"}
 </li>
+)}
 {specScenes.length > 0 && (
 <li>
 <strong>场景映射：</strong>
@@ -18347,9 +18567,6 @@ return `${s.name}=${s.name}（${detail}）`;
 <li>
 <strong>语速：</strong>
 {script.speechRate} 字/秒，节奏紧凑
-</li>
-<li>
-<strong>首帧重叠：</strong>除第一个镜头外，每个镜头的首帧与上一镜头重叠1秒（首帧=上一镜头末帧，画面/场景/人物/末帧描述原文沿用上一镜头末帧）；重叠的1秒不重复台词、不计入故事时长，生成时长=镜头故事时长+1秒
 </li>
 <li>
 <strong>禁用：</strong>cartoon, anime, 3d render, plastic skin,
@@ -18389,13 +18606,13 @@ onUpdateVoice(c.name, e.target.value);
 </div>
 ))}
 </div>
-): (
+): specChars.length > 0? (
 <p className="mt-1 text-sm leading-6">
-{spec.characters
+{specChars
 .map((c) => `${c.name}=${c.voice.trim() || "未填写"}`)
 .join("；")}
 </p>
-)}
+): null}
 </div>
 </DocSection>
 
@@ -18484,7 +18701,7 @@ onClick={() => onUpdateFilmStyle("")}
 <tr>
 <th>生成总时长</th>
 <td>
-{(timeline.totalSeconds + Math.max(0, timeline.groups.length - 1)).toFixed(1)} 秒（故事总时长 + 首帧重叠 {Math.max(0, timeline.groups.length - 1)} 秒 = 镜头数 − 1；重叠秒数不计入故事时长，故事总时长没有变长）
+{timeline.totalSeconds.toFixed(1)} 秒（与故事总时长一致，镜头之间不重叠、时间码连续）
 </td>
 </tr>
 <tr>
@@ -18525,9 +18742,11 @@ const dirty = charRowDirty(r);
 // v5.49 两色标记：分析填的待确认值标「AI 待确认」、手改的标
 // 「已改」（同一人两样都有就两个都标）；都没有但编辑态与已存
 // 不一致（如性别种子变化）时回落旧「已改」标。
+// v5.84 第三色：一键匹配填进来的待确认值标「匹配待确认」。
 const btnRec = charPendingState[r.name];
 const hasAnalysisMark = !!btnRec && charPendingHasAnalysis(btnRec);
 const hasManualMark = !!btnRec && charPendingHasManual(btnRec);
+const hasMatchMark = !!btnRec && charPendingHasMatch(btnRec);
 const open = panelIdx === i;
 return (
 <button
@@ -18535,7 +18754,7 @@ key={i}
 type="button"
 className="btn btn-sm min-w-0 px-2"
 style={
-open || dirty || hasAnalysisMark || hasManualMark
+open || dirty || hasAnalysisMark || hasManualMark || hasMatchMark
 ? { borderColor: "var(--accent)", background: "var(--accent-soft)" }
 : undefined
 }
@@ -18554,7 +18773,15 @@ style={{ color: "var(--accent)" }}
 AI 待确认
 </span>
 )}
-{(hasManualMark || (!hasAnalysisMark && dirty)) && (
+{hasMatchMark && (
+<span
+className="shrink-0 text-[10px] font-bold"
+style={{ color: "var(--accent)" }}
+>
+匹配待确认
+</span>
+)}
+{(hasManualMark || (!hasAnalysisMark && !hasMatchMark && dirty)) && (
 <span
 className="shrink-0 text-[10px] font-bold"
 style={{ color: "var(--accent)" }}
@@ -18739,7 +18966,7 @@ aria-label={`${panelRow.name}的待确认值`}
 ).map(([f, label, storedVal]) =>
 panelRec.source[f] ? (
 <li key={f} className="break-words">
-{label}（{panelRec.source[f] === "analysis" ? "AI 分析" : "手改"}）：已存「
+{label}（{panelRec.source[f] === "analysis" ? "AI 分析" : panelRec.source[f] === "match" ? "一键匹配" : "手改"}）：已存「
 {storedVal}」→ 待确认「{panelRec[f]}」
 </li>
 ) : null,
@@ -18859,7 +19086,7 @@ aria-label={`「${panelRow.name}」AI 分析结果`}
 点上面的人物按钮、在弹出的面板里改人物的造型、性别、音色、语气基调：分析/手改的值先深存为『待确认』（刷新不丢），点这里才转正进人物表、同步全部提示词版本（四档
 Seedance、通用版与导出都跟着变；角色映射的造型句、每拍的说话人锁定句都会用新造型）。转正前人物表里的已存值一字不变、提示词也不会用到没确认的值；转正时会自动留一份转正前的已存值，面板里点「恢复上一版（同步前的已存值）」就能退回。只想确认一个人时，打开他的面板点「只确认此人」。改了性别时，造型和音色里的性别词（男孩
 / 女孩、男声 / 女声等）会一并换成新性别，保证文字和性别对得上；没动性别、只改文字时按你改的原样存。MiniMax H3
-两版（按剧情版 + 每镜 20–30 秒版）现在也在工作台里拼装（就在本页下方「MiniMax H3 提示词（两版）」一节），用的是同一份人物数据，点这个按钮同步后那边一起按新数据重拼。面板里还有「AI 分析」：点一下，只分析当前这一个人——造型按他的人物图来（只写图里看得见的发型、发色、脸型、穿搭和标志物，看不见的不编；这个人还没有人物图时造型不编、保持原样），音色和语气基调按他在剧本里的台词与身份推断；带图分析时性别只按图中看得见的综合特征判（面部、胡茬、喉结、体型，头发长短不算数），音色跟着判读走，判不准就不猜、音色留空等你定；分析永远不改性别下拉的值；「AI 分析」带三关审核：点下后立刻回显任务号、任务没建起来会明说「没发出去」；结果回来逐项核对造型／音色／语气基调，缺哪项自动补跑一次只补缺项（多用一次同样的分析推理），补跑后还缺就在回执里逐项点名（造型✓／音色✗／语气基调✓），不会把缺项的结果说成分析完；分析结果先填进面板的框里并深存为待确认（可以再改、刷新不丢），点这个按钮确认后才转正并同步全部提示词版本；你亲手改过的字段，分析不会覆盖（只分析没手改的字段）。只改人物数据，不动剧本正文和分镜结构，也不会自动生成图片。旁边的「一键匹配资产图」是另一件事：逐行按这个人的性别＋成年 / 未成年去人物资产储存库找对得上的卡，把它的主图挂到还没有图片的人物上——性别取人物表里的性别（没存过按音色、造型、身份里的词认），年龄段按身份、造型、音色里的词认（老教授、老师、研究员、老板、青年、中年算成年，小学生、初中生、高中生、少年、儿童算未成年，文字里写了年龄按 18 岁为界；只写「学生」认不准就不挂、不硬猜）；代号不用对上：同代号的卡正好对得上先用它，不然按 A 到 R 顺序取第一张对得上、这一轮还没分给别人的卡，一张卡一轮只分给一个人；分类还没定的存疑卡（现在是 E、I）不参与。已有图片的行不动。挂上图的同时，那张卡的造型（当前主体图的造型）和音色会一并同步进这个人的人物行、直接覆盖原来的值并马上存好（人物表与全部提示词版本一起跟着变）；卡上哪项是空的，那项就不同步、回执里逐人写清；语气基调不同步、保持剧本原来的值。点完会逐人列出推断结果与去向：已匹配写清挂了哪张卡、造型 / 音色同步了哪几项，未找到写清原因（比如同代号的卡年龄段对不上、年龄认不出、符合的卡这轮都分完了），已跳过写代号（已有图片，造型 / 音色也不动）。开着「匹配后自动分析」时，刚同步过来的造型、音色按你亲手改的值同等保护、这轮自动分析不覆盖它们，只分析语气基调。不改姓名、身份，也不会自动生成图片。同一行还有「一键AI分析」：点一下，人物表里已经有图的人，会逐个走一遍面板里那个单人「AI 分析」（同一条链路、同样的三关审核、缺项自动补跑一次，每人一次分析、补跑再多一次）；还没有图的人跳过、造型不编，有未确认手动修改的人跳过整行、不覆盖你改的值；只有待确认分析结果的人可以重跑（只覆盖分析填的字段）；跑的时候按钮下方显示「正在分析 X/N：代号」，跑完出一张总回执：逐人列造型✓／音色✓／语气基调✓，并点名已跳过（无图 / 有未确认的手动修改）、没填全与失败的人和原因；结果同样先深存为待确认（按钮上标「AI 待确认」、刷新不丢），点这个同步按钮才转正；中途刷新或切页回来，已出结果的人还在，按钮会变成「接着跑剩下的人」，点一下只跑没跑的人。它旁边的「匹配后自动分析」开关默认关着，打开后点「一键匹配资产图」、匹配一出回执就自动接着跑这轮批量分析。
+两版（按剧情版 + 每镜 10–15 秒版）现在也在工作台里拼装（就在本页下方「MiniMax H3 提示词（两版）」一节），用的是同一份人物数据，点这个按钮同步后那边一起按新数据重拼。面板里还有「AI 分析」：点一下，只分析当前这一个人——造型按他的人物图来（只写图里看得见的发型、发色、脸型、穿搭和标志物，看不见的不编；这个人还没有人物图时造型不编、保持原样），音色和语气基调按他在剧本里的台词与身份推断；带图分析时性别只按图中看得见的综合特征判（面部、胡茬、喉结、体型，头发长短不算数），音色跟着判读走，判不准就不猜、音色留空等你定；分析永远不改性别下拉的值；「AI 分析」带三关审核：点下后立刻回显任务号、任务没建起来会明说「没发出去」；结果回来逐项核对造型／音色／语气基调，缺哪项自动补跑一次只补缺项（多用一次同样的分析推理），补跑后还缺就在回执里逐项点名（造型✓／音色✗／语气基调✓），不会把缺项的结果说成分析完；分析结果先填进面板的框里并深存为待确认（可以再改、刷新不丢），点这个按钮确认后才转正并同步全部提示词版本；你亲手改过的字段，分析不会覆盖（只分析没手改的字段）。只改人物数据，不动剧本正文和分镜结构，也不会自动生成图片。旁边的「一键匹配资产图」是另一件事：逐行按这个人的性别＋成年 / 未成年去人物资产储存库找对得上的卡，把它的主图挂到还没有图片的人物上——性别取人物表里的性别（没存过按音色、造型、身份里的词认），年龄段按身份、造型、音色里的词认（老教授、老师、研究员、老板、青年、中年算成年，小学生、初中生、高中生、少年、儿童算未成年，文字里写了年龄按 18 岁为界；只写「学生」认不准就不挂、不硬猜）；代号不用对上：同代号的卡正好对得上先用它，不然按 A 到 R 顺序取第一张对得上、这一轮还没分给别人的卡，一张卡一轮只分给一个人；分类还没定的存疑卡（现在是 E、I）不参与。已有图片的行不动。挂上图的同时，那张卡的造型（当前主体图的造型）和音色会一并填进这个人的『待确认』（人物按钮上标「匹配待确认」，打开面板能逐项看到已存值和待确认值的对照），不会自动同步——人物表里的已存值和全部分镜提示词都还是原来的，你检查后亲手点这个「确认并同步到分镜提示词」按钮才会转正；卡上哪项是空的，那项就不填、回执里逐人写清；那个字段要是有你还没确认的手改，匹配不会覆盖它、回执里会点名；语气基调不填、保持剧本原来的值。点完会逐人列出推断结果与去向：已匹配写清挂了哪张卡、造型 / 音色填进待确认了哪几项，未找到写清原因（比如同代号的卡年龄段对不上、年龄认不出、符合的卡这轮都分完了），已跳过写代号（已有图片，造型 / 音色也不动）。开着「匹配后自动分析」时，刚填进待确认的造型、音色这轮自动分析不覆盖它们，只分析语气基调（语气基调同样先进待确认）。不改姓名、身份，也不会自动生成图片。同一行还有「一键AI分析」：点一下，人物表里已经有图的人，会逐个走一遍面板里那个单人「AI 分析」（同一条链路、同样的三关审核、缺项自动补跑一次，每人一次分析、补跑再多一次）；还没有图的人跳过、造型不编，有未确认手动修改的人跳过整行、不覆盖你改的值；只有待确认分析结果的人可以重跑（只覆盖分析填的字段）；跑的时候按钮下方显示「正在分析 X/N：代号」，跑完出一张总回执：逐人列造型✓／音色✓／语气基调✓，并点名已跳过（无图 / 有未确认的手动修改）、没填全与失败的人和原因；结果同样先深存为待确认（按钮上标「AI 待确认」、刷新不丢），点这个同步按钮才转正；中途刷新或切页回来，已出结果的人还在，按钮会变成「接着跑剩下的人」，点一下只跑没跑的人。它旁边的「匹配后自动分析」开关默认关着，打开后点「一键匹配资产图」、匹配一出回执就自动接着跑这轮批量分析。
 </p>
 <div className="mt-2 flex flex-wrap items-center gap-2">
 <button
@@ -19017,7 +19244,6 @@ style={{ borderColor: "var(--taupe)", background: "var(--surface)" }}
 
 {(sdPlotLenses.length > 0 || h3PlotLenses.length > 0) && (
 <>
-<CopyrightGuardControl guard={guard} />
 <div
 className={
 "grid items-start gap-x-6" +
@@ -19042,33 +19268,33 @@ onClick={() => setH3Version("plot")}
 </button>
 <button
 type="button"
-aria-pressed={h3Version === "duration"}
-onClick={() => setH3Version("duration")}
+aria-pressed={h3Version === "short"}
+onClick={() => setH3Version("short")}
 >
-每镜 20–30 秒版
+每镜 10–15 秒版
 </button>
 </div>
 <p className="mt-2 text-xs leading-5 text-[var(--dim)]">
 {h3Version === "plot"
 ? "按剧情版：镜头就是上面确认好的分镜镜头，一镜一段 H3，[Shot N] 是镜头里的节拍，一拍一镜、不删不并。"
-: "每镜 20–30 秒版：把全片节拍按顺序重新并成每镜高于 20 秒、低于 30 秒的组，一组一段 H3；只改这里的分组，不动上面已确认的分镜。节拍不能拆，个别组可能略超出这个范围，每段标题上都标了实际秒数。"}
+: "每镜 10–15 秒版：把全片节拍按剧情重新并成每镜 10–15 秒的组，一组一段 H3；换镜优先落在剧情转折点上——攒够 10 秒后，遇到场景转场、悬念/反转、人物出入场、情绪转折、说话人切换或换段处就切，新镜头从转折点开始；没攒够 10 秒不切，一直没等到转折点、满 15 秒才切。还有一条硬规矩：同一个动作没做完不切新镜头——切点正赶上一个动作做到一半时，等动作做完再切，所以个别组可能到 18 秒左右；动作本身比 18 秒还长时，才在节拍与节拍之间切开。每段提示词开头还写死了一句切镜规则给视频模型。只改这里的分组，不动上面已确认的分镜。节拍不能拆，最后一组可能不足 10 秒，每段标题上都标了实际秒数。"}
 </p>
 <div className="mt-3">
 <button
 type="button"
 className="btn btn-sm"
 aria-label={`复制${h3VersionLabel}全部 H3 提示词`}
-onClick={() => copyH3("all", guard.apply(buildH3FullText(h3Lenses, h3VersionLabel)).text)}
+onClick={() => copyH3("all", buildH3FullText(h3Lenses, h3VersionLabel))}
 >
 {h3CopyFail === "all"
 ? "复制失败，点此重试"
 : h3Copied === "all"
 ? "✓ 已复制全部"
-: `复制全部（${h3VersionLabel}，共 ${h3Shown.length} 段）`}
+: `复制全部（${h3VersionLabel}，共 ${h3Lenses.length} 段）`}
 </button>
 </div>
 <div className="mt-3 space-y-3">
-{h3Shown.map((l) => {
+{h3Lenses.map((l) => {
 const key = `lens-${l.lensIndex}`;
 return (
 <div
@@ -19104,11 +19330,6 @@ onClick={() => copyH3(key, l.text)}
 {l.text}
 </pre>
 </details>
-{guard.enabled && (
-<p className="mt-2 text-xs leading-5 text-[var(--dim)]">
-{formatGuardHits(l.hits)}
-</p>
-)}
 </div>
 );
 })}
@@ -19118,9 +19339,9 @@ onClick={() => copyH3(key, l.text)}
 </div>
 <div className="min-w-0">
 {sdPlotLenses.length > 0 && (
-<DocSection title="Seedance 提示词（两版）">
+<DocSection title="Seedance 提示词（三版）">
 <p className="text-xs leading-5 text-[var(--dim)]">
-上面每个镜头的 Seedance 提示词汇总在这里，一镜一段：用哪个视频模型就出哪个模型的格式（2.5 时间戳版、2.0 镜头序号版、Fast 单镜锁死版、Mini 画面再压版）——用下面这个「视频模型」下拉切换（项目级选择，按项目记住）。人物数据与上方人物表同源，在人物表改了造型 / 性别 / 音色、点「确认并同步到分镜提示词」后，这两版一起按新数据重拼。
+上面每个镜头的 Seedance 提示词汇总在这里，一镜一段：用哪个视频模型就出哪个模型的格式（2.5 时间戳版、2.0 镜头序号版、Fast 单镜锁死版、Mini 画面再压版）——用下面这个「视频模型」下拉切换（项目级选择，按项目记住）。人物数据与上方人物表同源，在人物表改了造型 / 性别 / 音色、点「确认并同步到分镜提示词」后，这三版一起按新数据重拼。
 </p>
 <div className="seg mt-3" role="group" aria-label="Seedance 提示词版本切换">
 <button
@@ -19137,24 +19358,33 @@ onClick={() => setSdVersion("duration")}
 >
 每镜 20–30 秒版
 </button>
+<button
+type="button"
+aria-pressed={sdVersion === "forced30"}
+onClick={() => setSdVersion("forced30")}
+>
+强制 30 秒版
+</button>
 </div>
 <p className="mt-2 text-xs leading-5 text-[var(--dim)]">
 {sdVersion === "plot"
 ? "按剧情版：镜头就是上面确认好的分镜镜头，一镜一段。"
-: "每镜 20–30 秒版：把全片节拍按顺序重新并成每镜高于 20 秒、低于 30 秒的组（与 H3 的 20–30 秒版同一重组口径），一组一段；只改这里的分组，不动上面已确认的分镜。节拍不能拆，个别组可能略超出这个范围，每段标题上都标了实际秒数。"}
+: sdVersion === "duration"
+? "每镜 20–30 秒版：把全片节拍按顺序重新并成每镜高于 20 秒、低于 30 秒的组，一组一段；同一个动作没做完不切新镜头：一个动作的几拍整段装进同一镜，整段装不下就整段挪到下一镜，动作本身超过 30 秒时才在节拍之间拆；每段提示词末尾写死了一句切镜规则给视频模型。只改这里的分组，不动上面已确认的分镜。节拍不能拆，个别组可能略超出这个范围，每段标题上都标了实际秒数。"
+: "强制 30 秒版：把全片节拍按顺序装进每镜 30 秒，一组一段；节拍不能拆——装到下一拍装不下时（比如内容只有 27 秒、下一拍是 4 秒、装进来就超 30 秒），这一镜就停在 27 秒，剩下的 3 秒在提示词末尾写成纯白留白（画面纯白、什么都没有），凑满 30 秒，下一拍从下一镜开始；最后一镜不足 30 秒的同样用纯白补满。同一个动作没做完不切新镜头：一个动作的几拍整段装进同一镜，整段装不进这一镜就整段挪到下一镜、这一镜宁可多留白，也不把动作拆到两镜里；动作本身超过 30 秒时才在节拍之间拆。每段提示词末尾（纯白留白之前）写死了一句切镜规则给视频模型。只改这里的分组，不动上面已确认的分镜。每段标题上都标了内容秒数和纯白秒数。"}
 </p>
 <div className="mt-3 flex flex-wrap items-center gap-3">
 <button
 type="button"
 className="btn btn-sm"
 aria-label={`复制${sdVersionLabel}全部 Seedance 提示词`}
-onClick={() => copySeedance("all", guard.apply(buildSeedanceFullText(sdLenses, sdVersionLabel)).text)}
+onClick={() => copySeedance("all", buildSeedanceFullText(sdLenses, sdVersionLabel))}
 >
 {sdCopyFail === "all"
 ? "复制失败，点此重试"
 : sdCopied === "all"
 ? "✓ 已复制全部"
-: `复制全部（${sdVersionLabel}，共 ${sdShown.length} 段）`}
+: `复制全部（${sdVersionLabel}，共 ${sdLenses.length} 段）`}
 </button>
 <span className="flex shrink-0 items-center gap-1.5">
 <label
@@ -19165,7 +19395,7 @@ htmlFor="seedance-video-model"
 </label>
 <select
 id="seedance-video-model"
-aria-label="视频模型（Seedance 提示词两版）"
+aria-label="视频模型（Seedance 提示词三版）"
 value={videoModel}
 onChange={(e) => changeVideoModel(e.target.value as VideoModelId)}
 className="shrink-0 rounded-[var(--radius)] px-2 py-1.5 text-[13px] font-bold"
@@ -19180,7 +19410,7 @@ style={{ background: "var(--surface)", border: "1px solid var(--border)", minHei
 </span>
 </div>
 <div className="mt-3 space-y-3">
-{sdShown.map((l) => {
+{sdLenses.map((l) => {
 const key = `lens-${l.lensIndex}`;
 return (
 <div
@@ -19192,7 +19422,9 @@ style={{ borderColor: "var(--border)", background: "var(--surface)" }}
 <p className="text-sm font-bold">
 镜头{l.lensIndex}｜{l.title}
 <span className="tc ml-2 text-xs font-normal text-[var(--dim)]">
-约 {l.duration.toFixed(1)} 秒 · {l.beatCount} 拍
+{l.padSeconds && l.padSeconds > 0
+? `内容约 ${(l.contentDuration ?? l.duration).toFixed(1)} 秒 + 纯白 ${l.padSeconds.toFixed(1)} 秒 = ${l.duration.toFixed(1)} 秒 · ${l.beatCount} 拍`
+: `约 ${l.duration.toFixed(1)} 秒 · ${l.beatCount} 拍`}
 </span>
 </p>
 <button
@@ -19216,11 +19448,6 @@ onClick={() => copySeedance(key, l.text)}
 {l.text}
 </pre>
 </details>
-{guard.enabled && (
-<p className="mt-2 text-xs leading-5 text-[var(--dim)]">
-{formatGuardHits(l.hits)}
-</p>
-)}
 </div>
 );
 })}

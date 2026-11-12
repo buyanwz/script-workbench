@@ -1,3 +1,11 @@
+// v5.87 打包只下数据包：点一次只下载一个 JSON 数据包，不再另外
+// 生成独立复刻页（工作台程序本身已经在 GitHub 上，不用打进备份）；
+// 项目连储存箱里的剧本一起打包——每个项目带储存箱状态（在不在储
+// 存箱、分类、星级、存入时间）与储存箱分类名单，导入后原样回到储
+// 存箱；训练进度（训练记录、模式与基因卡）、储存库卡与图片、生图
+// 记录与暂存图、本机设置与未保存草稿照旧打包；监控账号与监控视
+// 频、封面生成记录、工作台程序与任何 Key 都不打包。导入恢复继续
+// 在工作台里用这个数据包完成。
 // v3.78 一次点击两个文件：JSON 复刻包 + 独立复刻页（replicaview.ts
 // 生成的单文件 HTML，同布局/同窗口顺序/单套深色主题/全量数据与图片字
 // 节内嵌，双击离线可开），并在下载前对成品 JSON 文本做回读自验
@@ -79,7 +87,6 @@ assertPackageSelfCheck,
 type ContentFingerprint,
 type FingerprintReport,
 } from "./fingerprint";
-import { buildReplicaHtml } from "./replicaview";
 
 type Manifest = ApiResponse<typeof api, "exportBackupManifest">;
 type ManifestPreset = Manifest["presets"][number];
@@ -137,6 +144,8 @@ type BackupPackage = {
   exportedAt: string;
   counts: Manifest["counts"];
   categories: Manifest["categories"];
+  // v5.87：储存箱分类名单（旧包没有此字段，导入时按空处理）。
+  archiveCategories?: string[];
   presets: PkgPreset[];
   projects: PkgProject[];
   modes: ManifestMode[];
@@ -199,8 +208,8 @@ function buildReadme(
     "",
     `导出时间：${exportedAt}`,
     `工作台基线版本：${baseline}`,
-    `包内数量清单：项目 ${counts.projects} 个；储存库人物卡 ${counts.presets} 张；储存库图片 ${counts.presetImages} 张；项目人物图 ${counts.characterImages} 张；图片按内容（字节 SHA-256）去重后共 ${counts.totalUniqueImages} 张（同一张图多处引用、或在存储里存了多份相同字节，只存一份）；版本快照 ${counts.snapshots} 份；带爆款基因卡的模式 ${counts.modesWithCards} 个（模式1在内），风格卡共 ${counts.styleCards} 张、训练记录共 ${counts.trainingRecords} 条；生图记录 ${counts.imageGenRecords} 条，其中 ${counts.stagedImages ?? 0} 条的暂存图本体也随包迁移。`,
-    "这个包装了 1:1 复刻需要的全部内容：⓪一键复刻执行单——文件第一项「RESTORE_一键复刻执行单」是给新账号 Muse 的编号步骤（先验包 → 照规格重建 → 一次导入 → 指纹验收 → 重连 Geeknow → 收尾报告），用户在新账号只需把这一个文件发过去、可以不附任何文字，文件本身就是指令，不用再转述任何步骤；①布局排版 + 功能——包内 replicationSpec 字段是机器可读的完整规格（双台结构与窗口顺序、主题全部色值（单套深空未来）、审查页纸面规格、字号阶梯、全部功能规则、数据库表结构），另有人可读的 REPLICATION_一键复刻说明；②内容数据——项目 / 储存库卡 / 模式基因卡 / 训练记录 / 生图记录与暂存图本体都在包内数据段，图片是真实字节（逐张写清字节数与 SHA-256、导入时逐张复验，不是图片地址引用）；③本机状态——包内 localSettings 字段带了储存库查看档位与鼠标放大、指引档案与已看状态，localDrafts 字段带了未保存的剧本草稿（导入时按新项目 id 重新挂接）与生图面板草稿，在新工作台里导入本包时自动恢复；④内容指纹（v3.76）——包内 contentFingerprint 字段带了逐项内容哈希（项目大纲/剧本/快照、储存库卡全部字段、基因卡全文与权重、全部图片字节 SHA-256），导入结束后新台会自动回读自身数据同口径再算一份逐项比对并给出明细，内容级 1:1 由哈希对上证明、不再只对数量。打包下载前还有结构自检与成品回读自验（把即将下载的文本重新解析、逐张复核图片字节数与 SHA-256），缺项或对不上会拦下下载。同一次点击还会下载一个独立复刻页 HTML：同布局、同窗口顺序、单套深色主题、全量数据与图片字节内嵌，双击离线可开、可编辑（改基础设置/人物/大纲/剧本节拍/储存库卡/基因卡、自动存本机、时长重算、分镜重切、格式01/SRT/提示词包导出、改后数据导回成兼容包），v3.79 起页内还自带 AI 与生图（用户在页内填入自己的 Geeknow Key 直连同一服务商做 AI 大纲 / 剧本与生图，Key 不进复刻页文件），用户不等新账号就能当场用它干活并对照验收；它不是导入材料，导入仍只用本 JSON 包（或复刻页导出的更新包）。包里不含任何账号凭证与 Geeknow 的 Key。",
+    `包内数量清单：项目 ${counts.projects} 个（其中 ${counts.archivedProjects ?? 0} 个在储存箱里，储存箱状态随项目一起打包、导入后原样回到储存箱）；储存库人物卡 ${counts.presets} 张；储存库图片 ${counts.presetImages} 张；项目人物图 ${counts.characterImages} 张；图片按内容（字节 SHA-256）去重后共 ${counts.totalUniqueImages} 张（同一张图多处引用、或在存储里存了多份相同字节，只存一份）；版本快照 ${counts.snapshots} 份；带爆款基因卡的模式 ${counts.modesWithCards} 个（模式1在内），风格卡共 ${counts.styleCards} 张、训练记录共 ${counts.trainingRecords} 条；生图记录 ${counts.imageGenRecords} 条，其中 ${counts.stagedImages ?? 0} 条的暂存图本体也随包迁移。不打包：监控账号与监控视频、封面生成记录、工作台程序本身（已在 GitHub 上）、任何 Key 与凭证。`,
+    "这个包装了 1:1 复刻需要的全部内容：⓪一键复刻执行单——文件第一项「RESTORE_一键复刻执行单」是给新账号 Muse 的编号步骤（先验包 → 照规格重建 → 一次导入 → 指纹验收 → 重连 Geeknow → 收尾报告），用户在新账号只需把这一个文件发过去、可以不附任何文字，文件本身就是指令，不用再转述任何步骤；①布局排版 + 功能——包内 replicationSpec 字段是机器可读的完整规格（双台结构与窗口顺序、主题全部色值（单套深空未来）、审查页纸面规格、字号阶梯、全部功能规则、数据库表结构），另有人可读的 REPLICATION_一键复刻说明；②内容数据——项目 / 储存库卡 / 模式基因卡 / 训练记录 / 生图记录与暂存图本体都在包内数据段，图片是真实字节（逐张写清字节数与 SHA-256、导入时逐张复验，不是图片地址引用）；③本机状态——包内 localSettings 字段带了储存库查看档位与鼠标放大、指引档案与已看状态，localDrafts 字段带了未保存的剧本草稿（导入时按新项目 id 重新挂接）与生图面板草稿，在新工作台里导入本包时自动恢复；④内容指纹（v3.76）——包内 contentFingerprint 字段带了逐项内容哈希（项目大纲/剧本/快照、储存库卡全部字段、基因卡全文与权重、全部图片字节 SHA-256），导入结束后新台会自动回读自身数据同口径再算一份逐项比对并给出明细，内容级 1:1 由哈希对上证明、不再只对数量。打包下载前还有结构自检与成品回读自验（把即将下载的文本重新解析、逐张复核图片字节数与 SHA-256），缺项或对不上会拦下下载。v5.87 起打包只下载这一个数据包文件，不再另外生成独立复刻页——工作台程序本身已经在 GitHub 上，备份只装用户数据；恢复时在工作台里点「导入备份」上传本包即可。项目含储存箱里的项目（储存箱状态随项目打包、导入后原样回到储存箱）；监控账号与监控视频、封面生成记录不打包。包里不含任何账号凭证与 Geeknow 的 Key。",
     "图片校验字段说明（etag 与 SHA-256 的关系，必须分清）：清单（导出清单与包内图片的引用信息）里每张图带的 etag，就是该图字节的 SHA-256 校验值——etag 即 SHA-256，是同一个值，不是两种算法。但清单本身只有 etag、字节数与取图地址，不含图片字节；清单里的 etag 只能用来核对字节对不对，不能证明下载包里含字节。图片字节只在下载的复刻文件里：打包时逐张从服务端取回真实字节，先核对字节数、再实算 SHA-256 与 etag 比对，通过后才把字节本身写进包，包内每张图另存它自己的 sha256 字段；导入时再逐张按字节数与 sha256 复验。所以「包里含字节」的依据是下载文件里的图片数据段本身，不是一份只有 etag 的清单。",
     "打包失败口径（v3.75）：逐张取图时每张自动重试 3 次；重试后仍失败的图只记进失败清单（写清卡名 / 图名与原因），已经取回的图片保留，可以只补失败的那几张续跑，不用从头重取。只有用户在打包窗口里明确勾选确认后，才会生成「不完整包」：包内 incomplete 字段逐条写明缺了哪几张图，导入时也会先把缺图清单亮出来；不勾选就不会生成残缺包。",
     "",
@@ -223,15 +232,9 @@ export function BackupControls() {
     fileSize: number;
     exportedAt: string;
     incompleteCount: number;
-    // v3.77：下载前回读自验通过的图片张数与独立复刻页大小。
+    // v3.77：下载前回读自验通过的图片张数。
     verifiedImages: number;
-    replicaSize: number;
   } | null>(null);
-  // v3.78：本次生成的复刻页 HTML 原文（供打包完成后应用内预览，
-  // 沙箱 iframe 直接渲染同一份字节，不等下载落盘）；previewOpen
-  // 控制预览弹层开关。
-  const [replicaHtml, setReplicaHtml] = useState("");
-  const [previewOpen, setPreviewOpen] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
   // 导出失败隔离：本次打包会话里已取回的图片保留（关窗不丢、只补
   // 失败图续跑），失败清单逐条带卡名 / 图名与原因。
@@ -272,6 +275,8 @@ export function BackupControls() {
     incompleteMissing: { label: string; reason: string }[];
     // v3.76：是否带内容指纹（导入后自动逐项哈希核对）。
     hasFingerprint: boolean;
+    // v5.87：包里在储存箱里的项目数（旧包按项目行现算，可能为 0）。
+    archivedProjects: number;
   } | null>(null);
   // 本次导入恢复的本机界面设置项数（0 = 包里没带或没恢复成）。
   const [settingsApplied, setSettingsApplied] = useState(0);
@@ -300,6 +305,9 @@ export function BackupControls() {
   const [importDone, setImportDone] = useState(false);
   const [tally, setTally] = useState({
     projectsOk: 0,
+    // v5.87：包里在储存箱里的项目数与已按储存箱状态恢复的个数。
+    archivedExpected: 0,
+    archivedOk: 0,
     presetsOk: 0,
     presetImagesOk: 0,
     versionsOk: 0,
@@ -448,6 +456,8 @@ export function BackupControls() {
         exportedAt: m.exportedAt,
         counts: m.counts,
         categories: m.categories,
+        // v5.87：储存箱分类名单随包，导入时补建缺失分类。
+        archiveCategories: m.archiveCategories,
         presets: m.presets.map((p) => ({
           ...p,
           images: p.images.map((im) => ({
@@ -490,7 +500,7 @@ export function BackupControls() {
       // v3.77 下载前回读自验：把即将下载的这串文本当成一个刚拿到的
       // 文件重新解析，逐张图解码字节复核字节数与 SHA-256，并核对
       // 指纹段与各段数量——验的就是用户真正会拿到的那份字节，不
-      // 是内存里的组装对象；任一项对不上就抛错拦下两个下载。
+      // 是内存里的组装对象；任一项对不上就抛错拦下下载。
       setProgress("正在回读自验下载文件（重新解析 + 逐张复核图片哈希）…");
       const reparsed = JSON.parse(text) as BackupPackage & {
         "RESTORE_一键复刻执行单"?: string;
@@ -515,40 +525,11 @@ export function BackupControls() {
           throw new Error(`回读自验没过：图片 ${im.id} 的 SHA-256 对不上，已拦下下载，请重试打包`);
         verifiedImages += 1;
       }
+      // v5.87：只下载这一个数据包文件，不再另外生成独立复刻页。
       downloadText(
-        `剧本工作台1比1复刻包_${stamp}.json`,
+        `剧本工作台数据包_${stamp}.json`,
         text,
         "application/json;charset=utf-8",
-      );
-      // v3.77 独立复刻页：同一次点击的第二个下载——同布局、同窗口
-      // 顺序、单套深色主题、全量数据与图片字节内嵌的单文件 HTML，双击
-      // 离线可开，不需要账号、不需要导入（生成器见 replicaview.ts）。
-      // v3.78：页内升级为可编辑离线功能复刻，并把同一份 HTML 留在
-      // 状态里供打包完成后应用内预览（渲染的就是下载的那份字节）。
-      setProgress("正在生成独立复刻页（同一次下载的第二个文件）…");
-      const replicaHtml = buildReplicaHtml({
-        baseline: m.baseline,
-        exportedAt: m.exportedAt,
-        counts: m.counts,
-        acceptanceChecklist: pkg.acceptanceChecklist ?? [],
-        incomplete,
-        categories: m.categories,
-        presets: pkg.presets,
-        projects: pkg.projects,
-        modes: pkg.modes,
-        imageGenRecords: pkg.imageGenRecords ?? [],
-        images: images.map((im) => ({
-          id: im.id,
-          mimeType: im.mimeType,
-          dataBase64: im.dataBase64,
-        })),
-      });
-      setReplicaHtml(replicaHtml);
-      const replicaSize = new Blob([replicaHtml]).size;
-      downloadText(
-        `剧本工作台1比1复刻页_${stamp}.html`,
-        replicaHtml,
-        "text/html;charset=utf-8",
       );
       setExportDone({
         counts: m.counts,
@@ -556,7 +537,6 @@ export function BackupControls() {
         exportedAt: m.exportedAt,
         incompleteCount: incomplete?.missingImages.length ?? 0,
         verifiedImages,
-        replicaSize,
       });
       setExportFails([]);
       setExportKept(null);
@@ -757,6 +737,9 @@ export function BackupControls() {
           parsed["RESTORE_一键复刻执行单"].length > 0,
         incompleteMissing: parsed.incomplete?.missingImages ?? [],
         hasFingerprint: !!parsed.contentFingerprint,
+        archivedProjects:
+          parsed.counts.archivedProjects ??
+          parsed.projects.filter((p) => !!p.archived).length,
       });
       const t = await api.getBackupTargetInfo({});
       setTarget(t);
@@ -917,10 +900,17 @@ export function BackupControls() {
           oldId,
           newId,
         })),
+        // v5.87：储存箱分类名单（旧包没有就传空数组，服务端跳过）。
+        archiveCategories: pkgRef.current?.archiveCategories ?? [],
         projects: [
           {
             oldId: project.oldId,
             name: project.name,
+            // v5.87 储存箱状态随包恢复（旧包四项为空，按普通项目）。
+            archived: project.archived ?? undefined,
+            archiveCategory: project.archiveCategory ?? undefined,
+            stars: project.stars ?? undefined,
+            archivedAt: project.archivedAt ?? undefined,
             outline: project.outline,
             speechRate: project.speechRate,
             stylePreset: project.stylePreset,
@@ -973,6 +963,8 @@ export function BackupControls() {
       setTally((t) => ({
         ...t,
         projectsOk: t.projectsOk + 1,
+        // v5.87：这个项目在包里是储存箱状态且导入成功，计入已恢复。
+        archivedOk: t.archivedOk + (project.archived ? 1 : 0),
         versionsOk: t.versionsOk + r.versionsOk,
       }));
       for (const msg of r.characterImageErrors) {
@@ -1226,6 +1218,8 @@ export function BackupControls() {
     modeResultsRef.current = new Map();
     setTally({
       projectsOk: 0,
+      archivedExpected: pkg.projects.filter((p) => !!p.archived).length,
+      archivedOk: 0,
       presetsOk: 0,
       presetImagesOk: 0,
       versionsOk: 0,
@@ -1417,6 +1411,18 @@ export function BackupControls() {
             got: `${tally.projectsOk} 个`,
             ok: tally.projectsOk === pkgCounts.projects,
           },
+          // v5.87：储存箱项目单独一行——只在包里真有储存箱项目时列
+          // （旧包没有储存箱状态时不列，不拿不存在的项判未对上）。
+          ...(tally.archivedExpected > 0
+            ? [
+                {
+                  label: "储存箱项目（导入后仍在储存箱）",
+                  expected: `${tally.archivedExpected} 个`,
+                  got: `${tally.archivedOk} 个`,
+                  ok: tally.archivedOk === tally.archivedExpected,
+                },
+              ]
+            : []),
           {
             label: "储存库卡",
             expected: `${pkgCounts.presets} 张`,
@@ -1527,7 +1533,7 @@ export function BackupControls() {
           type="button"
           className="btn btn-sm shrink-0 font-bold"
           style={{ borderColor: "var(--terra)", color: "var(--walnut)" }}
-          aria-label="打包备份：把一键复刻执行单、布局与功能复刻规格、全部数据与图片、生图暂存图、本机界面设置与未保存草稿打包成一个 1:1 复刻文件下载"
+          aria-label="打包备份：只下载一个数据包文件，装全部项目（含储存箱里的剧本与储存箱状态）、训练记录与模式基因卡、储存库卡与图片、生图记录与暂存图、本机设置与未保存草稿；不打包监控账号、工作台程序与任何 Key"
           onClick={() => {
             setTab("export");
             setOpen(true);
@@ -1539,7 +1545,7 @@ export function BackupControls() {
           type="button"
           className="btn btn-sm shrink-0 font-bold"
           style={{ borderColor: "var(--terra)", color: "var(--walnut)" }}
-          aria-label="导入备份：上传备份 / 复刻文件，把项目、储存库卡与图片、模式、生图记录与暂存图、本机界面设置与未保存草稿恢复到本工作台（新增不覆盖）"
+          aria-label="导入备份：上传数据包，把项目（含储存箱状态）、储存库卡与图片、模式与训练记录、生图记录与暂存图、本机界面设置与未保存草稿恢复到本工作台（新增不覆盖）"
           onClick={() => {
             setTab("import");
             setOpen(true);
@@ -1557,7 +1563,7 @@ export function BackupControls() {
           }}
           role="dialog"
           aria-modal="true"
-          aria-label="工作台 1:1 复刻包"
+          aria-label="工作台打包备份"
           onClick={() => !busy && setOpen(false)}
         >
           <div
@@ -1570,7 +1576,7 @@ export function BackupControls() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start justify-between gap-3">
-              <p className="font-display text-lg font-bold">工作台 1:1 复刻包</p>
+              <p className="font-display text-lg font-bold">工作台打包备份</p>
               <button
                 type="button"
                 className="btn btn-sm shrink-0"
@@ -1601,12 +1607,31 @@ export function BackupControls() {
             {tab === "export" && (
               <div className="mt-4 text-sm leading-6">
                 <p>
-                  点一次，下载<strong>两个文件</strong>：JSON 1:1 复刻包（重建 + 导入用，第一项就是一键复刻执行单）与<strong>独立复刻页</strong>（双击离线可打开、可编辑）。不含任何账号凭证与 Geeknow 的 Key。
+                  点一次，只下载<strong>一个数据包文件</strong>，里面只装你的数据。工作台程序本身已经在 GitHub 上，不再打进备份里，也不再另外生成独立复刻页。恢复时在工作台里点「导入备份」上传这个数据包就能完成。
                 </p>
+                <div
+                  className="mt-3 rounded-[var(--radius)] border p-3"
+                  style={{ borderColor: "var(--border)" }}
+                  aria-label="打包范围说明"
+                >
+                  <p className="font-bold">会打包的（都在这一个文件里）：</p>
+                  <ul className="mt-1 list-disc pl-5">
+                    <li>全部剧本项目——<strong>包括储存箱里的剧本</strong>，连它在储存箱里的分类、星级和存入时间一起打包，导入后原样回到储存箱</li>
+                    <li>训练进度：训练记录、5 个模式和爆款基因卡</li>
+                    <li>人物资产库：全部人物卡的信息和图片（图片是真实字节，不是地址）</li>
+                    <li>生图记录和暂存图、本机界面设置、还没保存的草稿</li>
+                  </ul>
+                  <p className="mt-2 font-bold">不会打包的：</p>
+                  <ul className="mt-1 list-disc pl-5">
+                    <li>监控账号和监控视频（一直不打包）</li>
+                    <li>工作台程序本身（已经在 GitHub 上）</li>
+                    <li>任何 Key 和账号凭证（照旧不打包，恢复后重新连接一次即可）</li>
+                  </ul>
+                </div>
                 <details className="help-fold">
-                  <summary aria-label="复刻包内容说明（点开查看）">包里有什么（说明）</summary>
+                  <summary aria-label="数据包内容说明（点开查看）">打包规则细节（说明）</summary>
                   <div className="help-fold-body">
-                    独立复刻页：同布局、同窗口顺序、单套深色主题、全部内容与图片都在页里，不需要账号、不需要导入；页内可改设置、人物、大纲、剧本节拍、储存库卡与基因卡并自动存本机，时长重算、分镜重切、格式01 / SRT / 提示词包导出都在页内，改后数据还能导回成兼容包拿回本台导入；页内自带 AI 与生图（在页内填你自己的 Geeknow Key 直连同一服务商，Key 不进文件）。JSON 包第一项「一键复刻执行单」是给新账号 Muse 的编号步骤：新账号只需把这一个文件发过去（可不附文字），重建、导入、验收都按单做完。包内装齐：①布局与功能规格（双台结构、窗口顺序、主题色值、纸面规格、全部功能规则、数据表结构，机器可读 + 人可读各一份）；②全部数据：项目（大纲、剧本、分镜、人物、场景图、版本快照）、储存库全部卡及图片真实字节、模式与爆款基因卡、训练记录、生图记录与暂存图本体；③本机状态（界面设置 + 未保存草稿，导入时自动恢复）；④内容指纹（逐项内容哈希，导入后自动逐项核对）。下载前先自检包结构、再回读逐张复核图片哈希，缺项或对不上就拦下不下载。打包逐张取图、每张自动重试 3 次：个别图失败只记进失败清单，可只补失败图续跑，不会整包作废。
+                    数据包里除了上面的用户数据，还带三样恢复用的东西：①一键复刻执行单（文件第一项，给新账号 Muse 的编号步骤：新账号只需把这一个文件发过去、可以不附文字，重建、导入、验收都按单做完）；②布局与功能规格（工作台已在 GitHub 上，这份规格只作重建时的对照）；③内容指纹（逐项内容哈希，导入后自动逐项核对，内容对不对由哈希说话）。图片逐张取真实字节、写清字节数与 SHA-256，导入时逐张复验。下载前先自检包结构、再回读逐张复核图片哈希，缺项或对不上就拦下不下载。打包逐张取图、每张自动重试 3 次：个别图失败只记进失败清单，可只补失败图续跑，不会整包作废。
                   </div>
                 </details>
                 {progress && (
@@ -1685,20 +1710,22 @@ export function BackupControls() {
                   >
                     <p className="font-bold">
                       {exportDone.incompleteCount > 0
-                        ? `打包完成，不完整复刻文件已下载（缺 ${exportDone.incompleteCount} 张图，清单已写进包内）。`
-                        : "打包完成，1:1 复刻文件已下载（同一次点击共两个文件，见下）。"}
+                        ? `打包完成，不完整数据包已下载（缺 ${exportDone.incompleteCount} 张图，清单已写进包内）。`
+                        : "打包完成，数据包已下载（这次只下载了这一个文件）。"}
                     </p>
                     <ul className="mt-1 list-disc pl-5">
                       <li>
-                        独立复刻页（第二个文件，{fmtBytes(exportDone.replicaSize)}）：双击就能离线打开的可编辑功能复刻品——同布局（双台 + 窗口顺序）、单套深色主题、全部项目 / 储存库卡 / 基因卡与图片都在页里，不需要账号、不需要导入；页内可编辑并自动存本机、时长重算、分镜重切、格式01 / SRT / 提示词包导出、改后数据导回成兼容包都在页内；点下方「在应用内预览复刻页」不用等下载落盘就能先看它渲染出来
-                      </li>
-                      <li>
                         下载前回读自验已通过：即将下载的包已按成品文件重新解析，{exportDone.verifiedImages} 张图片逐张复核字节数与 SHA-256 全部对上
                       </li>
-                      <li>一键复刻执行单：已放在 JSON 包文件第一项（新账号把文件发给 Muse 即可、可以不附任何文字，文件本身就是指令）</li>
+                      <li>一键复刻执行单：已放在数据包文件第一项（新账号把文件发给 Muse 即可、可以不附任何文字，文件本身就是指令）</li>
                       <li>内容指纹：项目 / 卡 / 基因卡 / 图片的逐项内容哈希已随包（导入后新台会自动逐项核对）</li>
                       <li>复刻规格：布局 / 主题 / 功能规则 / 表结构已随包（文件第三项就是人可读复刻说明）</li>
-                      <li>项目 {exportDone.counts.projects} 个</li>
+                      <li>
+                        项目 {exportDone.counts.projects} 个
+                        {(exportDone.counts.archivedProjects ?? 0) > 0
+                          ? `（其中 ${exportDone.counts.archivedProjects} 个在储存箱里，储存箱状态已随包，导入后原样回到储存箱）`
+                          : ""}
+                      </li>
                       <li>储存库卡 {exportDone.counts.presets} 张</li>
                       <li>
                         图片 {exportDone.counts.totalUniqueImages} 张（按内容
@@ -1717,32 +1744,14 @@ export function BackupControls() {
                       <li>文件大小 {fmtBytes(exportDone.fileSize)}</li>
                       <li>导出时间 {new Date(exportDone.exportedAt).toLocaleString()}</li>
                     </ul>
-                    {replicaHtml && (
-                      <div className="mt-2">
-                        <button
-                          type="button"
-                          className="btn btn-sm"
-                          aria-label="在应用内预览复刻页（渲染本次下载的同一份复刻页 HTML）"
-                          onClick={() => setPreviewOpen(true)}
-                        >
-                          在应用内预览复刻页
-                        </button>
-                      </div>
-                    )}
                     <p className="mt-2">
-                      现在就能验的：点上面「在应用内预览复刻页」直接在本
-                      窗口看复刻页渲染（就是下载的那一份），或双击打开同
-                      一次下载的「复刻页」HTML——布局、窗口顺序、主题与
-                      全部内容、图片都在里面，还能进编辑模式改一处看时
-                      长重算、切一次分镜、导出一份 SRT，逐项对照不用等
-                      新账号。换账号要完整可用的工作台时：把
-                      JSON 复刻包发给新账号的 Muse 即可（可以不附任何
-                      文字，文件本身就是指令），那边会按文件第一项的执行
-                      单先验包、再照包内规格重建工作台、再导入数据、最后
-                      按内容指纹逐项哈希核对并报告；或在新账号同款工作台
-                      里点「导入备份」上传本文件只恢复数据（导入结束也会
-                      自动做指纹核对）。核对通过前不要退旧账号、不要删
-                      旧工作台。
+                      恢复方法：在工作台里点「导入备份」上传这个数据包
+                      就能把数据导回来（导入结束会自动做指纹核对）；换
+                      账号时把数据包发给新账号的 Muse 即可（可以不附
+                      任何文字，文件本身就是指令），那边会按文件第一项
+                      的执行单先验包、再照包内规格重建工作台、再导入数
+                      据、最后按内容指纹逐项哈希核对并报告。核对通过前
+                      不要退旧账号、不要删旧工作台。
                     </p>
                   </div>
                 )}
@@ -1771,7 +1780,7 @@ export function BackupControls() {
             {tab === "import" && (
               <div className="mt-4 text-sm leading-6">
                 <p>
-                  上传备份 / 复刻文件恢复数据（旧版包也能导入）。导入是<strong>新增</strong>：不覆盖、不删除已有数据。
+                  上传数据包恢复数据（旧版包也能导入）。包里在储存箱里的项目，导入后仍回到储存箱。导入是<strong>新增</strong>：不覆盖、不删除已有数据。
                 </p>
                 <input
                   ref={fileRef}
@@ -1807,10 +1816,14 @@ export function BackupControls() {
                     style={{ borderColor: "var(--border)" }}
                   >
                     <p>
-                      {pkgInfo.hasReplication ? "1:1 复刻包" : "备份包"}（基线{" "}
+                      {pkgInfo.hasReplication ? "数据包（带复刻规格）" : "数据包"}（基线{" "}
                       {pkgInfo.baseline}，导出于{" "}
                       {new Date(pkgInfo.exportedAt).toLocaleString()}）：项目{" "}
-                      {pkgInfo.counts.projects} 个、储存库卡 {pkgInfo.counts.presets}{" "}
+                      {pkgInfo.counts.projects} 个
+                      {pkgInfo.archivedProjects > 0
+                        ? `（其中 ${pkgInfo.archivedProjects} 个在储存箱里，导入后仍回到储存箱）`
+                        : ""}
+                      、储存库卡 {pkgInfo.counts.presets}{" "}
                       张、图片 {pkgInfo.counts.totalUniqueImages} 张（去重后）、带基因卡
                       的模式 {pkgInfo.counts.modesWithCards} 个、生图记录{" "}
                       {pkgInfo.counts.imageGenRecords ?? 0} 条
@@ -1973,47 +1986,6 @@ export function BackupControls() {
                 </div>
               </div>
             )}
-          </div>
-        </div>
-      )}
-      {previewOpen && replicaHtml && (
-        <div
-          className="fixed inset-0 flex items-center justify-center p-3 sm:p-5"
-          style={{ background: "rgba(3, 5, 9, 0.66)", zIndex: 70 }}
-          role="dialog"
-          aria-modal="true"
-          aria-label="独立复刻页应用内预览"
-          onClick={() => setPreviewOpen(false)}
-        >
-          <div
-            className="flex h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-[14px] border"
-            style={{
-              borderColor: "var(--border)",
-              background: "var(--surface)",
-              boxShadow: "var(--shadow-card)",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between gap-3 border-b p-3" style={{ borderColor: "var(--border)" }}>
-              <p className="text-sm font-bold">
-                独立复刻页预览（渲染的就是本次下载的那一份 HTML；预览框里本机存储与下载可能被浏览器限制，双击打开下载文件不受此限）
-              </p>
-              <button
-                type="button"
-                className="btn btn-sm shrink-0"
-                aria-label="关闭复刻页预览"
-                onClick={() => setPreviewOpen(false)}
-              >
-                关闭预览
-              </button>
-            </div>
-            <iframe
-              title="独立复刻页应用内预览"
-              className="w-full flex-1"
-              style={{ border: "none", background: "var(--bg)" }}
-              sandbox="allow-scripts"
-              srcDoc={replicaHtml}
-            />
           </div>
         </div>
       )}
