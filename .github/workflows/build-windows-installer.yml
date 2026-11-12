@@ -1,8 +1,10 @@
 # 自动打 Windows 安装包：每次 push 到 main 或手动触发，在 GitHub 的 Windows 服务器上构建 NSIS 安装包并发布到 Releases。
 # 注意：本文件里没有任何 Key、Token、密钥。构建只从官方地址下载 Python / ffmpeg / Pillow，并逐项校验 SHA-256 与字节数，校验失败即停下。
-# v1.1.3：工作台升到 v5.82——取消 AI助手聊天原型、问题处理页整页下线
-# （页面＋入口＋12 个动作＋两表记录全删）、新增防版权拦截开关（分镜页
-# 默认开、封面页不做）；「同步到 GitHub」按钮仅 Muse 内部存在，不进 exe。
+# v1.1.4：工作台升到 v6.00——新增「提示词检查」页、分镜页防版权拦截开关
+# 下线（导出恢复原文）、角色映射只列已提资产图的人物、生图提交拆步提速、
+# 参考图托管改走 Geeknow 自家上传、储存库服装图可拆成独立人物卡、封面
+# 风格 11 改成招牌「证物揭晓」版、封面取图提速；「同步到 GitHub」按钮仅
+# Muse 内部存在，不进 exe。
 # latest.yml 与安装包 blockmap 仍随安装包一起传到同一个 Release，
 # 否则已装的旧版查不到新版。
 name: Build Windows Installer
@@ -91,7 +93,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $f = Get-Item release/ScriptWorkbench-Setup-1.1.3.exe
+          $f = Get-Item release/ScriptWorkbench-Setup-1.1.4.exe
           Write-Output "installer size: $($f.Length) bytes"
           Write-Output "installer SHA-256: $((Get-FileHash $f -Algorithm SHA256).Hash)"
           # 真实安装包约 242MB；未完成的 NSIS 壳只有约 161KB。200MB 下限既能拦住未完成品，又不会误杀正常包。
@@ -100,14 +102,14 @@ jobs:
           # 否则已装的旧版查不到新版；文件名与版本号不对也算失败。
           if (-not (Test-Path release/latest.yml)) { throw 'latest.yml 缺失，自动更新元数据没生成' }
           $ym = Get-Content release/latest.yml -Raw
-          if ($ym -notmatch 'version: 1.1.3') { throw 'latest.yml 里的版本号不是 1.1.3' }
-          if ($ym -notmatch 'ScriptWorkbench-Setup-1.1.3.exe') { throw 'latest.yml 里的安装包文件名不对' }
+          if ($ym -notmatch 'version: 1.1.4') { throw 'latest.yml 里的版本号不是 1.1.4' }
+          if ($ym -notmatch 'ScriptWorkbench-Setup-1.1.4.exe') { throw 'latest.yml 里的安装包文件名不对' }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ScriptWorkbench-Setup-1.1.3
-          path: release/ScriptWorkbench-Setup-1.1.3.exe
+          name: ScriptWorkbench-Setup-1.1.4
+          path: release/ScriptWorkbench-Setup-1.1.4.exe
           if-no-files-found: error
 
       - name: Publish to Releases
@@ -115,8 +117,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.1.3 release/ScriptWorkbench-Setup-1.1.3.exe --title 'ScriptWorkbench 1.1.3' --notes 'Windows 安装包（NSIS，per-user 一键安装，无需管理员权限）。本次：取消 AI助手聊天原型；问题处理页整页下线；新增防版权拦截开关（分镜页）；工作台版本号改为 v5.82。' --target main
-          if ($LASTEXITCODE -ne 0) { gh release upload v1.1.3 release/ScriptWorkbench-Setup-1.1.3.exe --clobber }
+          gh release create v1.1.4 release/ScriptWorkbench-Setup-1.1.4.exe --title 'ScriptWorkbench 1.1.4' --notes 'Windows 安装包（NSIS，per-user 一键安装，无需管理员权限）。本次：新增「提示词检查」页；分镜页防版权拦截开关下线、导出恢复原文；角色映射只列已提资产图的人物；生图提交拆步提速、参考图改走 Geeknow 自家上传；储存库服装图可拆成独立人物卡；封面风格 11 招牌版；封面取图提速；工作台版本号改为 v6.00。' --target main
+          if ($LASTEXITCODE -ne 0) { gh release upload v1.1.4 release/ScriptWorkbench-Setup-1.1.4.exe --clobber }
           # 自动更新元数据随安装包一起进同一 Release（差分更新用的 blockmap 有就一起传，没有也不强求）。
-          gh release upload v1.1.3 release/latest.yml --clobber
-          if (Test-Path release/ScriptWorkbench-Setup-1.1.3.exe.blockmap) { gh release upload v1.1.3 release/ScriptWorkbench-Setup-1.1.3.exe.blockmap --clobber }
+          gh release upload v1.1.4 release/latest.yml --clobber
+          if (Test-Path release/ScriptWorkbench-Setup-1.1.4.exe.blockmap) { gh release upload v1.1.4 release/ScriptWorkbench-Setup-1.1.4.exe.blockmap --clobber }
