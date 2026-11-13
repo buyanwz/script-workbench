@@ -15117,9 +15117,11 @@ seedMonitorSampleData: defineAction({
 // 析 = 首次同步，不做服务端过滤（无效时间戳仍附 reportedAtMs
 // =null，客户端照样拦截打日志，绝不建卡）。
 fetchRelayIntake: defineAction({
-  description: "经服务端代理拉取跨浏览器中转里的新上报（服务端内置中转地址与密钥，前端不直连中转；v4.49 起在服务端把 reportedAt 归一化为数字时间戳做数值过滤，被拦的旧上报连原因一并返回；v4.50 起过滤下限取客户端 since 与服务端共享清除下限的较大者）。",
+  description: "经服务端代理拉取跨浏览器中转里的新上报（前端不直连中转；v4.49 起在服务端把 reportedAt 归一化为数字时间戳做数值过滤，被拦的旧上报连原因一并返回；v4.50 起过滤下限取客户端 since 与服务端共享清除下限的较大者；v6.04 起可带左下角「设置」里自填的中转站地址/密钥覆盖，非空覆盖、空回落服务端内置值，密钥只当次透传不落库不进日志）。",
   request: z.object({
     since: z.string().trim().max(300).default(""),
+    relayBase: z.string().trim().max(500).default(""),
+    relayToken: z.string().trim().max(500).default(""),
   }),
   response: z.object({
     ok: z.boolean(),
@@ -15154,6 +15156,8 @@ fetchRelayIntake: defineAction({
     try {
       r = await ctx.executePrivileged(privileged.relayFetchIntake, {
         since: args.since,
+        relayBase: args.relayBase,
+        relayToken: args.relayToken,
       });
     } catch (e) {
       return fail(
@@ -15299,6 +15303,9 @@ forwardRefreshToRelay: defineAction({
     coverUrl: z.string().trim().max(4000).default(""),
     reportedAt: z.string().trim().max(120).default(""),
     platform: z.string().trim().max(40).default(""),
+    // v6.04 监控中转站设置覆盖（同 fetchRelayIntake 口径）。
+    relayBase: z.string().trim().max(500).default(""),
+    relayToken: z.string().trim().max(500).default(""),
   }),
   response: z.object({
     ok: z.boolean(),
@@ -15334,6 +15341,8 @@ forwardRefreshToRelay: defineAction({
     try {
       r = await ctx.executePrivileged(privileged.relayPostReport, {
         payloadJson: JSON.stringify(payload),
+        relayBase: args.relayBase,
+        relayToken: args.relayToken,
       });
     } catch (e) {
       return {
@@ -15381,8 +15390,11 @@ forwardRefreshToRelay: defineAction({
 // 监控页中转状态行下方；全程不经浏览器直连，不受 iframe CSP
 // 影响，密钥不出现在任何一行结果里。
 testRelayConnection: defineAction({
-  description: "经服务端代理测试中转连通性（ping 免密钥 + intake 带密钥两步），返回每步结果供监控页展示。",
-  request: z.object({}),
+  description: "经服务端代理测试中转连通性（ping 免密钥 + intake 带密钥两步），返回每步结果供监控页展示。v6.04 起可带左下角「设置」里自填的中转站地址/密钥覆盖，非空覆盖、空回落服务端内置值；密钥绝不出现在任何一行结果里。",
+  request: z.object({
+    relayBase: z.string().trim().max(500).default(""),
+    relayToken: z.string().trim().max(500).default(""),
+  }),
   response: z.object({
     ok: z.boolean(),
     lines: z.array(z.string()),
@@ -15392,6 +15404,7 @@ testRelayConnection: defineAction({
   privileged: [privileged.relayPing, privileged.relayFetchIntake],
   async handler(
     ctx,
+    args,
   ): Promise<{
     ok: boolean;
     lines: string[];
@@ -15404,7 +15417,10 @@ testRelayConnection: defineAction({
     let pingOk = false;
     let intakeOk = false;
     try {
-      const p = await ctx.executePrivileged(privileged.relayPing, {});
+      const p = await ctx.executePrivileged(privileged.relayPing, {
+        relayBase: args.relayBase,
+        relayToken: args.relayToken,
+      });
       pingStatus = p.httpStatus;
       if (p.ok) {
         pingOk = true;
@@ -15422,6 +15438,8 @@ testRelayConnection: defineAction({
     try {
       const t = await ctx.executePrivileged(privileged.relayFetchIntake, {
         since: "",
+        relayBase: args.relayBase,
+        relayToken: args.relayToken,
       });
       intakeStatus = t.httpStatus;
       if (t.ok && t.bodyJson) {

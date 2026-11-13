@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
 // 左下角悬浮「设置」（v5.88）：按用户要求参照豆包的左下角展开悬浮
 // 框架——页面左下角常驻一个「设置」按钮，点开向上展开一个悬浮框，
-// 框里放全站设置。当前设置只有一项：v5.70 的「生图接口总设置」
-// （API 地址 + 密钥 Key），本版从生图面板顶部整份搬到这里——全站
+// 框里放全站设置。v5.88 起第一项是 v5.70 的「生图接口总设置」
+// （API 地址 + 密钥 Key），从生图面板顶部整份搬到这里——全站
 // 仍然只此一份，存储与读取口径一字不变：
 //   - 只存浏览器本机 localStorage（键 imagegen.apiSettings.v1，见
 //     imageapi.ts），刷新还在、换电脑要重填；不进数据库、不进备
@@ -23,6 +23,13 @@
 // ＞已连接凭证）/ Key 只存本机不进数据库·备份·记录·日志。
 // 悬浮框 z-[55]：低于生图面板（z-[60]）与各类确认弹窗（z-50 起的
 // ConfirmDialog 在本框之上弹出清除确认时仍可点），高于主内容区。
+// v6.04 新增第二项「监控中转站」（问题 #111301）：生图接口总设置
+// 下面加一段中转站地址 + 密钥自填（RelaySettingsForm），存储与生
+// 效口径同生图总设置（只存本机 localStorage 新键
+// monitor.relaySettings.v1、逐项非空才覆盖、都空回落服务端内置
+// 值，见 relaysettings.ts）；带「测试连接」（按当前填值跑服务端
+// testRelayConnection 两步、结果逐行显示在本框内）与带确认的
+// 「清除」；标题行「当前用：…」只显示地址来源、不显示密钥。
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState } from "react";
@@ -38,6 +45,14 @@ import {
   IMAGE_API_SETTINGS_EVENT,
   type ImageApiSettings,
 } from "./imageapi";
+import {
+  clearRelaySettings,
+  loadRelaySettings,
+  resolveRelayConfig,
+  saveRelaySettings,
+  RELAY_SETTINGS_EVENT,
+  type RelaySettings,
+} from "./relaysettings";
 
 const labelCls = "mb-1 block text-xs font-bold text-[var(--dim)]";
 
@@ -258,6 +273,197 @@ function ImageApiSettingsForm() {
   );
 }
 
+/** 监控中转站设置表单（v6.04，问题 #111301）：监控账号页跨浏览器
+ * 中转用的地址与密钥自填入口，排在生图接口总设置下面。存储与生效
+ * 口径见 relaysettings.ts：只存本机 localStorage、逐项非空才覆盖
+ * 服务端内置值、两项都空 = 现有行为一字不变。密钥只走密码框、永
+ * 不明文；「测试连接」按当前填的值跑服务端 testRelayConnection
+ * 两步（ping + intake），结果逐行显示在本框内；密钥不对时服务端
+ * 只回「密钥可能不对」，密钥本身绝不出现在任何结果行里。介绍照
+ * v6.03 瘦身口径收进末尾默认收起的「查看说明」，字段旁只留一行
+ * 最短提示。 */
+function RelaySettingsForm() {
+  const [relaySettings, setRelaySettings] = useState<RelaySettings>(() =>
+    loadRelaySettings(),
+  );
+  const [testLines, setTestLines] = useState<string[]>([]);
+  const [testing, setTesting] = useState(false);
+  const [testBad, setTestBad] = useState(false);
+  const [clearAsk, setClearAsk] = useState(false);
+  const resolved = resolveRelayConfig(relaySettings);
+
+  // 设置在别处被改时同步（跨窗口 storage 事件；同页写入方只有本表单，
+  // 监控页只读不写）。
+  useEffect(() => {
+    const on = () => setRelaySettings(loadRelaySettings());
+    window.addEventListener(RELAY_SETTINGS_EVENT, on);
+    window.addEventListener("storage", on);
+    return () => {
+      window.removeEventListener(RELAY_SETTINGS_EVENT, on);
+      window.removeEventListener("storage", on);
+    };
+  }, []);
+
+  const updateRelaySettings = (next: RelaySettings) => {
+    setRelaySettings(next);
+    saveRelaySettings(next);
+    setTestLines([]);
+  };
+
+  // 测试连接：按框里当前填的地址 / 密钥（还没保存的也算——输入即
+  // 保存，状态就是最新值）跑服务端两步测试，结果逐行显示在本框内。
+  const runTest = async () => {
+    if (testing) return;
+    setTesting(true);
+    setTestBad(false);
+    setTestLines(["正在测：先 ping 一下中转，再带密钥拉一次…"]);
+    try {
+      const cfg = resolveRelayConfig(relaySettings);
+      const res = await api.testRelayConnection({
+        relayBase: cfg.relayBase,
+        relayToken: cfg.relayToken,
+      });
+      setTestBad(!res.ok);
+      setTestLines(
+        res.lines.length > 0 ? res.lines : ["服务端没返回结果，可以再点一次。"],
+      );
+    } catch (e) {
+      setTestBad(true);
+      setTestLines([`测试没跑成：${describeThrownError(e)}`]);
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-bold">监控中转站</p>
+        <span
+          className="text-xs font-bold"
+          style={{ color: "var(--olive)" }}
+          role="status"
+        >
+          {resolved.sourceLabel}
+        </span>
+      </div>
+      <div className="mt-2">
+        <label className={labelCls} htmlFor="settings-relay-base">
+          中转站地址
+        </label>
+        <input
+          id="settings-relay-base"
+          type="text"
+          className="field field-sm"
+          value={relaySettings.relayBase}
+          autoComplete="off"
+          placeholder="留空 = 用内置地址"
+          aria-label="监控中转站设置：中转站地址（监控账号页拉取扩展上报、转发刷新链接要发去的中转服务器地址；留空用服务端内置地址）"
+          onChange={(e) =>
+            updateRelaySettings({ ...relaySettings, relayBase: e.target.value })
+          }
+        />
+        <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
+          留空用内置地址，一般不用改。
+        </p>
+      </div>
+
+      <div className="mt-2">
+        <label className={labelCls} htmlFor="settings-relay-token">
+          中转站密钥
+        </label>
+        <input
+          id="settings-relay-token"
+          type="password"
+          className="field field-sm"
+          value={relaySettings.relayToken}
+          autoComplete="off"
+          placeholder="留空 = 用内置密钥"
+          aria-label="监控中转站设置：中转站密钥（相当于中转站的密码，密码框输入、永不明文显示；留空用服务端内置密钥）"
+          onChange={(e) =>
+            updateRelaySettings({
+              ...relaySettings,
+              relayToken: e.target.value,
+            })
+          }
+        />
+        <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
+          留空用内置密钥；换地址须同时填对应密钥。
+        </p>
+      </div>
+
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-sm"
+          disabled={testing}
+          aria-label="按当前填的中转站地址和密钥测试连接（先 ping 再带密钥拉一次，只测连通、不改任何数据）"
+          onClick={() => void runTest()}
+        >
+          {testing ? "测试中…" : "测试连接"}
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm btn-danger-ghost"
+          disabled={!relaySettings.relayBase && !relaySettings.relayToken}
+          aria-label="清除监控中转站设置（先弹确认；清掉保存在本机的中转站地址和密钥，之后回落服务端内置值）"
+          onClick={() => setClearAsk(true)}
+        >
+          清除
+        </button>
+      </div>
+      {testLines.length > 0 && (
+        <div
+          className="mt-2 text-xs leading-5"
+          style={{ color: testBad ? "var(--bad)" : "var(--olive)" }}
+          role="status"
+        >
+          {testLines.map((line, i) => (
+            <p key={i}>{line}</p>
+          ))}
+        </div>
+      )}
+
+      <details className="help-fold">
+        <summary>查看说明</summary>
+        <div className="help-fold-body">
+          <p>
+            监控账号页要跟另一个浏览器里的扩展互通，中间靠一个「中转站」服务器转交数据：扩展把新视频上报到中转站，工作台再去中转站拉回来；你在监控页点「刷新链接」拿到的新链接，也要经中转站转发给定时下载任务。这两样就是连这个中转站要用的地址和密钥。
+          </p>
+          <p className="mt-2">
+            以前地址和密钥写死在工作台服务端里，界面上改不了；现在你可以在这里自填：填了就按你填的走，没填的那项继续用服务端内置的。只填地址就用你的地址＋内置密钥，只填密钥就用内置地址＋你的密钥，两项都留空和以前一模一样。
+          </p>
+          <p className="mt-2">
+            这两项只存在这台设备的浏览器本机里（刷新还在、换电脑要重填），不进数据库、不进备份包、不进任何记录和日志；密钥只走密码框、永远不明文显示，测试连接的结果里也绝不会出现密钥本身。注意：这里改的是工作台这一头，扩展自己选项页里的中转设置是另一回事、不受这里影响。
+          </p>
+        </div>
+      </details>
+
+      {/* 清除确认：密钥清掉就找不回来（本机没有别处存份），先确认
+          一次防手滑；确认后地址与密钥一并清掉、回落服务端内置值。 */}
+      {clearAsk && (
+        <ConfirmDialog
+          title="清除监控中转站设置？"
+          body={
+            <p>
+              会把保存在这台浏览器本机里的中转站地址和密钥一起清掉。密钥清掉后找不回来（工作台别处没有存份），之后监控页拉取上报和转发刷新链接都会改回用服务端内置的地址和密钥。要继续吗？
+            </p>
+          }
+          confirmLabel="清除"
+          cancelLabel="不清除"
+          onConfirm={() => {
+            clearRelaySettings();
+            setRelaySettings({ relayBase: "", relayToken: "" });
+            setTestLines([]);
+            setClearAsk(false);
+          }}
+          onCancel={() => setClearAsk(false)}
+        />
+      )}
+    </div>
+  );
+}
+
 /**
  * 左下角悬浮「设置」框架：收起时只是一个「设置」按钮，点开向上展
  * 开悬浮框；再点按钮或框右上角「收起」关闭。任何页面都在，位置参
@@ -289,6 +495,12 @@ export function SettingsDock() {
             </button>
           </div>
           <ImageApiSettingsForm />
+          <div
+            className="my-3 border-t"
+            style={{ borderColor: "var(--border)" }}
+            aria-hidden="true"
+          />
+          <RelaySettingsForm />
         </div>
       )}
       <button
@@ -300,7 +512,7 @@ export function SettingsDock() {
           color: "var(--text)",
           minHeight: 44,
         }}
-        aria-label={open ? "收起左下角设置" : "打开左下角设置（生图接口的 API 地址和密钥在这里）"}
+        aria-label={open ? "收起左下角设置" : "打开左下角设置（生图接口的 API 地址和密钥、监控中转站的地址和密钥都在这里）"}
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >

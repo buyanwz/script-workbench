@@ -271,6 +271,12 @@ export const privileged = definePrivilegedContracts({
   relayFetchIntake: {
     request: z.object({
       since: z.string().max(300).default(""),
+      // v6.04 监控中转站设置覆盖（左下角「设置」里用户自填，只存本机
+      // localStorage、经动作当次透传）：非空才覆盖 RELAY_PY 内置值，
+      // 空的回落内置地址 / 内置密钥。密钥只在本次请求内存里用，绝不
+      // 进日志、不进任何返回字段。
+      relayBase: z.string().max(500).default(""),
+      relayToken: z.string().max(500).default(""),
     }),
     response: z.object({
       ok: z.boolean(),
@@ -281,7 +287,12 @@ export const privileged = definePrivilegedContracts({
     timeoutMs: 120_000,
   },
   relayPing: {
-    request: z.object({}),
+    request: z.object({
+      // v6.04 同 relayFetchIntake：中转站覆盖（/ping 本身免密钥，
+      // 只用地址；密钥字段为统一透传口径保留）。
+      relayBase: z.string().max(500).default(""),
+      relayToken: z.string().max(500).default(""),
+    }),
     response: z.object({
       ok: z.boolean(),
       httpStatus: z.number().nullable(),
@@ -293,11 +304,15 @@ export const privileged = definePrivilegedContracts({
   // 【第 8 档·监控断供恢复】刷新回程转发：工作台收到扩展刷新回传
   // 并写回成功后，把新链接以同协议上报 POST 到中转 /report，让只
   // 读中转 intake 的 cron 下载器下一轮拿到新链接。请求只带动作层
-  // 拼好的 payloadJson（smzs-monitor-intake/1 协议体），中转地址
-  // 与密钥仍只在 RELAY_PY 服务端配置里，不进请求、不进日志。
+  // 拼好的 payloadJson（smzs-monitor-intake/1 协议体）；中转地址
+  // 与密钥默认用 RELAY_PY 内置值，v6.04 起可经 relayBase /
+  // relayToken 当次覆盖（只存本机、只在内存里用、不进日志）。
   relayPostReport: {
     request: z.object({
       payloadJson: z.string().min(1).max(20000),
+      // v6.04 同 relayFetchIntake：中转站覆盖，非空覆盖、空回落内置。
+      relayBase: z.string().max(500).default(""),
+      relayToken: z.string().max(500).default(""),
     }),
     response: z.object({
       ok: z.boolean(),
@@ -1267,6 +1282,10 @@ import json, os, sys, urllib.request, urllib.error, urllib.parse
 
 BASE = "https://smzs-relay.weathered-breeze-337c.workers.dev"
 TOKEN = os.environ.get("SMZS_RELAY_TOKEN", "")
+# v6.04：左下角「设置·监控中转站」可自填地址 / 密钥，经动作当次以
+# base / token 入参透传到这里：非空覆盖上面内置值，空的回落内置值
+# （main() 起手处解析）。覆盖密钥只存在于本次进程内存，绝不打印、
+# 绝不拼进任何错误文案。
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args):
@@ -1323,7 +1342,14 @@ def do_post(path, payload):
         return None, None, type(e).__name__ + ": " + str(e)[:300]
 
 def main():
+    global BASE, TOKEN
     req_in = json.load(sys.stdin)
+    base_in = str(req_in.get("base") or "").strip().rstrip("/")
+    token_in = str(req_in.get("token") or "").strip()
+    if base_in:
+        BASE = base_in
+    if token_in:
+        TOKEN = token_in
     mode = req_in.get("mode")
     if mode == "ping":
         status, body, err = do_get("/ping", False)
@@ -2321,6 +2347,8 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
     const raw = await runPythonHelper(RELAY_PY, {
       mode: "intake",
       since: args.since,
+      base: args.relayBase ?? "",
+      token: args.relayToken ?? "",
     });
     return {
       ok: raw.ok === true,
@@ -2334,8 +2362,12 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
             : "中转代理调用失败",
     };
   },
-  async relayPing() {
-    const raw = await runPythonHelper(RELAY_PY, { mode: "ping" });
+  async relayPing(args) {
+    const raw = await runPythonHelper(RELAY_PY, {
+      mode: "ping",
+      base: args?.relayBase ?? "",
+      token: args?.relayToken ?? "",
+    });
     return {
       ok: raw.ok === true,
       httpStatus: typeof raw.httpStatus === "number" ? raw.httpStatus : null,
@@ -2352,6 +2384,8 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
     const raw = await runPythonHelper(RELAY_PY, {
       mode: "report",
       payloadJson: args.payloadJson,
+      base: args.relayBase ?? "",
+      token: args.relayToken ?? "",
     });
     return {
       ok: raw.ok === true,

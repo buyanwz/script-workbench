@@ -1,6 +1,6 @@
 {
   "name": "hatch-ts-space-space-4",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "main": "electron/dist/main.cjs",
   "private": true,
   "type": "module",

@@ -85,6 +85,7 @@ looksLikeExcelSerial,
 parseMonitorXlsx,
 } from "./monitorxlsx";
 import { CloudBadge, useCloudVideoSource } from "./cloudvideo";
+import { loadRelaySettings, relayActionArgs } from "./relaysettings";
 import sampleCover from "./assets/封面参照图-21张/monitor-huanxiong-cover.jpg";
 import type { AnalysisPrefill } from "./analysisbench";
 
@@ -4385,7 +4386,11 @@ export function MonitorBench({
     setRelayTesting(true);
     setRelayTestLines(["测试连接：正在经服务端代理测中转…"]);
     try {
-      const res = await api.testRelayConnection({});
+      // v6.04：带左下角「设置·监控中转站」里自填的地址/密钥（当次
+      // 现读现传，没填的项服务端回落内置值）。
+      const res = await api.testRelayConnection({
+        ...relayActionArgs(loadRelaySettings()),
+      });
       setRelayTestLines(
         res.lines.length > 0 ? res.lines : ["测试连接：服务端没返回结果。"],
       );
@@ -4452,8 +4457,11 @@ export function MonitorBench({
       const batchFloor = lastReportedAtRef.current;
       const sinceSent = batchFloor > 0 ? String(batchFloor) : "";
       try {
+        // v6.04：每轮现读左下角「设置·监控中转站」的自填地址/密钥
+        // 当次透传（改了设置下一轮即生效；没填回落服务端内置值）。
         const data = await api.fetchRelayIntake({
           since: sinceSent,
+          ...relayActionArgs(loadRelaySettings()),
         });
         if (!data.ok) {
           throw new Error(data.error ?? "中转代理失败");
@@ -4698,6 +4706,9 @@ export function MonitorBench({
                   p.platform === undefined || p.platform === null
                     ? ""
                     : String(p.platform),
+                // v6.04：与拉取同一份中转站设置（左下角「设置」自填，
+                // 没填回落服务端内置值）。
+                ...relayActionArgs(loadRelaySettings()),
               });
               console.log(
                 fwd.ok
