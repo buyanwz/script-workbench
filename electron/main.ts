@@ -1,11 +1,18 @@
 // Electron 主进程（P1 骨架）— 剧本创作工作台 exe 的壳。
 //
-// 双视图（左聊天第一期）：主窗口内两个 WebContentsView——左视图加载
-// exe 专属聊天页（/exe-chat/），右视图原样加载工作台（/）。默认左视图
-// 收成 36px 窄边，点小边滑出到 380px，点收起回到窄边；展开后可按住
-// 聊天页右边缘的分界左右拖动调宽（280–640px），拖好的宽度记在本机，
-// 下次打开还在。工作台视图的 URL 与加载方式与原来完全一致，工作台
-// 代码零改动。切工作台页面时聊天视图独立存在，聊天不丢。
+// 三视图（左聊天 + 分界条）：主窗口内三个 WebContentsView——左视图
+// 收起时加载本地窄边页（/exe-chat-collapsed/，36px 窄边，点一下滑出），
+// 展开时直接导航到真正的 muse.ai 网页（顶层导航，不是 iframe；各人登
+// 各人的号）；中间一条 8px 分界视图（/exe-chat-divider/，本地极简页，
+// 只在展开时可见），按住左右拖动调宽、双击收起/展开——muse.ai 远端
+// 页面上没有手柄也没有页内收起按钮，这条分界把拖拽调宽补回来；右视图
+// 原样加载工作台（/）。展开宽度默认 380px，可调宽（280–640px，钳制与
+// 记忆都在主进程），拖好的宽度记在本机，下次打开还在。工作台视图的 URL 与加载方式与原来完全一致，工作台代码零改动。
+// 左视图用默认持久会话（不设 partition），登录态靠 Cookie 跨重启保留；
+// 收起时 muse.ai 页面卸载，下次展开重载、凭 Cookie 恢复登录态。
+// 真 Muse 够不着本机项目、写不回工作台，分析结果靠手动复制（用户已定）。
+// exe 自己的聊天后端（/exe-chat/ 与 /api/chat/*）保留休眠不断链，以便回退，
+// 只是左视图不再默认加载它。切工作台页面时聊天视图独立存在，聊天不丢。
 //
 // 职责（port-plan.md D2）：
 //   1. 找一个本机空闲端口（默认 3000，被占则往后顺延）；
@@ -78,18 +85,21 @@ const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const UPDATE_FIRST_CHECK_DELAY_MS = 20_000;
 
 // 左聊天栏宽度：收起时只留一条窄边（点一下滑出），展开时默认 380px。
-// 展开宽度可拖拽：聊天页右边缘有一条分界，鼠标按住左右拖动即调宽，
-// 范围钳制在 280–640px；拖好的宽度记在 userData 的 chat-layout.json
-// 里（只存展开宽度一个数），下次打开 exe 还在。
+// 展开宽度经 IPC 可调，范围钳制在 280–640px；调好的宽度记在
+// userData 的 chat-layout.json 里（只存展开宽度一个数），下次打开
+// exe 还在。分界视图宽 8px，只在展开时可见，夹在左视图与工作台
+// 视图之间；收起时分界视图宽 0（点不中），工作台从 36px 处开始。
 const CHAT_COLLAPSED_WIDTH = 36;
 const CHAT_DEFAULT_WIDTH = 380;
 const CHAT_MIN_WIDTH = 280;
 const CHAT_MAX_WIDTH = 640;
+const DIVIDER_WIDTH = 8;
 
 let serverChild: ChildProcess | null = null;
 let serverPort = DEFAULT_PORT;
 let mainWindow: BrowserWindow | null = null;
 let chatView: WebContentsView | null = null;
+let dividerView: WebContentsView | null = null;
 let workView: WebContentsView | null = null;
 let chatExpanded = false;
 // 当前展开宽度：启动时从本机记忆文件读回（读不到就用默认 380px），
@@ -113,15 +123,29 @@ const BASE_DIR = app.isPackaged
     : join(DIST_DIR, "..", "..");
 const CLIENT_DIST_DIR = join(BASE_DIR, "client", "dist");
 
-// preload 脚本路径：首选 DIST_DIR 下的 preload.cjs；若不存在（例如以
-// electron . 方式启动导致 getAppPath 指向工程根），改从工程根推导；
-// 都不存在时仍返回首选，让 Electron 报错可见。
-const PRELOAD_PATH = (() => {
-  const direct = join(DIST_DIR, "preload.cjs");
+// preload 脚本路径：按文件名在 DIST_DIR 下找，找不到改从工程根推导；
+// 都不存在时仍返回首选，让 Electron 报错可见。完整版（preload.cjs，
+// 7 个接口）只给右工作台视图；最小版（preload-chat.cjs，仅聊天栏
+// 展开/收起与调宽 4 个接口）只给左视图——远端页面绝不能拿到
+// restartService / checkForUpdates / getAppVersion。
+function resolvePreloadPath(fileName: string): string {
+  const direct = join(DIST_DIR, fileName);
   if (existsSync(direct)) return direct;
-  const viaBase = join(BASE_DIR, "electron", "dist", "preload.cjs");
+  const viaBase = join(BASE_DIR, "electron", "dist", fileName);
   return existsSync(viaBase) ? viaBase : direct;
-})();
+}
+const PRELOAD_PATH = resolvePreloadPath("preload.cjs");
+const CHAT_PRELOAD_PATH = resolvePreloadPath("preload-chat.cjs");
+
+// 左视图展开时加载的真正 Muse 网页（直接导航，不是 iframe）。
+const MUSE_WEB_URL = "https://muse.ai";
+
+/** 左视图当前应加载的地址：展开是 muse.ai，收起是本地窄边页。 */
+function chatTargetUrl(expanded: boolean): string {
+  return expanded
+    ? MUSE_WEB_URL
+    : `http://127.0.0.1:${serverPort}/exe-chat-collapsed/`;
+}
 
 /** 找空闲端口：从 startPort 起逐个试 bind，第一个能 bind 的即空闲。 */
 function findFreePort(startPort: number): Promise<number> {
@@ -243,7 +267,7 @@ div{max-width:420px;text-align:center;padding:24px}button{font-size:16px;padding
 <body><div><h1>服务掉了</h1><p>工作台的本地服务意外退出了，你的项目数据没有丢（数据存在你电脑上，不在服务进程里）。</p>
 <p><button onclick="window.electronAPI.restartService()">点这里重启服务</button></p></div></body></html>`;
   const url = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
-  // 双视图形态下错误页进工作台视图（它有 preload，重启按钮可用）；
+  // 三视图形态下错误页进工作台视图（它有 preload，重启按钮可用）；
   // 无视图的兜底窗口则沿用原来的窗口级加载。
   if (workView && !workView.webContents.isDestroyed()) {
     void workView.webContents.loadURL(url);
@@ -288,28 +312,46 @@ function saveChatExpandedWidth(width: number): void {
   }
 }
 
-/** 按当前展开状态排两个视图：左聊天栏 + 右工作台，窗口 resize 时重排。 */
+/** 按当前展开状态排三个视图：左聊天栏 + 8px 分界条 + 右工作台，窗口
+ *  resize 时重排。展开时分界条贴在左视图右缘，工作台从分界条右侧
+ *  开始；收起时分界条宽 0（不可见、点不中），工作台从 36px 窄边处开始。 */
 function layoutViews(): void {
-  if (!mainWindow || mainWindow.isDestroyed() || !chatView || !workView) return;
+  if (!mainWindow || mainWindow.isDestroyed() || !chatView || !dividerView || !workView) return;
   const bounds = mainWindow.getContentBounds();
   const chatWidth = chatExpanded ? chatExpandedWidth : CHAT_COLLAPSED_WIDTH;
+  const dividerWidth = chatExpanded ? DIVIDER_WIDTH : 0;
   chatView.setBounds({ x: 0, y: 0, width: chatWidth, height: bounds.height });
-  workView.setBounds({
+  dividerView.setBounds({
     x: chatWidth,
     y: 0,
-    width: Math.max(0, bounds.width - chatWidth),
+    width: dividerWidth,
+    height: bounds.height,
+  });
+  workView.setBounds({
+    x: chatWidth + dividerWidth,
+    y: 0,
+    width: Math.max(0, bounds.width - chatWidth - dividerWidth),
     height: bounds.height,
   });
 }
 
 function setChatExpanded(expanded: boolean): { expanded: boolean } {
+  const changed = expanded !== chatExpanded;
   chatExpanded = expanded;
   layoutViews();
+  // 状态真变了才换左视图地址：展开加载 muse.ai，收起切回本地窄边页
+  // （muse.ai 页面随之卸载，登录态靠默认会话的 Cookie 保留，下次展开
+  // 重载恢复）。重复点同一状态不重复加载，避免把正在聊的页面刷掉。
+  if (changed && chatView && !chatView.webContents.isDestroyed()) {
+    chatView.webContents.loadURL(chatTargetUrl(expanded)).catch((err: unknown) => {
+      log("chat view failed to load:", err instanceof Error ? err.message : err);
+    });
+  }
   return { expanded: chatExpanded };
 }
 
-/** 拖拽调宽：钳制到 280–640px，立即记到本机文件，下次打开还在。
- *  收起时只记宽度、不改当前窄边（分界手柄收起时不显示，本来也拖不到）。
+/** 调宽：钳制到 280–640px，立即记到本机文件，下次打开还在。
+ *  收起时只记宽度、不改当前窄边。
  *  非数字入参直接忽略，返回当前状态，不改任何东西。 */
 function setChatWidth(width: unknown): { expanded: boolean; width: number } {
   if (typeof width !== "number" || !Number.isFinite(width)) {
@@ -324,7 +366,10 @@ function setChatWidth(width: unknown): { expanded: boolean; width: number } {
   return { expanded: chatExpanded, width: chatExpandedWidth };
 }
 
-/** 建双视图壳窗口（两个视图共用同一份 preload，隔离配置与原来一致）。 */
+/** 建三视图壳窗口（三个视图隔离配置与原来一致；preload 分开：左视图
+ *  与分界视图只拿最小版，右工作台视图拿完整版。三个视图都不设
+ *  partition，走默认持久会话，muse.ai 的登录 Cookie 能跨重启保留；
+ *  不改 userAgent，不加任何证书绕过）。 */
 function createShellWindow(width: number, height: number): void {
   mainWindow = new BrowserWindow({
     width,
@@ -336,20 +381,29 @@ function createShellWindow(width: number, height: number): void {
       sandbox: true,
     },
   });
-  const viewPreferences = {
+  const chatPreferences = {
+    preload: CHAT_PRELOAD_PATH,
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+  };
+  const workPreferences = {
     preload: PRELOAD_PATH,
     contextIsolation: true,
     nodeIntegration: false,
     sandbox: true,
   };
-  chatView = new WebContentsView({ webPreferences: viewPreferences });
-  workView = new WebContentsView({ webPreferences: viewPreferences });
+  chatView = new WebContentsView({ webPreferences: chatPreferences });
+  dividerView = new WebContentsView({ webPreferences: chatPreferences });
+  workView = new WebContentsView({ webPreferences: workPreferences });
   mainWindow.contentView.addChildView(chatView);
   mainWindow.contentView.addChildView(workView);
+  mainWindow.contentView.addChildView(dividerView);
   mainWindow.on("resize", layoutViews);
   mainWindow.on("closed", () => {
     mainWindow = null;
     chatView = null;
+    dividerView = null;
     workView = null;
   });
   layoutViews();
@@ -357,10 +411,11 @@ function createShellWindow(width: number, height: number): void {
 
 async function createWindow(): Promise<void> {
   createShellWindow(1280, 860);
-  if (!workView || !chatView) return;
+  if (!workView || !chatView || !dividerView) return;
   await workView.webContents.loadURL(`http://127.0.0.1:${serverPort}/`);
-  await chatView.webContents.loadURL(`http://127.0.0.1:${serverPort}/exe-chat/`);
-  log("window loaded", `http://127.0.0.1:${serverPort}/`, "+ chat view /exe-chat/");
+  await chatView.webContents.loadURL(chatTargetUrl(false));
+  await dividerView.webContents.loadURL(`http://127.0.0.1:${serverPort}/exe-chat-divider/`);
+  log("window loaded", `http://127.0.0.1:${serverPort}/`, "+ chat view /exe-chat-collapsed/ (collapsed) + divider view /exe-chat-divider/");
   // P1 验收钩子（仅 P1_SCREENSHOT 环境变量开启时）：等首屏渲染后截图、
   // 打印 DOM 证据，然后关窗口（顺带走一遍退出停服务路径）。
   // 正式使用时不设此变量，钩子完全不触发。
@@ -449,7 +504,12 @@ async function restartService(): Promise<void> {
   if (ok && mainWindow && !mainWindow.isDestroyed()) {
     if (workView && chatView) {
       await workView.webContents.loadURL(`http://127.0.0.1:${serverPort}/`);
-      await chatView.webContents.loadURL(`http://127.0.0.1:${serverPort}/exe-chat/`);
+      await chatView.webContents.loadURL(chatTargetUrl(chatExpanded));
+      // 服务重启后分界视图也重载一次（它的页面同样由本服务托管），
+      // 否则展开时分界条是空白页、拖不动。
+      if (dividerView && !dividerView.webContents.isDestroyed()) {
+        await dividerView.webContents.loadURL(`http://127.0.0.1:${serverPort}/exe-chat-divider/`);
+      }
     } else {
       await mainWindow.loadURL(`http://127.0.0.1:${serverPort}/`);
     }
@@ -657,7 +717,7 @@ ipcMain.handle("chat-set-expanded", (_event, expanded: unknown) =>
 );
 ipcMain.handle("chat-get-expanded", () => ({ expanded: chatExpanded }));
 
-// 左聊天栏拖拽调宽（分界手柄经 preload 调用；钳制与记忆都在主进程做）。
+// 左聊天栏调宽（经最小 preload 调用；钳制与记忆都在主进程做）。
 ipcMain.handle("chat-set-width", (_event, width: unknown) => setChatWidth(width));
 ipcMain.handle("chat-get-width", () => ({
   expanded: chatExpanded,

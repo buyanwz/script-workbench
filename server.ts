@@ -3,7 +3,9 @@
 // 路由（单进程 Bun.serve，见 port-plan.md §保留-6）：
 //   GET  /health               健康检查（Electron 主进程等它通了再开窗口）
 //   POST /api/actions/:name    176 个服务端动作（Actions 对象遍历 key 自动注册）
-//   GET  /exe-chat/            exe 专属左侧聊天页（移植层，不在 client/src 内）
+//   GET  /exe-chat-collapsed/  exe 专属窄边页（左视图收起时加载，点一下展开到 muse.ai）
+//   GET  /exe-chat-divider/    exe 专属分界条页（8px 分界视图加载，拖拽调宽、双击收起/展开）
+//   GET  /exe-chat/            exe 专属左侧聊天页（保留休眠，左视图不再默认加载）
 //   GET  /api/chat/health      聊天后端自述（模型名、视觉是否启用，不含 Key）
 //   POST /api/chat/message     聊天对话（dryRun 不调用模型、不计费）
 //   POST /api/chat/writeback   写回通路（经现有动作 handler 写本地库并回读比对）
@@ -34,6 +36,8 @@ import {
   handleExeChatMessage,
   handleExeChatWriteback,
 } from "./server/src/exe-chat";
+import { EXE_CHAT_COLLAPSED_HTML } from "./server/src/exe-chat-collapsed";
+import { EXE_CHAT_DIVIDER_HTML } from "./server/src/exe-chat-divider";
 import {
   handleExeChatDissectFromUrl,
   handleExeChatDissectStart,
@@ -203,6 +207,24 @@ const server = Bun.serve({
     }
 
     // exe 专属左侧聊天路由（移植层，不计入 actions 数，不走动作注册表）。
+    // 窄边页：左视图收起时的本地页面；分界条页：8px 分界视图的本地页面；
+    // 其余聊天/解剖路由保留休眠不断链。
+    if (
+      req.method === "GET" &&
+      (pathname === "/exe-chat-collapsed" || pathname === "/exe-chat-collapsed/")
+    ) {
+      return new Response(EXE_CHAT_COLLAPSED_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+    if (
+      req.method === "GET" &&
+      (pathname === "/exe-chat-divider" || pathname === "/exe-chat-divider/")
+    ) {
+      return new Response(EXE_CHAT_DIVIDER_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
     if (req.method === "GET" && (pathname === "/exe-chat" || pathname === "/exe-chat/")) {
       return new Response(EXE_CHAT_PAGE_HTML, {
         headers: { "content-type": "text/html; charset=utf-8" },
