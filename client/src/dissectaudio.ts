@@ -4,7 +4,7 @@
 // 云端视频的转写在服务端直读文件完成；本地文件与可直读的链接则在
 // 浏览器里把音轨解出来：fetch / File 拿到视频字节 → AudioContext
 // decodeAudioData 解码 → OfflineAudioContext 重采样成 16kHz 单声
-// 道 → 编码 16-bit PCM WAV。WAV 按 768KiB 分片走既有 uploadImage
+// 道 → 编码 16-bit PCM WAV。WAV 按 384KiB 分片走既有 uploadImage
 // Chunk 暂存通道上传，服务端 transcribeUploadedAudio 拼回后交给
 // 本地 Whisper。音频只在本机与本站服务端之间走，不经任何第三方。
 // 解不出（格式不支持 / 跨域拿不到字节）就抛错写清原因，调用方据
@@ -16,8 +16,10 @@ import { api } from "./api";
 import { describeThrownError } from "./gateway";
 
 const TARGET_RATE = 16000;
-/** 与服务端 uploadChunkInput 的片大小口径一致（768KiB 原始字节）。 */
-const CHUNK_RAW_BYTES = 768 * 1024;
+/** 与 chunkedupload.ts 同一片大小（384KiB 原始字节）：同一条
+ * uploadImageChunk 暂存通道、同一个约 1MB 的请求体上限，片大小
+ * 必须一致（v6.10：768KiB 满片请求体超限、大文件第一片就断）。 */
+const CHUNK_RAW_BYTES = 384 * 1024;
 
 function encodeWavPcm16(samples: Float32Array, sampleRate: number): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
@@ -110,7 +112,7 @@ function newUploadId(): string {
 }
 
 /**
- * 把 WAV 字节按 768KiB 分片上传暂存（复用 uploadImageChunk 通道，
+ * 把 WAV 字节按 384KiB 分片上传暂存（复用 uploadImageChunk 通道，
  * 与人物图分片同一暂存表），返回 uploadId 给 transcribeUploaded
  * Audio 拼回。单片失败原地重试到 3 次；整单失败清掉已暂存分片。
  */

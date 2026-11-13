@@ -2,7 +2,7 @@
 //
 // 路由（单进程 Bun.serve，见 port-plan.md §保留-6）：
 //   GET  /health               健康检查（Electron 主进程等它通了再开窗口）
-//   POST /api/actions/:name    176 个服务端动作（Actions 对象遍历 key 自动注册）
+//   POST /api/actions/:name    178 个服务端动作（Actions 对象遍历 key 自动注册）
 //   GET  /exe-chat-collapsed/  exe 专属窄边页（左视图收起时加载，点一下展开到 muse.ai）
 //   GET  /exe-chat-divider/    exe 专属分界条页（8px 分界视图加载，拖拽调宽、双击收起/展开）
 //   GET  /exe-chat/            exe 专属左侧聊天页（保留休眠，左视图不再默认加载）

@@ -2005,7 +2005,16 @@ function ImageGenPanel({
     newImages: { id: number; url: string }[];
     directLook: string;
     isEdit: boolean;
+    // v6.11：目标卡是子文件卡时服务端回的宿主卡名（图已同步镜
+    // 像进宿主卡的图片列表）；目标是主文件卡时为 null。
+    hostName: string | null;
   };
+  // v6.11：目标卡挂在宿主卡下面当子文件时的去向说明（回执用）：
+  // 子卡自己不在储存库列表里出现，得说清去宿主卡里找。
+  const hostNoteFor = (target: PresetSaveTarget, hostName: string | null) =>
+    hostName
+      ? `「${target.name}」现在挂在「${hostName}」下面当子文件、储存库列表里不单独出现；这张图已同步挂进「${hostName}」的图片列表（标着子文件来源），打开「${hostName}」的展开详情就能看到。`
+      : "";
   const saveToPresetCore = async (
     rec: GenRecord,
     target: PresetSaveTarget,
@@ -2014,12 +2023,15 @@ function ImageGenPanel({
     if (!rec.stagedKey) {
       throw new Error("这条记录没有可存的图或目标资产卡");
     }
-    // 存之前先记下卡上已有的图，存完才知道哪张是新图。
+    // 存之前先记下卡上已有的图，存完才知道哪张是新图。v6.11：
+    // 按 id 直读这张卡（getAssetPreset）——目标卡可能是子文件
+    // 卡、不在主文件列表里，用 listAssetPresets 找它会落空、
+    // 把卡上旧图全误判成新图重复跑造型分析。
     let beforeImageIds = new Set<number>();
     try {
-      const before = await api.listAssetPresets({});
-      const bp = before.presets.find((x) => x.id === presetId);
-      if (bp) beforeImageIds = new Set(bp.images.map((im) => im.id));
+      const before = await api.getAssetPreset({ id: presetId });
+      if (before.preset)
+        beforeImageIds = new Set(before.preset.images.map((im) => im.id));
     } catch {
       /* 记不到旧图就不自动分析，不挡保存 */
     }
@@ -2033,7 +2045,7 @@ function ImageGenPanel({
     const newImages = savedPreset.preset.images.filter(
       (im) => !beforeImageIds.has(im.id),
     );
-    return { newImages, directLook, isEdit };
+    return { newImages, directLook, isEdit, hostName: savedPreset.hostName };
   };
 
   // v5.56 旧路：对刚存进卡的新图逐张跑单图造型分析（结果进各自
@@ -2068,18 +2080,19 @@ function ImageGenPanel({
       });
       queryClient.invalidateQueries({ queryKey: ["assetPresets"] });
       await invalidateRecords();
+      const hostNote = hostNoteFor(target, outcome.hostName);
       if (outcome.directLook) {
         setRecMsg(
           rec.id,
-          `已存到储存库资产卡「${target.name}」。造型已按生图提示词写进这张图，不用再确认。`,
+          `已存到储存库资产卡「${target.name}」。造型已按生图提示词写进这张图，不用再确认。${hostNote}`,
         );
         return;
       }
       setRecMsg(
         rec.id,
         outcome.isEdit
-          ? `改图已存到储存库资产卡「${target.name}」：作为新图追加在卡上（排在现有图之后），原来的图没有被替换、没有删除；这张卡的「展开详情」右侧图片区能看到它和它的造型。正在分析这张新图的造型，结果先进待确认，不确认不填。`
-          : `已存到储存库资产卡「${target.name}」。这条提示词剥掉画风、三视图排版与锁脸句后没有剩下的造型描述，造型改走 AI 分析：正在分析这张新图的造型，结果先进待确认，不确认不填。`,
+          ? `改图已存到储存库资产卡「${target.name}」：作为新图追加在卡上（排在现有图之后），原来的图没有被替换、没有删除；${outcome.hostName ? hostNote : "这张卡的「展开详情」右侧图片区能看到它和它的造型。"}正在分析这张新图的造型，结果先进待确认，不确认不填。`
+          : `已存到储存库资产卡「${target.name}」。这条提示词剥掉画风、三视图排版与锁脸句后没有剩下的造型描述，造型改走 AI 分析：正在分析这张新图的造型，结果先进待确认，不确认不填。${hostNote}`,
       );
       await runLookAnalysisForNewImages(rec, outcome, target);
     } catch (e) {
@@ -2153,7 +2166,7 @@ function ImageGenPanel({
           }
           setRecMsg(
             rec.id,
-            `第一步已成：图已存到资产卡「${target.name}」${outcome?.directLook ? "，造型已按生图提示词写进这张图" : outcome ? "，新图造型已按老规矩处理（分析结果进待确认）" : ""}。但第二步「设为「${rec.characterName}」人物图」没成：${e instanceof Error ? e.message : "请重试"}。图还在记录里，再点合并按钮只补第二步、不会往卡里重复存图。`,
+            `第一步已成：图已存到资产卡「${target.name}」${outcome?.directLook ? "，造型已按生图提示词写进这张图" : outcome ? "，新图造型已按老规矩处理（分析结果进待确认）" : ""}。但第二步「设为「${rec.characterName}」人物图」没成：${e instanceof Error ? e.message : "请重试"}。图还在记录里，再点合并按钮只补第二步、不会往卡里重复存图。${outcome ? hostNoteFor(target, outcome.hostName) : ""}`,
           );
           return;
         }
@@ -2176,10 +2189,11 @@ function ImageGenPanel({
           : presetAlready
             ? `这张图之前已存到资产卡「${target.name}」，这次补上了第二步：已设为剧本人物「${rec.characterName}」的人物图。`
             : `已存到资产卡「${target.name}」，并设为剧本人物「${rec.characterName}」的人物图。`;
+      const hostNote = outcome ? hostNoteFor(target, outcome.hostName) : "";
       if (outcome?.directLook) {
         setRecMsg(
           rec.id,
-          `${head}造型已按生图提示词写进这张图，不用再确认。`,
+          `${head}造型已按生图提示词写进这张图，不用再确认。${hostNote}`,
         );
         return;
       }
@@ -2187,8 +2201,8 @@ function ImageGenPanel({
         setRecMsg(
           rec.id,
           outcome.isEdit
-            ? `${head}改图的造型改走 AI 分析：正在分析这张新图的造型，结果先进待确认，不确认不填。`
-            : `${head}这条提示词剥掉画风、三视图排版与锁脸句后没有剩下的造型描述，造型改走 AI 分析：正在分析这张新图的造型，结果先进待确认，不确认不填。`,
+            ? `${head}改图的造型改走 AI 分析：正在分析这张新图的造型，结果先进待确认，不确认不填。${hostNote}`
+            : `${head}这条提示词剥掉画风、三视图排版与锁脸句后没有剩下的造型描述，造型改走 AI 分析：正在分析这张新图的造型，结果先进待确认，不确认不填。${hostNote}`,
         );
         await runLookAnalysisForNewImages(rec, outcome, target);
       } else {

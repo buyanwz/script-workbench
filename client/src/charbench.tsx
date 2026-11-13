@@ -1007,8 +1007,12 @@ function LibraryCard({
     idx: number;
     isPrimary: boolean;
     // v6.01：这张图是子文件复制行时记来源卡名——删掉它来源
-    // 卡会恢复成独立主文件，确认框与回执都要写明。
+    // 卡会恢复成独立主文件，确认框与回执都要写明。v6.11：同
+    // 一来源在本卡上可能有多行（往子文件卡存图镜像来的），
+    // sourceIsLastCopy 记删的这行是不是同来源最后一行——不
+    // 是最后一行时删掉不恢复来源卡，确认文案要分开写。
     sourceName: string | null;
+    sourceIsLastCopy: boolean;
   } | null>(null);
   const deleteImageMut = useMutation({
     mutationFn: (imageId: number) =>
@@ -2060,6 +2064,13 @@ function LibraryCard({
                                       ? im.sourcePresetName ||
                                         "来源人物卡"
                                       : null,
+                                  sourceIsLastCopy:
+                                    im.sourcePresetId != null &&
+                                    p.images.filter(
+                                      (x) =>
+                                        x.sourcePresetId ===
+                                        im.sourcePresetId,
+                                    ).length <= 1,
                                 })
                               }
                             >
@@ -2372,7 +2383,9 @@ function LibraryCard({
               : "这张是这张卡唯一的一张图（也是主体图）：删掉后卡还在，卡片造型文字会保留、不清空。这张图自己的造型与待确认数据会一起删掉。删除后无法恢复。"
             : "这张图自己的造型与待确认数据会一起删掉，其余图片与主体图都不动。删除后无法恢复。") +
           (deleteImageTarget.sourceName
-            ? `这张图是把「${deleteImageTarget.sourceName}」加进来当服装时挂进来的子文件：删掉它之后，「${deleteImageTarget.sourceName}」会重新回到储存库列表、恢复成独立人物（它自己的图片和数据一直都在，不会跟着删）。`
+            ? deleteImageTarget.sourceIsLastCopy
+              ? `这张图是把「${deleteImageTarget.sourceName}」加进来当服装时挂进来的子文件：删掉它之后，「${deleteImageTarget.sourceName}」会重新回到储存库列表、恢复成独立人物（它自己的图片和数据一直都在，不会跟着删）。`
+              : `这张图是从「${deleteImageTarget.sourceName}」同步过来的子文件图：删掉它只删本卡里的这一份，「${deleteImageTarget.sourceName}」还挂在本卡下面当子文件、它自己的图片一张都不会少；等它名下的子文件图删到最后一张时，它才会恢复成独立人物回到储存库列表。`
             : "")
         }
         confirmLabel="确认删除这张图"

@@ -61,12 +61,16 @@ caption: z.string().max(200).optional(),
 
 // 人物资产图分片上传（无文件大小限制）：旧的单次 dataBase64 上限
 // 12,000,000 字符解码后只约 9MB 原图，10MB 以上的图必然被拒。人物
-// 资产图改走分片：客户端把原图字节按 768KiB 一片切开（每片 Base64
-// 约 1,048,576 字符，远低于单次请求上限），逐片送 uploadImageChunk
-// 暂存，完成动作再拼回完整原图存 blob——不压缩、不改尺寸、不转格式。
+// 资产图改走分片：客户端把原图字节按 384KiB 一片切开（每片 Base64
+// 约 524,288 字符），逐片送 uploadImageChunk 暂存，完成动作再拼回
+// 完整原图存 blob——不压缩、不改尺寸、不转格式。
 // 每片上限给到 2,000,000 字符留足余量；片数防呆上限 2000 片，按
-// 客户端 768KiB/片折合约 1.5GB 原图——这是本实现唯一的实际上限，
+// 客户端 384KiB/片折合约 750MB 原图——这是本实现唯一的实际上限，
 // 日常照片（10–50MB）远远够不到，不再有 10MB 量级的拦截。
+// v6.10 片大小定案：动作通道单次请求体上限约 1MB——旧 768KiB/片
+// 的满片请求体约 1.05MB 必然超限、浏览器层 Failed to fetch，大图
+// 第一片就传不上（字段上限 12,000,000 字符不是请求体上限，别再
+// 按它定片大小）；384KiB/片请求体约 0.53MB，留足一倍余量。
 const uploadChunkInput = z.object({
   uploadId: z.string().min(8).max(80).regex(/^[A-Za-z0-9_-]+$/),
   chunkIndex: z.number().int().min(0).max(1999),
@@ -2832,6 +2836,54 @@ asc(schema.assetPresetImages.id),
 );
 }
 
+// v6.11：子文件卡（parentPresetId 非空）的图片行在储存库界面里
+// 看不见——listAssetPresets 只回主文件，子文件卡只以宿主卡上的
+// 一条复制行露面，子卡自己的图除了挂靠那一刻复制的主体图之外
+// 没有任何入口能看到。往子文件卡存图时，除存进子卡本身（规则
+// 不变），再往宿主卡镜像一条子文件复制行（sourcePresetId = 子
+// 卡 id、共享同一份 blob、排在宿主图片列表最后），这张图就能
+// 在宿主卡「展开详情」的图片列表里找到。已镜像过（同宿主、同
+// 来源、同 blob）不重复加。目标卡是主文件卡时回 null。
+async function mirrorPresetImageToHost(
+  ctx: Ctx,
+  child: AssetPresetRow,
+  img: {
+    fileName: string;
+    imageBlobKey: string;
+    imageMime: string;
+    look: string;
+  },
+): Promise<{ hostId: number; hostName: string; inserted: boolean } | null> {
+  if (child.parentPresetId == null) return null;
+  const db = ctx.db<typeof schema>();
+  const hostRows = await db
+    .select()
+    .from(schema.assetPresets)
+    .where(eq(schema.assetPresets.id, child.parentPresetId));
+  const host = hostRows[0];
+  if (!host) return null;
+  const hostImgs = await loadPresetImages(ctx, host.id);
+  const already = hostImgs.some(
+    (im) =>
+      im.sourcePresetId === child.id && im.imageBlobKey === img.imageBlobKey,
+  );
+  if (already) return { hostId: host.id, hostName: host.name, inserted: false };
+  await db.insert(schema.assetPresetImages).values({
+    presetId: host.id,
+    fileName: img.fileName,
+    imageBlobKey: img.imageBlobKey,
+    imageMime: img.imageMime,
+    sortOrder: hostImgs.length,
+    look: img.look,
+    sourcePresetId: child.id,
+  });
+  await db
+    .update(schema.assetPresets)
+    .set({ updatedAt: new Date() })
+    .where(eq(schema.assetPresets.id, host.id));
+  return { hostId: host.id, hostName: host.name, inserted: true };
+}
+
 /**
  * v5.56：把卡片当前主体图（第一张）的 look 列同步为给定造型。
  * 卡片造型段与主体图造型是同一份值的两处存法：凡是经「卡片
@@ -4074,7 +4126,7 @@ const syncPlanOut = z.object({
 // 校验值、不能证明下载包里含字节——字节由客户端取回校验后写进包。
 // 客户端逐张从服务端取回真实字节、校验大小与 SHA-256 后把字节本身
 // （Base64）写进单个备份文件——包里绝不只写 ./blobs/ 引用。导入时图
-// 片走既有分片上传通道（768KiB 逐片、服务端拼回完整原图存 blob），
+// 片走既有分片上传通道（384KiB 逐片、服务端拼回完整原图存 blob），
 // 再由下面三个导入动作按「分类与储存库卡 → 项目 → 模式」顺序重建，
 // 旧 ID 全部映射到新 ID。包内不含任何凭证 / Key / 生图任务密钥，生图
 // 记录（暂存图引用）不进包。
@@ -11129,6 +11181,25 @@ categories: await loadCategoryCounts(ctx),
 },
 }),
 
+// v6.11：按 id 读任意一张储存库人物卡（含挂在别的卡下面当子
+// 文件的卡——主文件列表里没有它们，但生图记录的存卡目标可能
+// 正是这种卡，存前快照与核对要能读到它）。卡不存在回 null。
+getAssetPreset: defineAction({
+  description: "按 id 读取一张储存库人物卡（含子文件卡）；不存在时回空。",
+  request: z.object({ id: z.number().int().positive() }),
+  response: z.object({ preset: assetPresetOut.nullable() }),
+  async handler(ctx, args) {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.assetPresets)
+      .where(eq(schema.assetPresets.id, args.id));
+    const row = rows[0];
+    if (!row) return { preset: null };
+    return { preset: await toAssetPresetOut(ctx, row) };
+  },
+}),
+
 createAssetCategory: defineAction({
 description: "在人物资产储存库新建一个分类。",
 request: z.object({ name: z.string().min(1).max(40) }),
@@ -11482,7 +11553,7 @@ description: "用分片拼图给储存库人物卡添加图片。",
 }),
 
 deleteAssetPresetImage: defineAction({
-description: "删除储存库人物卡上的一张图片；删的是主体图时下一张接任主体、卡片造型跟新主体走，删到一张不剩时卡片造型文字保留；图片 blob 只在无其他引用时才清。特例（v6.01）：删的这张图是把另一张卡加进来当服装时复制的子文件行、且来源卡正挂在本卡名下时，来源卡同步恢复成独立主文件回到储存库列表（restoredSourceName 回它的名字），它自己的图片与数据一字不删。",
+description: "删除储存库人物卡上的一张图片；删的是主体图时下一张接任主体、卡片造型跟新主体走，删到一张不剩时卡片造型文字保留；图片 blob 只在无其他引用时才清。特例（v6.01，v6.11 修订计数口径）：删的这张图是把另一张卡加进来当服装的子文件行、且来源卡正挂在本卡名下时——同一来源在本卡上只剩这一行才把来源卡恢复成独立主文件回到储存库列表（restoredSourceName 回它的名字，它自己的图片与数据一字不删）；同来源还有别的行（往子文件卡存图镜像来的）在，只删这一行、来源卡继续挂在本卡下面。",
 request: z.object({
 presetId: z.number().int().positive(),
 imageId: z.number().int().positive(),
@@ -11549,9 +11620,15 @@ await db
 // v6.01：删掉的是子文件复制行（来源卡正挂在本卡名下）→ 来
 // 源卡恢复成独立主文件回到列表（它自己的图片行没动、图还
 // 在它卡上；共享 blob 也因它仍引用而不会被上面的引用检查
-// 误删）。
+// 误删）。v6.11：同一来源卡在本卡上可能有多条子文件行（往
+// 子文件卡存图时会往宿主镜像，见 mirrorPresetImageToHost），
+// 只有删掉的是同来源最后一条行时才恢复来源卡；还有别的行
+// 在，来源卡继续挂在本卡下面当子文件，只删这一行。
 let restoredSourceName: string | null = null;
-if (target.sourcePresetId != null) {
+const sameSourceLeft =
+  target.sourcePresetId != null &&
+  remaining.some((im) => im.sourcePresetId === target.sourcePresetId);
+if (target.sourcePresetId != null && !sameSourceLeft) {
 const srcRows3 = await db
 .select()
 .from(schema.assetPresets)
@@ -11768,6 +11845,19 @@ await db
 .update(schema.assetPresets)
 .set({ parentPresetId: null, name: newName, updatedAt: new Date() })
 .where(eq(schema.assetPresets.id, srcPreset.id));
+// v6.11：来源卡已经恢复独立、不再挂在本卡下面——本卡上若还
+// 留着同一来源的其他子文件行（往子文件卡存图镜像来的），把
+// 它们的来源标记清掉、变回普通图行（再标「子文件」就是假
+// 的）；图片与造型一字不动。
+await db
+.update(schema.assetPresetImages)
+.set({ sourcePresetId: null })
+.where(
+and(
+eq(schema.assetPresetImages.presetId, args.presetId),
+eq(schema.assetPresetImages.sourcePresetId, srcPreset.id),
+),
+);
 ctx.invalidateQueries();
 const freshRowsR = await db
 .select()
@@ -18553,13 +18643,13 @@ description: "把一张图片暂存为预览图供页面展示。",
 // 剥完为空、其他旧调用方）时新图 look 仍为空，沿用 v5.56 的
 // AI 分析进待确认旧路。服务端只落字、不判断该不该直写。
 saveGeneratedImageToPreset: defineAction({
-description: "把生成好的图片保存到储存库人物卡上。",
+description: "把生成好的图片保存到储存库人物卡上。目标卡是挂在别的卡下面当子文件的卡时，图照样存进它自己卡里，另外往宿主卡镜像一条子文件行（hostName 回宿主卡名），保证在储存库里找得到；目标是主文件卡时 hostName 为空。",
   request: z.object({
     stagedKey: z.string().min(1).max(200),
     presetId: z.number().int().positive(),
     look: z.string().max(8000).optional(),
   }),
-  response: z.object({ preset: assetPresetOut }),
+  response: z.object({ preset: assetPresetOut, hostName: z.string().nullable() }),
   async handler(ctx, args) {
     if (!args.stagedKey.startsWith("imagegen/")) {
       throw new Error("这张图不是生图面板生成的，无法这样保存");
@@ -18574,20 +18664,97 @@ description: "把生成好的图片保存到储存库人物卡上。",
     const preset = rows[0];
     if (!preset) throw new Error("设定卡不存在");
     const existing = await loadPresetImages(ctx, args.presetId);
+    const newLook = (args.look ?? "").trim();
+    const newMime = head.contentType || "image/png";
     await db.insert(schema.assetPresetImages).values({
       presetId: args.presetId,
       fileName: "生图生成（Geeknow）",
       imageBlobKey: args.stagedKey,
-      imageMime: head.contentType || "image/png",
+      imageMime: newMime,
       sortOrder: existing.length,
-      look: (args.look ?? "").trim(),
+      look: newLook,
     });
     await db
       .update(schema.assetPresets)
       .set({ updatedAt: new Date() })
       .where(eq(schema.assetPresets.id, args.presetId));
+    // v6.11：目标卡是子文件卡时镜像一份到宿主卡，图在储存库里
+    // 才找得到（见 mirrorPresetImageToHost 注释）。
+    const mirror = await mirrorPresetImageToHost(ctx, preset, {
+      fileName: "生图生成（Geeknow）",
+      imageBlobKey: args.stagedKey,
+      imageMime: newMime,
+      look: newLook,
+    });
     ctx.invalidateQueries();
-    return { preset: await toAssetPresetOut(ctx, preset) };
+    return {
+      preset: await toAssetPresetOut(ctx, preset),
+      hostName: mirror?.hostName ?? null,
+    };
+  },
+}),
+
+// v6.11 一次性补齐：历史上已经存进子文件卡、但宿主卡上还没有
+// 镜像行的图片，逐张补镜像到宿主卡图片列表末尾（与
+// saveGeneratedImageToPreset 的新口径一致），让它们在储存库里
+// 找得到。幂等：已镜像的跳过、不重复加；只加行，不删不改任何
+// 已有图片与数据。
+backfillChildPresetHostCopies: defineAction({
+  description: "一次性补齐（v6.11）：把已经存进子文件卡、但宿主卡图片列表里还没有的图补镜像到宿主卡，让它们在储存库里找得到；已镜像的不重复加，只加行、不动任何已有数据。",
+  request: z.object({}),
+  response: z.object({
+    ok: z.literal(true),
+    childCount: z.number(),
+    mirroredCount: z.number(),
+    alreadyCount: z.number(),
+    details: z.array(z.string()),
+  }),
+  async handler(
+    ctx,
+  ): Promise<{
+    ok: true;
+    childCount: number;
+    mirroredCount: number;
+    alreadyCount: number;
+    details: string[];
+  }> {
+    const db = ctx.db<typeof schema>();
+    const all = await db
+      .select()
+      .from(schema.assetPresets)
+      .orderBy(asc(schema.assetPresets.id));
+    const children = all.filter((p) => p.parentPresetId != null);
+    let mirroredCount = 0;
+    let alreadyCount = 0;
+    const details: string[] = [];
+    for (const child of children) {
+      const imgs = await loadPresetImages(ctx, child.id);
+      for (const im of imgs) {
+        const mirror = await mirrorPresetImageToHost(ctx, child, {
+          fileName: im.fileName,
+          imageBlobKey: im.imageBlobKey,
+          imageMime: im.imageMime,
+          look: im.look,
+        });
+        if (!mirror) continue;
+        if (mirror.inserted) {
+          mirroredCount++;
+          details.push(
+            `子文件卡「${child.name}」的一张图已补进宿主卡「${mirror.hostName}」的图片列表`,
+          );
+        } else {
+          alreadyCount++;
+        }
+      }
+    }
+    ctx.invalidateQueries();
+    return {
+      ok: true as const,
+      childCount: children.length,
+      mirroredCount,
+      alreadyCount,
+      details,
+    };
   },
 }),
 

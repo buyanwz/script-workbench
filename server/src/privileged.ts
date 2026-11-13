@@ -22,8 +22,10 @@
 // ---------------------------------------------------------------------------
 
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { resolveDataDir } from "./db";
 import { pythonHelperEnv, resolvePython } from "./python-runtime";
 import {
@@ -2075,16 +2077,43 @@ def main():
 main()
 `;
 
-function runPythonHelper(
+// v6.07：脚本不再塞进 `python3 -c` 的命令行参数——Windows
+// CreateProcess 命令行有 32,767 字符硬上限，GEEKNOW_PY 正文已超
+// 33k 字符，在 exe（Windows）里这类调用永远启动不了（同步抛错 →
+// 「无法启动图片处理程序」）；Linux 沙箱没有这条上限，所以沙箱里
+// 一直验得过、真机才报错。改为每次调用把脚本写进系统临时目录下
+// 一个唯一命名的 .py 文件（内容哈希＋随机串，同脚本并发调用也不
+// 撞名），再 spawn `python3 <临时文件路径>`——命令行只剩解释器与
+// 文件路径，远低于上限，且脚本以后再变长也不会复发。入参仍走
+// stdin 传 JSON、结果仍从 stdout 的 RESULT_JSON 行取，payload 协
+// 议与报错文案口径一律不变；子进程结束后尽力删掉临时文件，删不
+// 掉不影响本次返回（系统临时目录会自行回收）。
+// （移植版：解释器仍走 resolvePython() / pythonHelperEnv()，只把
+// "-c" + 脚本正文换成临时文件路径。）
+async function runPythonHelper(
   script: string,
   payload: Record<string, unknown>,
 ): Promise<GeeknowRaw> {
+  const hash = createHash("sha256").update(script).digest("hex").slice(0, 16);
+  const scriptPath = path.join(
+    tmpdir(),
+    `space4-pyhelper-${hash}-${randomUUID()}.py`,
+  );
+  try {
+    await fs.writeFile(scriptPath, script, "utf8");
+  } catch {
+    return { ok: false, error: "无法启动图片处理程序" };
+  }
+  const cleanup = () => {
+    void fs.unlink(scriptPath).catch(() => undefined);
+  };
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     let py: ReturnType<typeof resolvePython>;
     try {
       py = resolvePython();
     } catch (e) {
+      cleanup();
       resolve({
         ok: false,
         error: e instanceof Error ? e.message : "找不到可用的 Python",
@@ -2092,11 +2121,12 @@ function runPythonHelper(
       return;
     }
     try {
-      child = spawn(py.cmd, [...py.argsPrefix, "-c", script], {
+      child = spawn(py.cmd, [...py.argsPrefix, scriptPath], {
         stdio: ["pipe", "pipe", "pipe"],
         env: pythonHelperEnv(),
       });
     } catch {
+      cleanup();
       resolve({ ok: false, error: "无法启动图片处理程序" });
       return;
     }
@@ -2106,6 +2136,7 @@ function runPythonHelper(
     const done = (v: GeeknowRaw) => {
       if (settled) return;
       settled = true;
+      cleanup();
       resolve(v);
     };
     child.stdout?.on("data", (d: Buffer) => outChunks.push(d));

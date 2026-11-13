@@ -3025,7 +3025,10 @@ function VideoCard({
   );
 }
 
-type MonitorViewMode = "collected" | "latest" | "date" | "creator" | "group" | "cloud";
+// v6.05（问题 #111304）：视图只剩四个——按播放量排列（plays）/
+// 按达人分组（creator）/ 按最新排列（collected）/ 云端上传
+// （cloud）；最新对比、按日期分组、按作者分组已下线。
+type MonitorViewMode = "plays" | "creator" | "collected" | "cloud";
 
 type MonitorGroup = { id: number; name: string };
 
@@ -3161,284 +3164,6 @@ function CreatorGroupControl({
   );
 }
 
-// 「按作者分组」视图的一个分组段（v4.43）：分组名 + 改名 /
-// 删除分组（未分组段没有这两个按钮）+ 组内每位达人一行（带
-// 分组设置入口）及其视频横排（服务端已按发布时间倒序）。
-// 删分组只解绑达人到未分组，不删达人和视频。
-function AuthorGroupSection({
-  group,
-  members,
-  allGroups,
-  invalidate,
-  onPlay,
-  onDetail,
-  onAnalyze,
-  onOpenDissected,
-  dissectedByVideoId,
-  onRefresh,
-  refreshingIds,
-  refreshFailedIds,
-  cardStyle = "minimal",
-  cardScale = 1,
-}: {
-  group: MonitorGroup | null;
-  members: FeedAccount[];
-  allGroups: MonitorGroup[];
-  invalidate: () => void;
-  onPlay: (account: FeedAccount, video: FeedVideo) => void;
-  onDetail: (account: FeedAccount, video: FeedVideo) => void;
-  onAnalyze?: (account: FeedAccount, video: FeedVideo) => void;
-  onOpenDissected?: (video: FeedVideo, link: DissectedLink) => void;
-  dissectedByVideoId?: Map<string, DissectedLink>;
-  onRefresh?: (video: FeedVideo) => void;
-  refreshingIds?: Set<number>;
-  refreshFailedIds?: Set<number>;
-  // v4.66：卡片级「存云端」已下线，本节不再透传云端入参。
-  cardStyle?: MonitorCardStyle;
-  cardScale?: MonitorCardScale;
-}) {
-  const [renaming, setRenaming] = useState(false);
-  const [renameName, setRenameName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState(false);
-
-  const renameMut = useMutation({
-    mutationFn: (name: string) =>
-      api.renameMonitorGroup({ id: group?.id ?? 0, name }),
-    onSuccess: (res) => {
-      if (!res.ok) {
-        setError(res.error ?? "没改成，再试一次。");
-        return;
-      }
-      setRenaming(false);
-      setError(null);
-      invalidate();
-    },
-    onError: (e) => setError(`没改成：${describeThrownError(e)}`),
-  });
-  const deleteMut = useMutation({
-    mutationFn: () => api.deleteMonitorGroup({ id: group?.id ?? 0 }),
-    onSuccess: () => {
-      setPendingDelete(false);
-      setError(null);
-      invalidate();
-    },
-    onError: (e) => setError(`没删掉：${describeThrownError(e)}`),
-  });
-
-  const videoTotal = members.reduce((s, a) => s + a.videos.length, 0);
-  const heading = group ? group.name : "未分组";
-
-  return (
-    <div className="mb-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <h3 className="font-display text-base font-bold">{heading}</h3>
-        <span className="text-xs text-[var(--dim)]">
-          {members.length} 位达人 · {videoTotal} 条视频
-        </span>
-        {group &&
-          (renaming ? (
-            <span className="flex flex-wrap items-center gap-1.5">
-              <input
-                className="field w-[140px] px-2 py-1 text-[13px]"
-                value={renameName}
-                onChange={(e) => setRenameName(e.target.value)}
-                placeholder="新分组名"
-                aria-label={`给分组「${group.name}」改名：输入新名`}
-                maxLength={30}
-              />
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                disabled={renameMut.isPending || !renameName.trim()}
-                aria-label={`保存分组「${group.name}」的新名`}
-                onClick={() => renameMut.mutate(renameName.trim())}
-              >
-                {renameMut.isPending ? "保存中…" : "保存"}
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={renameMut.isPending}
-                aria-label="取消改名"
-                onClick={() => {
-                  setRenaming(false);
-                  setError(null);
-                }}
-              >
-                取消
-              </button>
-            </span>
-          ) : (
-            <span className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                className="btn btn-sm"
-                aria-label={`给分组「${group.name}」改名`}
-                onClick={() => {
-                  setRenameName(group.name);
-                  setError(null);
-                  setRenaming(true);
-                }}
-              >
-                改名
-              </button>
-              <button
-                type="button"
-                className="btn btn-danger-ghost btn-sm"
-                aria-label={`删除分组「${group.name}」（组内达人回到未分组）`}
-                onClick={() => {
-                  setError(null);
-                  setPendingDelete(true);
-                }}
-              >
-                删除分组
-              </button>
-            </span>
-          ))}
-        {error && (
-          <span className="text-xs" style={{ color: "var(--bad)" }} role="alert">
-            {error}
-          </span>
-        )}
-      </div>
-
-      {members.length === 0 ? (
-        <p className="mt-1.5 text-[13px] text-[var(--dim)]">
-          {group
-            ? "这个分组暂时没有带作品的达人——没采到作品的达人不显示；把达人归入这个分组、采到作品后就会出现在这里。"
-            : "全部达人都已经分好组了。"}
-        </p>
-      ) : (
-        members.map((a) => (
-          <div key={a.id} className="mt-2.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <span
-                className="flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold text-white"
-                style={{ background: "var(--accent)" }}
-                aria-hidden="true"
-              >
-                {(a.name || "达").slice(0, 1)}
-              </span>
-              {a.url ? (
-                <a
-                  href={a.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-display text-sm font-bold underline-offset-2 hover:underline"
-                  aria-label={`打开达人主页：${a.name || a.url}`}
-                >
-                  {a.name || "未命名达人"}
-                </a>
-              ) : (
-                <span className="font-display text-sm font-bold">{a.name || "未命名达人"}</span>
-              )}
-              <span
-                className="rounded-full px-2 py-0.5 text-xs font-bold"
-                style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
-              >
-                {a.platform}
-              </span>
-              <span className="text-xs text-[var(--dim)]">{a.videos.length} 条视频</span>
-              <span className="ml-auto">
-                <CreatorGroupControl account={a} groups={allGroups} invalidate={invalidate} />
-              </span>
-            </div>
-            {a.videos.length === 0 ? (
-              <p className="mt-1.5 text-[13px] text-[var(--dim)]">这位达人还没有视频卡片。</p>
-            ) : (
-              <div
-                className="mt-1.5 flex overflow-x-auto pb-1.5 snap-x"
-                style={{ gap: cardGapFor(cardStyle) }}
-                aria-label={`${a.name || "达人"} 的视频（发布时间倒序）`}
-              >
-                {a.videos.map((v) => (
-                  <CompactVideoCard
-                    cardStyle={cardStyle} cardScale={cardScale}
-                    key={v.id}
-                    video={v}
-                    creatorName={a.name}
-                    onPlay={(vid) => onPlay(a, vid)}
-                    onDetail={(vid) => onDetail(a, vid)}
-                    onAnalyze={onAnalyze ? (vid) => onAnalyze(a, vid) : undefined}
-                    onOpenDissected={onOpenDissected}
-                    dissected={dissectedByVideoId?.get(v.videoId) ?? null}
-                    onRefresh={onRefresh}
-                    refreshing={refreshingIds?.has(v.id) ?? false}
-                    refreshFailed={refreshFailedIds?.has(v.id) ?? false}
-                  />
-                ))}
-              </div>
-            )}
-          </div>
-        ))
-      )}
-
-      {group && pendingDelete && (
-        <ConfirmDialog
-          title={`删除分组「${group.name}」？`}
-          body={
-            <p>
-              组里的 {members.length} 位达人会回到「未分组」，达人和视频卡片都不删。这个删除不能恢复——之后要再用这个分组，得重新建一个。
-            </p>
-          }
-          confirmLabel={deleteMut.isPending ? "正在删除…" : "删除这个分组"}
-          pending={deleteMut.isPending}
-          onConfirm={() => deleteMut.mutate()}
-          onCancel={() => {
-            if (!deleteMut.isPending) setPendingDelete(false);
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-// 新建分组行（「按作者分组」视图顶部）：只建空分组，达人之后
-// 在各自的行上归入。
-function NewMonitorGroupRow({ invalidate }: { invalidate: () => void }) {
-  const [name, setName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const createMut = useMutation({
-    mutationFn: (n: string) => api.createMonitorGroup({ name: n }),
-    onSuccess: (res) => {
-      if (!res.ok) {
-        setError(res.error ?? "分组没建成，再试一次。");
-        return;
-      }
-      setName("");
-      setError(null);
-      invalidate();
-    },
-    onError: (e) => setError(`分组没建成：${describeThrownError(e)}`),
-  });
-  return (
-    <div className="mb-3 flex flex-wrap items-center gap-2">
-      <input
-        className="field w-[180px] px-2 py-1.5 text-[13px]"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        placeholder="新分组名，如：搞笑类"
-        aria-label="新建作者分组：输入分组名"
-        maxLength={30}
-      />
-      <button
-        type="button"
-        className="btn btn-sm"
-        disabled={createMut.isPending || !name.trim()}
-        aria-label="新建作者分组"
-        onClick={() => createMut.mutate(name.trim())}
-      >
-        {createMut.isPending ? "建中…" : "新建分组"}
-      </button>
-      {error && (
-        <span className="text-xs" style={{ color: "var(--bad)" }} role="alert">
-          {error}
-        </span>
-      )}
-    </div>
-  );
-}
 const MONITOR_VIEW_STORAGE_KEY = "monitor-view-mode-v1";
 const MONITOR_GUIDE_STORAGE_KEY = "monitor-guide-open-v1";
 
@@ -3533,21 +3258,6 @@ function cardGapFor(style: MonitorCardStyle): number {
   if (style === "minimal") return 16;
   if (style === "visual") return 10;
   return 12;
-}
-
-function dateKeyShanghai(iso: string | null): string {
-  if (!iso) return "时间未填";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "时间未填";
-  const parts = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour12: false,
-  }).formatToParts(d);
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")}`;
 }
 
 function CompactVideoCard({
@@ -3784,6 +3494,389 @@ function CloudBatchSaveModal({
               {`确认存入（${selectedCount}）`}
             </button>
           </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// v6.08（售后单 #111308）链接备忘录清空改版：备忘录就是一个存达人
+// 链接的框架——存各个平台需要采集的达人链接（快手 / 抖音 / B站），
+// 不再自动列监控视频链接；v6.07（售后单 #111307）预置的 6 条快手
+// 达人主页链接逻辑整体下线，打开备忘录就是空框架。
+//   · 存储仍是本机 localStorage（monitor-link-memo-v1），每条可删、
+//     添加去重，刷新 / 重开页面后还在；
+//   · 旧版残留处理：monitor-link-memo-seeded-v1 标记一律删掉；本机
+//     已存内容与旧 6 条预置逐条完全一致时整批清空，用户后来亲手加
+//     的链接只要内容不与旧 6 条完全一致就原样保留，绝不误删；
+//   · 平台按域名自动识别并显示标签：快手 / 抖音 / B站，未知域名显
+//     示「其他」，照常保存、不拦截不拒绝；
+//   · 添加分单个与批量：单个 = 一条链接 + 可选备注 / 达人名；批量
+//     = 一次粘多条、一行一条，自动去重、跳过空行与非法行，保存后
+//     明确提示「成功加 X 条、跳过 Y 条」；
+//   · 复制分单个与全部：点一行复制该条、该行亮「已复制」；「全部
+//     复制」一键复制全部链接（一行一条），空备忘录时置灰。
+// 复制走本文件既有 copyTextToClipboard（clipboard API →
+// textarea + execCommand 兜底），失败给明确提示、绝不静默。
+// ---------------------------------------------------------------------------
+const LINK_MEMO_STORAGE_KEY = "monitor-link-memo-v1";
+const LINK_MEMO_SEEDED_KEY = "monitor-link-memo-seeded-v1";
+
+// v6.07 预置过的 6 条快手达人主页链接（售后单 #111307）：v6.08 起
+// 不再写入，这里只保留这份清单用来识别「本机存的正是旧预置内容」
+// 并整批清空——内容只要和这 6 条不完全一致（用户亲手加过任何一条
+// 别的链接），就不会被清掉。
+const LINK_MEMO_LEGACY_PRESET_URLS: string[] = [
+  "https://www.kuaishou.com/profile/3xgxs37z8jmiduq?source=PROFILE",
+  "https://www.kuaishou.com/profile/3x274vhjsfd3sbe?source=SEARCH",
+  "https://www.kuaishou.com/profile/3xgc5qdxe2sftw9?source=SEARCH",
+  "https://www.kuaishou.com/profile/3xc3i2hsjucrswg?source=SEARCH",
+  "https://www.kuaishou.com/profile/3xmyfcfnecwksmu?source=SEARCH",
+  "https://www.kuaishou.com/profile/3xnr45fe7jspa69?source=SEARCH",
+];
+
+type MemoLink = { url: string; name: string };
+
+function loadMemoLinks(): MemoLink[] {
+  let links: MemoLink[] = [];
+  try {
+    const raw = window.localStorage.getItem(LINK_MEMO_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        links = parsed
+          .filter(
+            (it): it is MemoLink =>
+              !!it &&
+              typeof it === "object" &&
+              typeof (it as MemoLink).url === "string" &&
+              (it as MemoLink).url.trim() !== "",
+          )
+          .map((it) => ({
+            url: it.url.trim(),
+            name: typeof it.name === "string" ? it.name : "",
+          }));
+      }
+    }
+  } catch {
+    links = [];
+  }
+  // v6.08 旧版残留清理：seeded 标记直接删掉（以后也不再写）；本机
+  // 已存的链接与旧 6 条预置完全一致（同一批 url、不多不少）时整批
+  // 清空并回写空数组——用户后来亲手加的链接不在此列，绝不误删。
+  try {
+    window.localStorage.removeItem(LINK_MEMO_SEEDED_KEY);
+    const presetSet = new Set(LINK_MEMO_LEGACY_PRESET_URLS);
+    const isLegacyPreset =
+      links.length === LINK_MEMO_LEGACY_PRESET_URLS.length &&
+      links.every((it) => presetSet.has(it.url));
+    if (isLegacyPreset) {
+      links = [];
+      saveMemoLinks(links);
+    }
+  } catch {
+    // localStorage 不可用时不抛错打断页面，本次就按当前列表显示。
+  }
+  return links;
+}
+
+function saveMemoLinks(links: MemoLink[]) {
+  try {
+    window.localStorage.setItem(LINK_MEMO_STORAGE_KEY, JSON.stringify(links));
+  } catch {
+    // 写不进（隐私模式等）时不抛错打断页面。
+  }
+}
+
+// 平台按域名自动识别：快手（kuaishou.com / gifshow.com）、抖音
+// （douyin.com / iesdouyin.com）、B站（bilibili.com / b23.tv 短链），
+// 其余一律「其他」——只是打个标签，不拦截、不拒绝保存。
+function memoLinkPlatform(url: string): "快手" | "抖音" | "B站" | "其他" {
+  let host = "";
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return "其他";
+  }
+  const isDomain = (d: string) => host === d || host.endsWith(`.${d}`);
+  if (isDomain("kuaishou.com") || isDomain("gifshow.com")) return "快手";
+  if (isDomain("douyin.com") || isDomain("iesdouyin.com")) return "抖音";
+  if (isDomain("bilibili.com") || host === "b23.tv") return "B站";
+  return "其他";
+}
+
+function LinkMemoPanel({ onClose }: { onClose: () => void }) {
+  const [memoLinks, setMemoLinks] = useState<MemoLink[]>(() => loadMemoLinks());
+  const [newUrl, setNewUrl] = useState("");
+  const [newName, setNewName] = useState("");
+  const [batchText, setBatchText] = useState("");
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ kind: "ok" | "bad"; text: string } | null>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const copyLink = async (url: string) => {
+    const ok = await copyTextToClipboard(url);
+    if (ok) {
+      setCopiedUrl(url);
+      setNotice({ kind: "ok", text: `已复制：${url}` });
+    } else {
+      setNotice({
+        kind: "bad",
+        text: `自动复制没成功，请手动选中复制这条链接：${url}`,
+      });
+    }
+  };
+
+  const copyAllLinks = async () => {
+    if (memoLinks.length === 0) {
+      setNotice({ kind: "bad", text: "备忘录是空的，还没有链接可以复制。" });
+      return;
+    }
+    const all = memoLinks.map((it) => it.url).join("\n");
+    const ok = await copyTextToClipboard(all);
+    if (ok) {
+      setNotice({
+        kind: "ok",
+        text: `已复制全部 ${memoLinks.length} 条链接（一行一条）。`,
+      });
+    } else {
+      setNotice({
+        kind: "bad",
+        text: "自动复制没成功，请逐条点链接手动复制。",
+      });
+    }
+  };
+
+  const addMemoLink = () => {
+    const url = newUrl.trim();
+    if (!url) {
+      setNotice({ kind: "bad", text: "先粘贴一条链接再点添加。" });
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      setNotice({ kind: "bad", text: "链接要以 http:// 或 https:// 开头才存。" });
+      return;
+    }
+    if (memoLinks.some((it) => it.url === url)) {
+      setNotice({ kind: "bad", text: "这条链接已经存过了，不重复存。" });
+      return;
+    }
+    const next = [...memoLinks, { url, name: newName.trim() }];
+    setMemoLinks(next);
+    saveMemoLinks(next);
+    setNewUrl("");
+    setNewName("");
+    setNotice({ kind: "ok", text: "已存进备忘录，刷新页面也还在。" });
+  };
+
+  const addBatchMemoLinks = () => {
+    if (batchText.trim() === "") {
+      setNotice({ kind: "bad", text: "先粘贴链接再点批量添加（一行一条）。" });
+      return;
+    }
+    const seen = new Set(memoLinks.map((it) => it.url));
+    const next = [...memoLinks];
+    let added = 0;
+    let skipped = 0;
+    // 结尾的换行只是粘贴习惯带出来的，不算一行、不计入跳过数；
+    // 中间的空行照常计入跳过。
+    for (const rawLine of batchText.replace(/(\r?\n)+$/, "").split(/\r?\n/)) {
+      const url = rawLine.trim();
+      if (url === "" || !/^https?:\/\//i.test(url) || seen.has(url)) {
+        skipped += 1;
+        continue;
+      }
+      seen.add(url);
+      next.push({ url, name: "" });
+      added += 1;
+    }
+    if (added > 0) {
+      setMemoLinks(next);
+      saveMemoLinks(next);
+      setBatchText("");
+    }
+    setNotice({
+      kind: added > 0 ? "ok" : "bad",
+      text:
+        added > 0
+          ? `批量添加完成：成功加 ${added} 条、跳过 ${skipped} 条（空行、不是链接的行和重复的都算跳过）。`
+          : `批量添加完成：成功加 0 条、跳过 ${skipped} 条（空行、不是链接的行和重复的都算跳过）。`,
+    });
+  };
+
+  const removeMemoLink = (url: string) => {
+    const next = memoLinks.filter((it) => it.url !== url);
+    setMemoLinks(next);
+    saveMemoLinks(next);
+    setNotice({ kind: "ok", text: "已删除这条链接。" });
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto p-4 pt-[8vh]"
+      style={{ background: "rgba(3, 5, 9, 0.55)" }}
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        className="card max-h-[80vh] w-[min(480px,94vw)] overflow-y-auto"
+        role="dialog"
+        aria-modal="true"
+        aria-label="链接备忘录"
+      >
+        <div className="flex items-center gap-2">
+          <h3 className="text-base font-bold">链接备忘录</h3>
+          <span className="ml-auto flex items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-sm"
+              aria-label="复制备忘录里的全部链接"
+              disabled={memoLinks.length === 0}
+              onClick={() => void copyAllLinks()}
+            >
+              全部复制
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              aria-label="关闭链接备忘录"
+              onClick={onClose}
+            >
+              关闭
+            </button>
+          </span>
+        </div>
+        <p className="mt-1 text-xs text-[var(--dim)]">
+          存各个平台要采集的达人链接（快手、抖音、B站都行）。点任意一条就复制那一条；右上角「全部复制」一次复制全部。
+        </p>
+        {notice ? (
+          <p
+            className="mt-2 rounded-[var(--radius)] px-3 py-2 text-sm"
+            style={
+              notice.kind === "ok"
+                ? { background: "var(--ok-soft)", color: "var(--ok)" }
+                : { background: "var(--bad-soft)", color: "var(--bad)" }
+            }
+            role="status"
+          >
+            {notice.text}
+          </p>
+        ) : null}
+
+        <div className="mt-3 flex flex-col gap-2">
+          {memoLinks.length === 0 ? (
+            <p className="rounded-[var(--radius)] border border-dashed border-[var(--border)] px-3 py-4 text-sm text-[var(--dim)]">
+              备忘录是空的，这里还没有存任何达人链接。在下面把要采集的达人主页链接（快手、抖音、B站都行）加进来——可以一条一条加，也可以一次粘贴多条批量加；加好以后点一行就能复制，采集时直接粘贴着用。
+            </p>
+          ) : (
+            memoLinks.map((it) => {
+              const platform = memoLinkPlatform(it.url);
+              const copied = copiedUrl === it.url;
+              return (
+                <div key={it.url} className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-left"
+                    aria-label={`复制链接：${it.name || it.url}`}
+                    title="点击复制这条链接"
+                    onClick={() => void copyLink(it.url)}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span
+                        className="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-bold"
+                        style={{ background: "var(--accent-soft)", color: "var(--terra)" }}
+                      >
+                        {platform}
+                      </span>
+                      {it.name ? (
+                        <span className="block truncate text-sm font-semibold">{it.name}</span>
+                      ) : null}
+                      {copied ? (
+                        <span
+                          className="ml-auto shrink-0 text-xs font-bold"
+                          style={{ color: "var(--ok)" }}
+                        >
+                          已复制
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="mt-0.5 block truncate text-xs text-[var(--dim)]">{it.url}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-danger-ghost shrink-0"
+                    aria-label={`删除链接：${it.name || it.url}`}
+                    onClick={() => removeMemoLink(it.url)}
+                  >
+                    删除
+                  </button>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <h4 className="mt-5 text-sm font-bold">单个添加</h4>
+        <div className="mt-2 flex flex-col gap-2">
+          <input
+            className="field field-sm"
+            value={newUrl}
+            onChange={(e) => setNewUrl(e.target.value)}
+            placeholder="粘贴一条达人链接（http:// 或 https:// 开头）"
+            aria-label="要保存的链接"
+          />
+          <div className="flex items-center gap-2">
+            <input
+              className="field field-sm min-w-0 flex-1"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="备注 / 达人名（可不填）"
+              aria-label="链接的备注或达人名（可选）"
+            />
+            <button
+              type="button"
+              className="btn btn-primary btn-sm shrink-0"
+              aria-label="添加链接到备忘录"
+              onClick={addMemoLink}
+            >
+              添加
+            </button>
+          </div>
+        </div>
+
+        <h4 className="mt-5 text-sm font-bold">批量添加</h4>
+        <div className="mt-2 flex flex-col gap-2">
+          <textarea
+            className="field field-sm"
+            rows={4}
+            value={batchText}
+            onChange={(e) => setBatchText(e.target.value)}
+            placeholder={"一次粘贴多条，一行一条，例如：\nhttps://www.kuaishou.com/profile/…\nhttps://www.douyin.com/user/…\nhttps://space.bilibili.com/…"}
+            aria-label="批量添加的链接（一行一条）"
+          />
+          <div className="flex items-center gap-2">
+            <p className="min-w-0 flex-1 text-xs text-[var(--dim)]">
+              重复的、空行、不是链接的行会自动跳过。
+            </p>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm shrink-0"
+              aria-label="批量添加链接到备忘录"
+              onClick={addBatchMemoLinks}
+            >
+              批量添加
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -4243,11 +4336,13 @@ export function MonitorBench({
   const [viewMode, setViewMode] = useState<MonitorViewMode>(() => {
     try {
       const saved = window.localStorage.getItem(MONITOR_VIEW_STORAGE_KEY);
-      if (saved === "collected" || saved === "latest" || saved === "date" || saved === "creator" || saved === "group" || saved === "cloud") return saved;
+      if (saved === "plays" || saved === "creator" || saved === "collected" || saved === "cloud") return saved;
     } catch {
       // localStorage 不可用时用默认视图
     }
-    return "latest";
+    // 默认视图 =「按最新排列」；旧版本存下的已下线视图（最新对比 /
+    // 按日期分组 / 按作者分组）也落到这里。
+    return "collected";
   });
   useEffect(() => {
     try {
@@ -4293,6 +4388,8 @@ export function MonitorBench({
   const cardGap = cardGapFor(cardStyle);
   const [layoutOpen, setLayoutOpen] = useState(false);
   const openLayoutPanel = () => setLayoutOpen((v) => !v);
+  // v6.06 链接备忘录浮层开关（问题 #111305）。
+  const [linkMemoOpen, setLinkMemoOpen] = useState(false);
   const updateCardDisplay = (next: {
     style: MonitorCardStyle;
     scale: MonitorCardScale;
@@ -5114,77 +5211,33 @@ export function MonitorBench({
 
   // v4.66 批量存云端：悬浮窗列出的「当前视图所有视频」——与下方
   // 各视图渲染同一口径、同一顺序算出来（成员集合一致是关键）：
-  // 最新采集 = 全部按采集时间倒序；最新对比 = 每达人最新一条；
-  // 按日期分组 = 日期倒序、组内点赞降序拉平；按达人分组 = 有视
-  // 频的达人依次拉平（feed 内已按发布时间倒序）；按作者分组 =
-  // 命名组依次 + 未分组收尾（只含有视频的达人，与视图一致）；
-  // 云端已存 = 清单里有的按存入时间倒序。每渲染同步进 ref，
-  // 批量确认与全选都从 ref 取（与窗里看到的一致）。
+  // 按播放量排列 = 全部按播放量从高到低拉平（未知 / 0 在最后）；
+  // 按达人分组 = 有视频的达人依次拉平（feed 内已按发布时间倒
+  // 序）；按最新排列 = 全部按作品发布日期倒序（v6.09 起，发布
+  // 日期缺失的排最后）；云端上传 = 清单里
+  // 有的按存入时间倒序。每渲染同步进 ref，批量确认与全选都
+  // 从 ref 取（与窗里看到的一致）。
   const currentViewVideos = ((): { account: FeedAccount; video: FeedVideo }[] => {
     const flat: { account: FeedAccount; video: FeedVideo }[] = [];
     for (const a of accounts) for (const v of a.videos) flat.push({ account: a, video: v });
     if (viewMode === "collected") {
-      const collectedTime = (v: FeedVideo) => {
-        const c = v.collectedAt ? new Date(v.collectedAt).getTime() : NaN;
-        if (!Number.isNaN(c)) return c;
-        const t = new Date(v.createdAt).getTime();
-        return Number.isNaN(t) ? 0 : t;
+      // v6.09：按最新排列改按作品发布日期（publishedAt）倒序，
+      // 离现在越近排越前面，不再按采集 / 入库时间排。发布日期
+      // 缺失或解析不出时间的当成最小值排最后、不丢掉（稳定排
+      // 序，缺失项之间保持原相对顺序），不回退 createdAt。
+      const publishedTime = (v: FeedVideo) => {
+        const t = v.publishedAt ? new Date(v.publishedAt).getTime() : NaN;
+        return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
       };
-      return [...flat].sort((x, y) => collectedTime(y.video) - collectedTime(x.video));
-    }
-    if (viewMode === "latest") {
-      return accounts
-        .map((a) => {
-          const sorted = [...a.videos].sort((x, y) => {
-            const tx = x.publishedAt ? new Date(x.publishedAt).getTime() : 0;
-            const ty = y.publishedAt ? new Date(y.publishedAt).getTime() : 0;
-            return ty - tx;
-          });
-          return sorted[0] ? { account: a, video: sorted[0] } : null;
-        })
-        .filter((x): x is NonNullable<typeof x> => x !== null)
-        .sort((a, b) => {
-          const ta = a.video.publishedAt ? new Date(a.video.publishedAt).getTime() : 0;
-          const tb = b.video.publishedAt ? new Date(b.video.publishedAt).getTime() : 0;
-          return tb - ta;
-        });
-    }
-    if (viewMode === "date") {
-      const byDate = new Map<string, { account: FeedAccount; video: FeedVideo }[]>();
-      for (const item of flat) {
-        const key = dateKeyShanghai(item.video.publishedAt);
-        const arr = byDate.get(key) ?? [];
-        arr.push(item);
-        byDate.set(key, arr);
-      }
-      const keys = [...byDate.keys()].sort((a, b) => {
-        if (a === "时间未填") return 1;
-        if (b === "时间未填") return -1;
-        return b.localeCompare(a);
+      return [...flat].sort((x, y) => {
+        const d = publishedTime(y.video) - publishedTime(x.video);
+        return Number.isNaN(d) ? 0 : d;
       });
-      const out: { account: FeedAccount; video: FeedVideo }[] = [];
-      for (const key of keys) {
-        const items = [...(byDate.get(key) ?? [])].sort(
-          (x, y) => (y.video.likeCount ?? 0) - (x.video.likeCount ?? 0),
-        );
-        out.push(...items);
-      }
-      return out;
     }
-    if (viewMode === "group") {
-      const knownIds = new Set(groups.map((g) => g.id));
-      const out: { account: FeedAccount; video: FeedVideo }[] = [];
-      for (const g of groups) {
-        for (const a of accounts) {
-          if (a.groupId === g.id) for (const v of a.videos) out.push({ account: a, video: v });
-        }
-      }
-      for (const a of accounts) {
-        if (a.groupId == null || !knownIds.has(a.groupId)) {
-          for (const v of a.videos) out.push({ account: a, video: v });
-        }
-      }
-      return out;
+    if (viewMode === "plays") {
+      // 按播放量从高到低；播放量未知（null）按 0 算，与真 0 一起
+      // 排在最后（稳定排序，同播放量保持原相对顺序）。
+      return [...flat].sort((x, y) => (y.video.playCount ?? 0) - (x.video.playCount ?? 0));
     }
     if (viewMode === "cloud") {
       const items: { account: FeedAccount; video: FeedVideo; atMs: number }[] = [];
@@ -5520,17 +5573,15 @@ export function MonitorBench({
         )}
       </div>
 
-      {/* 视图切换：最新采集 / 最新对比 / 按日期分组 / 按达人分组 / 按作者分组（选择存 localStorage） */}
+      {/* 视图切换（v6.05 起只剩四个）：按播放量排列 / 按达人分组 / 按最新排列 / 云端上传（选择存 localStorage） */}
       <div className="mt-5 flex flex-wrap items-center gap-2" role="tablist" aria-label="监控视图切换">
         <span className="text-sm font-bold">视图</span>
         {(
           [
-            { key: "collected", label: "最新采集" },
-            { key: "latest", label: "最新对比" },
-            { key: "date", label: "按日期分组" },
+            { key: "plays", label: "按播放量排列" },
             { key: "creator", label: "按达人分组" },
-            { key: "group", label: "按作者分组" },
-            { key: "cloud", label: "云端已存" },
+            { key: "collected", label: "按最新排列" },
+            { key: "cloud", label: "云端上传" },
           ] as { key: MonitorViewMode; label: string }[]
         ).map((opt) => (
           <button
@@ -5548,6 +5599,15 @@ export function MonitorBench({
             ) : null}
           </button>
         ))}
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-label="打开链接备忘录（悬浮列出储存的链接，点击复制）"
+          aria-expanded={linkMemoOpen}
+          onClick={() => setLinkMemoOpen(true)}
+        >
+          链接备忘录
+        </button>
         <span className="ml-auto">
           <button
             type="button"
@@ -5560,14 +5620,16 @@ export function MonitorBench({
           </button>
         </span>
         <span className="text-xs text-[var(--dim)]">
-          {viewMode === "collected" && "按采集时间倒序，最新入库的排最前面"}
-          {viewMode === "latest" && "每个达人只取最新一条，横向一排对比"}
-          {viewMode === "date" && "按发布日期分组，同一天的横向排列"}
-          {viewMode === "creator" && "按达人分组，组内按发布时间倒序"}
-          {viewMode === "group" && "按自定义分组归类达人，没归类的在「未分组」"}
-          {viewMode === "cloud" && "只看已存云端的视频，按存入时间倒序，播放直接走云端"}
+          {viewMode === "plays" && "按播放量从高到低，播放量未知或为 0 的排在最后"}
+          {viewMode === "creator" && "按达人分组显示"}
+          {viewMode === "collected" && "按作品发布日期排序，离现在越近排越前面"}
+          {viewMode === "cloud" && "只显示云端已存的视频"}
         </span>
       </div>
+
+      {/* 链接备忘录浮层（v6.08 清空改版）：只存用户自己加的达人
+          链接，不再自动列监控视频链接。 */}
+      {linkMemoOpen && <LinkMemoPanel onClose={() => setLinkMemoOpen(false)} />}
 
       {/* 版式面板（v4.51 推倒重做）：旧多维滑杆全部下线，只剩
           两组点选——三款卡片设计 + 等比缩小四档（1x / 0.8x /
@@ -5700,7 +5762,7 @@ export function MonitorBench({
             还没有卡片。把第一条视频的整段信息粘到上面的输入框里，就会自动生成第一张卡片。
           </p>
         ) : viewMode === "cloud" ? (
-          <section aria-label="云端已存">
+          <section aria-label="云端上传">
             {(() => {
               // 只显示云端清单（state.json downloaded）里有的
               // 卡片，以清单为准；按存入时间 at 倒序，最近存的
@@ -5768,26 +5830,64 @@ export function MonitorBench({
               );
             })()}
           </section>
-        ) : viewMode === "collected" ? (
-          <section aria-label="最新采集">
+        ) : viewMode === "plays" ? (
+          <section aria-label="按播放量排列">
             {(() => {
-              // 全部视频拉平，按采集时间倒序：采集时间没填的老行
-              // 回退用入库时间（createdAt），最新入库的排最前面。
-              // 与发布时间无关，跟「最新对比」区分开。
+              // 全部视频拉平，按播放量从高到低：播放量未知（null）
+              // 按 0 算，与真 0 一起排在最后；平铺不分组。
               const flat: { account: FeedAccount; video: FeedVideo }[] = [];
               for (const a of accounts) for (const v of a.videos) flat.push({ account: a, video: v });
-              const collectedTime = (v: FeedVideo) => {
-                const c = v.collectedAt ? new Date(v.collectedAt).getTime() : NaN;
-                if (!Number.isNaN(c)) return c;
-                const t = new Date(v.createdAt).getTime();
-                return Number.isNaN(t) ? 0 : t;
-              };
-              flat.sort((x, y) => collectedTime(y.video) - collectedTime(x.video));
+              flat.sort((x, y) => (y.video.playCount ?? 0) - (x.video.playCount ?? 0));
               if (flat.length === 0) {
                 return <p className="text-sm text-[var(--dim)]">还没有视频卡片。</p>;
               }
               return (
-                <div className="flex flex-wrap" style={{ gap: cardGap }} aria-label="按采集时间倒序的全部视频">
+                <div className="flex flex-wrap" style={{ gap: cardGap }} aria-label="按播放量从高到低的全部视频">
+                  {flat.map(({ account: a, video: v }) => (
+                    <CompactVideoCard
+                    cardStyle={cardStyle} cardScale={cardScale}
+                      key={v.id}
+                      video={v}
+                      creatorName={a.name}
+                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
+                      onDetail={(vid) =>
+                        setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
+                      }
+                      onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
+                      onOpenDissected={handleOpenDissected}
+                      dissected={dissectedByVideoId.get(v.videoId) ?? null}
+                      onRefresh={handleRefreshVideo}
+                      refreshing={pendingRefresh.has(v.id)}
+                      refreshFailed={refreshFailedIds.has(v.id)}
+                    />
+                  ))}
+                </div>
+              );
+            })()}
+          </section>
+        ) : viewMode === "collected" ? (
+          <section aria-label="按最新排列">
+            {(() => {
+              // 全部视频拉平，按作品发布日期（publishedAt）倒序：
+              // 发布日期离现在越近排越前面（v6.09 起，不再按采集 /
+              // 入库时间排）。发布日期缺失或解析不出时间的当成最
+              // 小值排最后、不丢掉（稳定排序，缺失项之间保持原相
+              // 对顺序），不回退 createdAt。
+              const flat: { account: FeedAccount; video: FeedVideo }[] = [];
+              for (const a of accounts) for (const v of a.videos) flat.push({ account: a, video: v });
+              const publishedTime = (v: FeedVideo) => {
+                const t = v.publishedAt ? new Date(v.publishedAt).getTime() : NaN;
+                return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+              };
+              flat.sort((x, y) => {
+                const d = publishedTime(y.video) - publishedTime(x.video);
+                return Number.isNaN(d) ? 0 : d;
+              });
+              if (flat.length === 0) {
+                return <p className="text-sm text-[var(--dim)]">还没有视频卡片。</p>;
+              }
+              return (
+                <div className="flex flex-wrap" style={{ gap: cardGap }} aria-label="按作品发布日期倒序的全部视频">
                   {flat.map(({ account: a, video: v }) => (
                     <CompactVideoCard
                     cardStyle={cardStyle} cardScale={cardScale}
@@ -5809,152 +5909,6 @@ export function MonitorBench({
                   ))}
                 </div>
               );
-            })()}
-          </section>
-        ) : viewMode === "latest" ? (
-          <section aria-label="最新对比">
-            {(() => {
-              const latestItems = accounts
-                .map((a) => {
-                  const sorted = [...a.videos].sort((x, y) => {
-                    const tx = x.publishedAt ? new Date(x.publishedAt).getTime() : 0;
-                    const ty = y.publishedAt ? new Date(y.publishedAt).getTime() : 0;
-                    return ty - tx;
-                  });
-                  return sorted[0] ? { account: a, video: sorted[0] } : null;
-                })
-                .filter((x): x is NonNullable<typeof x> => x !== null)
-                .sort((a, b) => {
-                  const ta = a.video.publishedAt ? new Date(a.video.publishedAt).getTime() : 0;
-                  const tb = b.video.publishedAt ? new Date(b.video.publishedAt).getTime() : 0;
-                  return tb - ta;
-                });
-              if (latestItems.length === 0) {
-                return <p className="text-sm text-[var(--dim)]">还没有视频卡片。</p>;
-              }
-              return (
-                <div className="flex overflow-x-auto pb-1.5 snap-x" style={{ gap: cardGap }} aria-label="各达人最新视频横向对比">
-                  {latestItems.map(({ account: a, video: v }) => (
-                    <CompactVideoCard
-                    cardStyle={cardStyle} cardScale={cardScale}
-                      key={v.id}
-                      video={v}
-                      creatorName={a.name}
-                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
-                      onDetail={(vid) =>
-                        setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
-                      }
-                      onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
-                      onOpenDissected={handleOpenDissected}
-                      dissected={dissectedByVideoId.get(v.videoId) ?? null}
-                      onRefresh={handleRefreshVideo}
-                      refreshing={pendingRefresh.has(v.id)}
-                      refreshFailed={refreshFailedIds.has(v.id)}
-                    />
-                  ))}
-                </div>
-              );
-            })()}
-          </section>
-        ) : viewMode === "date" ? (
-          <section aria-label="按日期分组">
-            {(() => {
-              const flat: { account: FeedAccount; video: FeedVideo }[] = [];
-              for (const a of accounts) for (const v of a.videos) flat.push({ account: a, video: v });
-              const groups = new Map<string, { account: FeedAccount; video: FeedVideo }[]>();
-              for (const item of flat) {
-                const key = dateKeyShanghai(item.video.publishedAt);
-                const arr = groups.get(key) ?? [];
-                arr.push(item);
-                groups.set(key, arr);
-              }
-              const sortedKeys = [...groups.keys()].sort((a, b) => {
-                if (a === "时间未填") return 1;
-                if (b === "时间未填") return -1;
-                return b.localeCompare(a);
-              });
-              if (flat.length === 0) return <p className="text-sm text-[var(--dim)]">还没有视频卡片。</p>;
-              return sortedKeys.map((dateKey) => {
-                // 组内排序：点赞量从高到低，点赞最高的排第一位；
-                // 天分组本身的顺序不变（日期倒序，在 sortedKeys 处）。
-                const items = (groups.get(dateKey) ?? []).sort((x, y) => {
-                  return (y.video.likeCount ?? 0) - (x.video.likeCount ?? 0);
-                });
-                return (
-                  <div key={dateKey} className="mb-4">
-                    <div className="flex items-baseline gap-2">
-                      <h3 className="font-display text-base font-bold">{dateKey}</h3>
-                      <span className="text-xs text-[var(--dim)]">{items.length} 条</span>
-                    </div>
-                    <div className="mt-1.5 flex overflow-x-auto pb-1.5 snap-x" style={{ gap: cardGap }} aria-label={`${dateKey} 的视频`}>
-                      {items.map(({ account: a, video: v }) => (
-                        <CompactVideoCard
-                    cardStyle={cardStyle} cardScale={cardScale}
-                          key={v.id}
-                          video={v}
-                          creatorName={a.name}
-                          onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
-                          onDetail={(vid) =>
-                            setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
-                          }
-                          onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
-                          onOpenDissected={handleOpenDissected}
-                          dissected={dissectedByVideoId.get(v.videoId) ?? null}
-                          onRefresh={handleRefreshVideo}
-                          refreshing={pendingRefresh.has(v.id)}
-                          refreshFailed={refreshFailedIds.has(v.id)}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                );
-              });
-            })()}
-          </section>
-        ) : viewMode === "group" ? (
-          <section aria-label="按作者分组">
-            <NewMonitorGroupRow invalidate={invalidate} />
-            {(() => {
-              const knownIds = new Set(groups.map((g) => g.id));
-              // 展示规则（v4.43）：没采到作品（0 条视频）的达人
-              // 不显示（分组设置保留，采到后自动出现）；命名组
-              // 本身保留展示以便改名/删除，「未分组」段没人时
-              // 整段隐藏。
-              const sections: { group: MonitorGroup | null; members: FeedAccount[] }[] = [
-                ...groups.map((g) => ({
-                  group: g as MonitorGroup | null,
-                  members: accounts.filter((a) => a.groupId === g.id && a.videos.length > 0),
-                })),
-                {
-                  group: null,
-                  members: accounts.filter(
-                    (a) => (a.groupId == null || !knownIds.has(a.groupId)) && a.videos.length > 0,
-                  ),
-                },
-              ].filter(
-                (s): s is { group: MonitorGroup | null; members: FeedAccount[] } =>
-                  s.group !== null || s.members.length > 0,
-              );
-              return sections.map(({ group: g, members }) => (
-                <AuthorGroupSection
-                  cardStyle={cardStyle} cardScale={cardScale}
-                  key={g ? `g${g.id}` : "ungrouped"}
-                  group={g}
-                  members={members}
-                  allGroups={groups}
-                  invalidate={invalidate}
-                  onPlay={(acc, vid) => setPlaying({ video: vid, creatorName: acc.name })}
-                  onDetail={(acc, vid) =>
-                    setDetail({ video: vid, creatorName: acc.name, creatorId: acc.creatorId, creatorUrl: acc.url })
-                  }
-                  onAnalyze={(acc, vid) => void handleAnalyze(vid, acc.name)}
-                  onOpenDissected={handleOpenDissected}
-                  dissectedByVideoId={dissectedByVideoId}
-                  onRefresh={handleRefreshVideo}
-                  refreshingIds={new Set(pendingRefresh.keys())}
-                  refreshFailedIds={refreshFailedIds}
-                />
-              ));
             })()}
           </section>
         ) : (
