@@ -2153,6 +2153,12 @@ pendingJobId: z.string(),
 pendingUpdatedAt: z.number(),
 pendingRollback: z.string(),
 isPrimary: z.boolean(),
+// 子文件来源（v6.01）：本行是把另一张卡加进来当服装时复制的
+// 行 → sourcePresetId = 来源卡 id、sourcePresetName = 来源卡名
+// （来源卡此时已不在主文件列表里，名字随行带出供界面标注）；
+// 普通图片两项皆 null。
+sourcePresetId: z.number().nullable(),
+sourcePresetName: z.string().nullable(),
 });
 
 const imageGenRecordOut = z.object({
@@ -2661,6 +2667,10 @@ pendingUpdatedAt: z.number(),
 pendingRollback: z.string(),
 // Server-managed: set by the rebuild import, never by the save form.
 fromCard: z.boolean(),
+// 主文件归属（v6.01）：本卡正作为子文件挂在哪张卡下面（宿主
+// 卡 id）；null = 独立主文件。listAssetPresets 只回主文件，本
+// 字段随出参带出供服务端内部与界面口径核对。
+parentPresetId: z.number().nullable(),
 images: z.array(assetPresetImageOut),
 updatedAt: z.string(),
 });
@@ -2776,8 +2786,20 @@ pendingJobId: row.pendingJobId,
 pendingUpdatedAt: row.pendingUpdatedAt,
 pendingRollback: row.pendingRollback,
 fromCard: row.fromCard === 1,
+parentPresetId: row.parentPresetId ?? null,
 images: await Promise.all(
-imgs.map(async (im, idx) => ({
+imgs.map(async (im, idx) => {
+// v6.01：子文件来源名随行带出（来源卡已不在主文件列表，
+// 界面要标注「这是把谁加进来当服装的那张」只能靠这里）。
+let sourcePresetName: string | null = null;
+if (im.sourcePresetId != null) {
+const srcRows = await db
+.select({ name: schema.assetPresets.name })
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, im.sourcePresetId));
+sourcePresetName = srcRows[0]?.name ?? null;
+}
+return {
 id: im.id,
 url: await ctx.blobs.getUrl(im.imageBlobKey),
 previewUrl: await previewUrlForKey(ctx, im.imageBlobKey),
@@ -2788,7 +2810,10 @@ pendingJobId: im.pendingJobId,
 pendingUpdatedAt: im.pendingUpdatedAt,
 pendingRollback: im.pendingRollback,
 isPrimary: idx === 0,
-})),
+sourcePresetId: im.sourcePresetId ?? null,
+sourcePresetName,
+};
+}),
 ),
 updatedAt: row.updatedAt.toISOString(),
 };
@@ -3068,7 +3093,8 @@ await db.insert(schema.assetMeta).values({ key: "library_restore_starters_v1", v
 async function loadCategoryCounts(ctx: Ctx): Promise<{ name: string; count: number }[]> {
 const db = ctx.db<typeof schema>();
 const cats = await db.select().from(schema.assetCategories).orderBy(asc(schema.assetCategories.sortOrder), asc(schema.assetCategories.id));
-const rows = await db.select({ category: schema.assetPresets.category }).from(schema.assetPresets);
+// v6.01：分类计数只数主文件（子文件卡已不在列表里，不计）。
+const rows = await db.select({ category: schema.assetPresets.category }).from(schema.assetPresets).where(isNull(schema.assetPresets.parentPresetId));
 const counts = new Map<string, number>();
 for (const r of rows) counts.set(r.category, (counts.get(r.category) ?? 0) + 1);
 const out = cats.map((c) => ({ name: c.name, count: counts.get(c.name) ?? 0 }));
@@ -11064,7 +11090,7 @@ return { id: project.id};
 // them never resurrects them).
 
 listAssetPresets: defineAction({
-description: "列出人物资产储存库的全部卡片、图片与分类。",
+description: "列出人物资产储存库的主文件卡片（人物卡）、图片与分类；已挂到别的卡下面当子文件的卡不在此列（数据仍在库里，拆回后重新出现）。",
 request: z.object({}),
 response: z.object({
 presets: z.array(assetPresetOut),
@@ -11074,9 +11100,12 @@ async handler(ctx) {
 await ensureAssetPresetsSeeded(ctx);
 await ensureLibraryCategories(ctx);
 const db = ctx.db<typeof schema>();
+// v6.01：主文件列表只回独立主文件——parentPresetId 非空的子
+// 文件卡不进列表（它只在宿主卡下面以服装图的形式存在）。
 const rows = await db
 .select()
 .from(schema.assetPresets)
+.where(isNull(schema.assetPresets.parentPresetId))
 .orderBy(asc(schema.assetPresets.id));
 const imgRows = await db
 .select()
@@ -11310,7 +11339,7 @@ femaleMinor: count("女", "未成年"),
 }),
 
 deleteAssetPreset: defineAction({
-description: "删除一张储存库人物卡及其图片。",
+description: "删除一张储存库人物卡及其图片；这张卡名下若挂着子文件卡（别的卡加进来当服装的来源卡），先把它们全部恢复成独立主文件再删，绝不让卡被挂没。",
 request: z.object({ id: z.number().int().positive()}),
 response: z.object({ ok: z.literal(true)}),
 async handler(ctx, args): Promise<{ ok: true}> {
@@ -11321,6 +11350,14 @@ const existing = await db
 .where(eq(schema.assetPresets.id, args.id));
 const prev = existing[0];
 void prev;
+// v6.01：宿主卡删除前，先把它名下的子文件卡全部放回主文
+// 件列表（清 parentPresetId）——子文件卡自己的图片行都在它
+// 自己卡上，宿主卡里的复制行随宿主卡删掉即可，共享 blob
+// 走引用检查不会误删。
+await db
+.update(schema.assetPresets)
+.set({ parentPresetId: null, updatedAt: new Date() })
+.where(eq(schema.assetPresets.parentPresetId, args.id));
 const imgs = await loadPresetImages(ctx, args.id);
 await db
 .delete(schema.assetPresetImages)
@@ -11445,12 +11482,12 @@ description: "用分片拼图给储存库人物卡添加图片。",
 }),
 
 deleteAssetPresetImage: defineAction({
-description: "删除储存库人物卡上的一张图片；删的是主体图时下一张接任主体、卡片造型跟新主体走，删到一张不剩时卡片造型文字保留；图片 blob 只在无其他引用时才清。",
+description: "删除储存库人物卡上的一张图片；删的是主体图时下一张接任主体、卡片造型跟新主体走，删到一张不剩时卡片造型文字保留；图片 blob 只在无其他引用时才清。特例（v6.01）：删的这张图是把另一张卡加进来当服装时复制的子文件行、且来源卡正挂在本卡名下时，来源卡同步恢复成独立主文件回到储存库列表（restoredSourceName 回它的名字），它自己的图片与数据一字不删。",
 request: z.object({
 presetId: z.number().int().positive(),
 imageId: z.number().int().positive(),
 }),
-response: z.object({ preset: assetPresetOut}),
+response: z.object({ preset: assetPresetOut, restoredSourceName: z.string().nullable() }),
 async handler(ctx, args) {
 const db = ctx.db<typeof schema>();
 const rows = await db
@@ -11509,13 +11546,32 @@ await db
 .update(schema.assetPresets)
 .set({ cardNote: nextNote, updatedAt: new Date() })
 .where(eq(schema.assetPresets.id, args.presetId));
+// v6.01：删掉的是子文件复制行（来源卡正挂在本卡名下）→ 来
+// 源卡恢复成独立主文件回到列表（它自己的图片行没动、图还
+// 在它卡上；共享 blob 也因它仍引用而不会被上面的引用检查
+// 误删）。
+let restoredSourceName: string | null = null;
+if (target.sourcePresetId != null) {
+const srcRows3 = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, target.sourcePresetId));
+const srcPreset3 = srcRows3[0];
+if (srcPreset3 && srcPreset3.parentPresetId === args.presetId) {
+await db
+.update(schema.assetPresets)
+.set({ parentPresetId: null, updatedAt: new Date() })
+.where(eq(schema.assetPresets.id, srcPreset3.id));
+restoredSourceName = srcPreset3.name;
+}
+}
 ctx.invalidateQueries();
 const freshRows = await db
 .select()
 .from(schema.assetPresets)
 .where(eq(schema.assetPresets.id, args.presetId));
 const fresh = freshRows[0] ?? preset;
-return { preset: await toAssetPresetOut(ctx, fresh)};
+return { preset: await toAssetPresetOut(ctx, fresh), restoredSourceName };
 },
 }),
 
@@ -11616,18 +11672,28 @@ return { preset: await toAssetPresetOut(ctx, fresh)};
 //    图时原卡保留、造型文字不清。
 // ② attachPresetAsSubImage —— 把任意一张主文件添加到另一张主
 //    文件下面成为子文件：来源卡的主体图连同它的造型在目标卡
-//    图片列表末尾复制一条图片行（共享同一份 blob 引用）；来
-//    源卡本身原样保留、仍是独立主文件。不能把卡加到自己下面。
+//    图片列表末尾复制一条图片行（共享同一份 blob 引用、复制
+//    行记 sourcePresetId）；v6.01 起（售后单 #111229，用户亲口
+//    定）来源卡同时标 parentPresetId 归入目标卡名下、从主文
+//    件列表消失，只在目标卡下面以子文件存在（数据一字不
+//    删）。不能把卡加到自己下面；已是子文件的卡不能再被挂、
+//    子文件卡下面也不能再挂人。反向恢复：目标卡上对带
+//    sourcePresetId 的那行点「拆成独立人物」→ promote 走恢复
+//    分支（删掉复制行 + 清来源卡 parentPresetId、可改名），
+//    来源卡原样回到主文件列表；删掉那行（deleteAssetPreset-
+//    Image）同样恢复来源卡；删掉宿主卡（deleteAssetPreset）
+//    先把其名下子文件卡全部恢复成主文件再删，绝不让卡被
+//    「挂没」。
 // 两个动作都不碰剧本项目人物卡、不自动生图。
 
 promotePresetImage: defineAction({
-description: "把储存库人物卡上的一张服装图拆出来做成一张独立人物卡：图片连同它自己的造型移出原卡、成为新卡的主体图（图片字节不复制、共享原引用），新卡继承原卡的分类与音色 / 语气基调；原卡拆走的是主体图时下一张接任主体、造型跟新主体走，拆走唯一一张图时原卡与造型文字保留。",
+description: "把储存库人物卡上的一张服装图拆出来做成一张独立人物卡：图片连同它自己的造型移出原卡、成为新卡的主体图（图片字节不复制、共享原引用），新卡继承原卡的分类与音色 / 语气基调；原卡拆走的是主体图时下一张接任主体、造型跟新主体走，拆走唯一一张图时原卡与造型文字保留。特例（v6.01）：拆的这张图是把另一张卡加进来当服装时复制的子文件行、且来源卡正挂在本卡名下时，不新建卡——删掉复制行、把来源卡恢复成独立主文件回到储存库列表（restored=true，created 即恢复的来源卡，名字按入参写）。",
 request: z.object({
 presetId: z.number().int().positive(),
 imageId: z.number().int().positive(),
 newName: z.string().min(1).max(80),
 }),
-response: z.object({ source: assetPresetOut, created: assetPresetOut }),
+response: z.object({ source: assetPresetOut, created: assetPresetOut, restored: z.boolean() }),
 async handler(ctx, args) {
 const db = ctx.db<typeof schema>();
 const newName = args.newName.trim();
@@ -11647,6 +11713,79 @@ const wasPrimary = imgs[0]?.id === target.id;
 // 可能还只存在卡片造型段里（读取回填前），以卡片造型补上。
 const imgLook = target.look.trim() || (wasPrimary ? cardLook : "");
 const remaining = imgs.filter((im) => im.id !== args.imageId);
+// v6.01 恢复分支：这张图是「把别的人物加进来当服装」复制进
+// 来的子文件行（sourcePresetId 指向来源卡、且来源卡正挂在本
+// 卡名下）→ 拆出不是新建卡，而是把来源卡恢复成独立主文
+// 件：删掉本卡里的复制行（来源卡自己的图片行一字未动、图
+// 还在来源卡上），清掉来源卡的 parentPresetId 让它回到主
+// 文件列表；名字按确认框里填的写（客户端默认填来源卡原
+// 名）。本卡这边的主体接任与普通拆出同口径。
+if (target.sourcePresetId != null) {
+const srcRows2 = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, target.sourcePresetId));
+const srcPreset = srcRows2[0];
+if (srcPreset && srcPreset.parentPresetId === args.presetId) {
+let nextNoteR = preset.cardNote;
+if (wasPrimary && remaining.length > 0) {
+const newPrimary = remaining[0];
+if (newPrimary) {
+const newLook = newPrimary.look.trim();
+if (newLook) {
+if (newLook !== cardLook) {
+nextNoteR = setNoteSegmentValue(
+preset.cardNote,
+["造型", "外貌"],
+"造型",
+newLook,
+);
+}
+} else if (cardLook) {
+await db
+.update(schema.assetPresetImages)
+.set({ look: cardLook })
+.where(eq(schema.assetPresetImages.id, newPrimary.id));
+}
+}
+}
+await db
+.delete(schema.assetPresetImages)
+.where(eq(schema.assetPresetImages.id, target.id));
+for (let i = 0; i < remaining.length; i++) {
+const im = remaining[i];
+if (!im || im.sortOrder === i) continue;
+await db
+.update(schema.assetPresetImages)
+.set({ sortOrder: i })
+.where(eq(schema.assetPresetImages.id, im.id));
+}
+await db
+.update(schema.assetPresets)
+.set({ cardNote: nextNoteR, updatedAt: new Date() })
+.where(eq(schema.assetPresets.id, args.presetId));
+await db
+.update(schema.assetPresets)
+.set({ parentPresetId: null, name: newName, updatedAt: new Date() })
+.where(eq(schema.assetPresets.id, srcPreset.id));
+ctx.invalidateQueries();
+const freshRowsR = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, args.presetId));
+const freshR = freshRowsR[0] ?? preset;
+const restoredRows = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, srcPreset.id));
+const restoredRow = restoredRows[0] ?? srcPreset;
+return {
+source: await toAssetPresetOut(ctx, freshR),
+created: await toAssetPresetOut(ctx, restoredRow),
+restored: true,
+};
+}
+}
 // 新卡备注 = 原卡备注换造型段为这张图的造型（空造型时造型段
 // 摘掉，setNoteSegmentValue 空值口径）；音色 / 语气基调与其
 // 余段落原样继承。
@@ -11696,9 +11835,11 @@ const created = inserted[0];
 if (!created) throw new Error("拆出新卡没成，请重试");
 // 图片行整体改挂到新卡下当主体图（同一份 blob、不复制字
 // 节）；图自己的造型随行（此前只在卡片造型段里时补写进行）。
+// sourcePresetId 一并清空：能走到普通拆出说明来源卡没挂在本
+// 卡名下（链接已失效），新卡不带这个旧标记。
 await db
 .update(schema.assetPresetImages)
-.set({ presetId: created.id, sortOrder: 0, look: imgLook })
+.set({ presetId: created.id, sortOrder: 0, look: imgLook, sourcePresetId: null })
 .where(eq(schema.assetPresetImages.id, target.id));
 // 原卡主体接任（与 deleteAssetPresetImage 同口径）：拆走的
 // 是主体图且还有图时，剩余第一张接任主体——它有自己的造
@@ -11749,17 +11890,18 @@ const fresh = freshRows[0] ?? preset;
 return {
 source: await toAssetPresetOut(ctx, fresh),
 created: await toAssetPresetOut(ctx, created),
+restored: false,
 };
 },
 }),
 
 attachPresetAsSubImage: defineAction({
-description: "把一张储存库人物卡添加为另一张人物卡的子文件（服装图）：来源卡的主体图连同它的造型复制一条图片行挂到目标卡图片列表末尾（共享同一份图片字节，任一侧删图仍走引用检查）；来源卡本身原样保留、仍是独立人物卡。",
+description: "把一张储存库人物卡添加为另一张人物卡的子文件（服装图）：来源卡的主体图连同它的造型复制一条图片行挂到目标卡图片列表末尾（共享同一份图片字节，任一侧删图仍走引用检查），复制行记下来源卡 id；同时来源卡标上宿主（parentPresetId），从储存库主文件列表里消失、只在目标卡下面以子文件存在——来源卡的数据与全部图片一字不删；之后在目标卡上把这张子文件图拆成独立人物、或删掉这张图，来源卡都会恢复成独立主文件重新回到列表。",
 request: z.object({
 sourcePresetId: z.number().int().positive(),
 targetPresetId: z.number().int().positive(),
 }),
-response: z.object({ target: assetPresetOut }),
+response: z.object({ target: assetPresetOut, source: assetPresetOut }),
 async handler(ctx, args) {
 if (args.sourcePresetId === args.targetPresetId) {
 throw new Error("不能把人物卡加到它自己下面");
@@ -11771,12 +11913,20 @@ const srcRows = await db
 .where(eq(schema.assetPresets.id, args.sourcePresetId));
 const source = srcRows[0];
 if (!source) throw new Error("来源人物卡不存在");
+if (source.parentPresetId != null) {
+throw new Error(
+`「${source.name || "未命名人物"}」已经是另一张卡下面的子文件了，不能再加到别的卡下面`,
+);
+}
 const tgtRows = await db
 .select()
 .from(schema.assetPresets)
 .where(eq(schema.assetPresets.id, args.targetPresetId));
 const targetPreset = tgtRows[0];
 if (!targetPreset) throw new Error("目标人物卡不存在");
+if (targetPreset.parentPresetId != null) {
+throw new Error("目标人物卡本身已经是子文件了，不能再往它下面加人物");
+}
 const srcImgs = await loadPresetImages(ctx, args.sourcePresetId);
 const srcPrimary = srcImgs[0];
 if (!srcPrimary) {
@@ -11796,14 +11946,31 @@ fileName: srcPrimary.fileName || source.name,
 imageBlobKey: srcPrimary.imageBlobKey,
 imageMime: srcPrimary.imageMime,
 look: srcLook,
+// v6.01：记下来源卡，拆出 / 删图时凭它恢复来源卡。
+sourcePresetId: args.sourcePresetId,
 sortOrder: tgtImgs.length,
 });
+// v6.01：来源卡归入目标卡名下——从此只在目标卡下面以子文
+// 件存在，主文件列表不再列它；卡本身与它自己的全部图片
+// 行一字不动。
+await db
+.update(schema.assetPresets)
+.set({ parentPresetId: args.targetPresetId, updatedAt: new Date() })
+.where(eq(schema.assetPresets.id, args.sourcePresetId));
 await db
 .update(schema.assetPresets)
 .set({ updatedAt: new Date() })
 .where(eq(schema.assetPresets.id, args.targetPresetId));
 ctx.invalidateQueries();
-return { target: await toAssetPresetOut(ctx, targetPreset) };
+const freshSrcRows = await db
+.select()
+.from(schema.assetPresets)
+.where(eq(schema.assetPresets.id, args.sourcePresetId));
+const freshSource = freshSrcRows[0] ?? source;
+return {
+target: await toAssetPresetOut(ctx, targetPreset),
+source: await toAssetPresetOut(ctx, freshSource),
+};
 },
 }),
 

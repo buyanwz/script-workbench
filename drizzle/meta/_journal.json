@@ -309,6 +309,13 @@
       "when": 1794395569810,
       "tag": "0044_add_issue_resolved_at",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "6",
+      "when": 1794493849970,
+      "tag": "0045_add_preset_parent_and_image_source_links",
+      "breakpoints": true
     }
   ]
 }

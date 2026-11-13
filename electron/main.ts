@@ -1,5 +1,11 @@
 // Electron 主进程（P1 骨架）— 剧本创作工作台 exe 的壳。
 //
+// 双视图（左聊天第一期）：主窗口内两个 WebContentsView——左视图加载
+// exe 专属聊天页（/exe-chat/），右视图原样加载工作台（/）。默认左视图
+// 收成 36px 窄边，点小边滑出到 380px，点收起回到窄边；工作台视图的
+// URL 与加载方式与原来完全一致，工作台代码零改动。切工作台页面时
+// 聊天视图独立存在，聊天不丢。
+//
 // 职责（port-plan.md D2）：
 //   1. 找一个本机空闲端口（默认 3000，被占则往后顺延）；
 //   2. 以子进程拉起服务端（开发期 `bun server.ts`，打包后为
@@ -24,7 +30,7 @@ import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, Menu } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, WebContentsView } from "electron";
 import type { MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import type { UpdateInfo } from "electron-updater";
@@ -55,8 +61,15 @@ const UPDATE_FIRST_CHECK_DELAY_MS = 20_000;
 let serverChild: ChildProcess | null = null;
 let serverPort = DEFAULT_PORT;
 let mainWindow: BrowserWindow | null = null;
+let chatView: WebContentsView | null = null;
+let workView: WebContentsView | null = null;
+let chatExpanded = false;
 let shuttingDown = false;
 let serverCrashed = false;
+
+// 左聊天栏宽度：收起时只留一条窄边（点一下滑出），展开时 380px。
+const CHAT_COLLAPSED_WIDTH = 36;
+const CHAT_EXPANDED_WIDTH = 380;
 
 function log(...args: unknown[]): void {
   console.log(`[electron-main ${new Date().toISOString()}]`, ...args);
@@ -182,32 +195,79 @@ async function waitForHealth(port: number): Promise<boolean> {
 }
 
 function showServerDownPage(): void {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
   const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>服务掉了</title>
 <style>body{font-family:system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;background:#1a1a1a;color:#eee;margin:0}
 div{max-width:420px;text-align:center;padding:24px}button{font-size:16px;padding:10px 24px;cursor:pointer}</style></head>
 <body><div><h1>服务掉了</h1><p>工作台的本地服务意外退出了，你的项目数据没有丢（数据存在你电脑上，不在服务进程里）。</p>
 <p><button onclick="window.electronAPI.restartService()">点这里重启服务</button></p></div></body></html>`;
-  void mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  const url = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+  // 双视图形态下错误页进工作台视图（它有 preload，重启按钮可用）；
+  // 无视图的兜底窗口则沿用原来的窗口级加载。
+  if (workView && !workView.webContents.isDestroyed()) {
+    void workView.webContents.loadURL(url);
+    return;
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  void mainWindow.loadURL(url);
 }
 
-async function createWindow(): Promise<void> {
+/** 按当前展开状态排两个视图：左聊天栏 + 右工作台，窗口 resize 时重排。 */
+function layoutViews(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !chatView || !workView) return;
+  const bounds = mainWindow.getContentBounds();
+  const chatWidth = chatExpanded ? CHAT_EXPANDED_WIDTH : CHAT_COLLAPSED_WIDTH;
+  chatView.setBounds({ x: 0, y: 0, width: chatWidth, height: bounds.height });
+  workView.setBounds({
+    x: chatWidth,
+    y: 0,
+    width: Math.max(0, bounds.width - chatWidth),
+    height: bounds.height,
+  });
+}
+
+function setChatExpanded(expanded: boolean): { expanded: boolean } {
+  chatExpanded = expanded;
+  layoutViews();
+  return { expanded: chatExpanded };
+}
+
+/** 建双视图壳窗口（两个视图共用同一份 preload，隔离配置与原来一致）。 */
+function createShellWindow(width: number, height: number): void {
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width,
+    height,
     title: "剧本创作工作台",
     webPreferences: {
-      preload: join(DIST_DIR, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
     },
   });
+  const viewPreferences = {
+    preload: join(DIST_DIR, "preload.cjs"),
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+  };
+  chatView = new WebContentsView({ webPreferences: viewPreferences });
+  workView = new WebContentsView({ webPreferences: viewPreferences });
+  mainWindow.contentView.addChildView(chatView);
+  mainWindow.contentView.addChildView(workView);
+  mainWindow.on("resize", layoutViews);
   mainWindow.on("closed", () => {
     mainWindow = null;
+    chatView = null;
+    workView = null;
   });
-  await mainWindow.loadURL(`http://127.0.0.1:${serverPort}/`);
-  log("window loaded", `http://127.0.0.1:${serverPort}/`);
+  layoutViews();
+}
+
+async function createWindow(): Promise<void> {
+  createShellWindow(1280, 860);
+  if (!workView || !chatView) return;
+  await workView.webContents.loadURL(`http://127.0.0.1:${serverPort}/`);
+  await chatView.webContents.loadURL(`http://127.0.0.1:${serverPort}/exe-chat/`);
+  log("window loaded", `http://127.0.0.1:${serverPort}/`, "+ chat view /exe-chat/");
   // P1 验收钩子（仅 P1_SCREENSHOT 环境变量开启时）：等首屏渲染后截图、
   // 打印 DOM 证据，然后关窗口（顺带走一遍退出停服务路径）。
   // 正式使用时不设此变量，钩子完全不触发。
@@ -216,11 +276,11 @@ async function createWindow(): Promise<void> {
     setTimeout(() => {
       void (async () => {
         try {
-          const info = (await mainWindow?.webContents.executeJavaScript(
+          const info = (await workView?.webContents.executeJavaScript(
             `({ title: document.title, rootChildren: document.querySelector('[data-generated-space-root]')?.children.length ?? -1, bodyText: document.body.innerText.slice(0, 400) })`,
           )) as { title: string; rootChildren: number; bodyText: string };
           log("first-screen DOM:", JSON.stringify(info));
-          const image = await mainWindow?.webContents.capturePage();
+          const image = await workView?.webContents.capturePage();
           if (image) {
             const { writeFileSync } = await import("node:fs");
             writeFileSync(shotPath, image.toPNG());
@@ -294,7 +354,12 @@ async function restartService(): Promise<void> {
   }
   const ok = await waitForHealth(serverPort);
   if (ok && mainWindow && !mainWindow.isDestroyed()) {
-    await mainWindow.loadURL(`http://127.0.0.1:${serverPort}/`);
+    if (workView && chatView) {
+      await workView.webContents.loadURL(`http://127.0.0.1:${serverPort}/`);
+      await chatView.webContents.loadURL(`http://127.0.0.1:${serverPort}/exe-chat/`);
+    } else {
+      await mainWindow.loadURL(`http://127.0.0.1:${serverPort}/`);
+    }
   } else if (mainWindow && !mainWindow.isDestroyed()) {
     showServerDownPage();
   }
@@ -302,17 +367,7 @@ async function restartService(): Promise<void> {
 
 /** “服务掉了”窗口（服务端拉不起或健康检查超时时用，可点重启）。 */
 function createErrorWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 800,
-    height: 500,
-    title: "剧本创作工作台",
-    webPreferences: {
-      preload: join(DIST_DIR, "preload.cjs"),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
-  });
+  createShellWindow(800, 500);
   showServerDownPage();
 }
 
@@ -416,6 +471,13 @@ function setupApplicationMenu(): void {
     {
       label: "视图",
       submenu: [
+        {
+          label: "聊天栏展开/收起",
+          click: () => {
+            setChatExpanded(!chatExpanded);
+          },
+        },
+        { type: "separator" },
         { label: "重新加载", role: "reload" },
         { label: "强制重新加载", role: "forceReload" },
         { label: "切换开发者工具", role: "toggleDevTools" },
@@ -494,6 +556,12 @@ ipcMain.handle("restart-service", async () => {
   await restartService();
   return { ok: !serverCrashed };
 });
+
+// 左聊天栏展开/收起（聊天视图经 preload 调用；工作台视图不受影响）。
+ipcMain.handle("chat-set-expanded", (_event, expanded: unknown) =>
+  setChatExpanded(expanded === true),
+);
+ipcMain.handle("chat-get-expanded", () => ({ expanded: chatExpanded }));
 
 // 自动更新（v1.1.0）：设置页手动检查；结果回设置页显示，下载完由
 // update-downloaded 事件弹原生提示（见 setupAutoUpdater）。

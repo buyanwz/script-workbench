@@ -3,6 +3,15 @@
 // 路由（单进程 Bun.serve，见 port-plan.md §保留-6）：
 //   GET  /health               健康检查（Electron 主进程等它通了再开窗口）
 //   POST /api/actions/:name    176 个服务端动作（Actions 对象遍历 key 自动注册）
+//   GET  /exe-chat/            exe 专属左侧聊天页（移植层，不在 client/src 内）
+//   GET  /api/chat/health      聊天后端自述（模型名、视觉是否启用，不含 Key）
+//   POST /api/chat/message     聊天对话（dryRun 不调用模型、不计费）
+//   POST /api/chat/writeback   写回通路（经现有动作 handler 写本地库并回读比对）
+//   POST /api/chat/dissect/upload    解剖：本地视频文件上传（存云端视频目录）
+//   POST /api/chat/dissect/from-url  解剖：视频链接下载到本机
+//   POST /api/chat/dissect/start     解剖：启动编排（后台跑，立刻回 jobId）
+//   GET  /api/chat/dissect/status    解剖：查任务进度与结果
+//   POST /api/chat/vision-probe      视觉模型探针（只查模型列表，不生成、不计费）
 //   GET  /blobs/:key           blob 直出（P2 走磁盘文件 + Range 支持）
 //   GET  / 与前端静态资源      client/dist/ 同源托管
 //   其余                     404 JSON
@@ -19,6 +28,19 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Actions } from "./server/src/actions";
 import { createLocalCtx, NotImplementedError } from "./server/src/ctx";
+import {
+  EXE_CHAT_PAGE_HTML,
+  exeChatHealth,
+  handleExeChatMessage,
+  handleExeChatWriteback,
+} from "./server/src/exe-chat";
+import {
+  handleExeChatDissectFromUrl,
+  handleExeChatDissectStart,
+  handleExeChatDissectStatus,
+  handleExeChatDissectUpload,
+  handleExeChatVisionProbe,
+} from "./server/src/exe-chat-dissect";
 import { initDataLayer } from "./server/src/db";
 import { readBlobFile } from "./server/src/blobs-fs";
 import type { ActionDefinition } from "./server/src/local-sdk";
@@ -178,6 +200,37 @@ const server = Bun.serve({
         actions: actionNames.length,
         time: new Date().toISOString(),
       });
+    }
+
+    // exe 专属左侧聊天路由（移植层，不计入 actions 数，不走动作注册表）。
+    if (req.method === "GET" && (pathname === "/exe-chat" || pathname === "/exe-chat/")) {
+      return new Response(EXE_CHAT_PAGE_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+    if (req.method === "GET" && pathname === "/api/chat/health") {
+      return exeChatHealth();
+    }
+    if (req.method === "POST" && pathname === "/api/chat/message") {
+      return handleExeChatMessage(req);
+    }
+    if (req.method === "POST" && pathname === "/api/chat/writeback") {
+      return handleExeChatWriteback(req);
+    }
+    if (req.method === "POST" && pathname === "/api/chat/dissect/upload") {
+      return handleExeChatDissectUpload(req);
+    }
+    if (req.method === "POST" && pathname === "/api/chat/dissect/from-url") {
+      return handleExeChatDissectFromUrl(req);
+    }
+    if (req.method === "POST" && pathname === "/api/chat/dissect/start") {
+      return handleExeChatDissectStart(req);
+    }
+    if (req.method === "GET" && pathname === "/api/chat/dissect/status") {
+      return handleExeChatDissectStatus(req);
+    }
+    if (req.method === "POST" && pathname === "/api/chat/vision-probe") {
+      return handleExeChatVisionProbe(req);
     }
 
     if (req.method === "POST" && pathname.startsWith("/api/actions/")) {

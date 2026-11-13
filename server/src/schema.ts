@@ -223,6 +223,12 @@ export const assetPresets = sqliteTable("asset_presets", {
   pendingUpdatedAt: integer("pending_updated_at").notNull().default(0),
   pendingRollback: text("pending_rollback").notNull().default(""),
   fromCard: integer("from_card").notNull().default(0),
+  // 主文件 ⇄ 子文件归属（v6.01）：本卡被「把别的人物加进来当服装」
+  // 挂到另一张卡下面成为子文件时，这里记宿主卡（父级主文件）的
+  // id，本卡随即从储存库主文件列表里消失（数据一字不删、图片行
+  // 全部保留）；把宿主卡上那张来源服装图「拆成独立人物」或删掉
+  // 那张图时，本列清空、本卡重新回到主文件列表。空 = 独立主文件。
+  parentPresetId: integer("parent_preset_id"),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
@@ -261,6 +267,11 @@ export const assetPresetImages = sqliteTable("asset_preset_images", {
   pendingJobId: text("pending_job_id").notNull().default(""),
   pendingUpdatedAt: integer("pending_updated_at").notNull().default(0),
   pendingRollback: text("pending_rollback").notNull().default(""),
+  // 子文件来源（v6.01）：本行是「把别的人物加进来当服装」从另一
+  // 张卡复制进来时，这里记来源卡 id；普通上传 / 拆分移行的图为
+  // 空。宿主卡上对这一行点「拆成独立人物」时凭它找到来源卡、
+  // 把来源卡恢复成独立主文件；删掉这一行时同样恢复来源卡。
+  sourcePresetId: integer("source_preset_id"),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
