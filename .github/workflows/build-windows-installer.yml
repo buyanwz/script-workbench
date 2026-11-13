@@ -1,8 +1,10 @@
 # 自动打 Windows 安装包：每次 push 到 main 或手动触发，在 GitHub 的 Windows 服务器上构建 NSIS 安装包并发布到 Releases。
 # 注意：本文件里没有任何 Key、Token、密钥。构建只从官方地址下载 Python / ffmpeg / Pillow，并逐项校验 SHA-256 与字节数，校验失败即停下。
-# v1.1.8：工作台升到 v6.04——左下角「设置」新增「监控中转站」自填段
-# （中转站地址＋密钥，留空用内置值，带测试连接与清除确认）；监控页
-# 轮询/测试/刷新转发三条路走这份设置。左栏真 Muse 网页与分界拖拽条不变。
+# v1.1.9：工作台升到 v6.11——监控页视图按钮精简（v6.05）、监控页
+# 链接备忘录按钮（v6.06）、exe 预检改走临时文件（v6.07）、备忘录
+# 清空改版（v6.08）、最新排列改按作品发布日期（v6.09）、分片改小
+# 一半修大图换图失败（v6.10）、子文件卡存图同步到宿主卡（v6.11）。
+# 左栏真 Muse 网页与分界拖拽条不变。
 # 「同步到 GitHub」按钮仅 Muse 内部存在，不进 exe。
 # latest.yml 与安装包 blockmap 仍随安装包一起传到同一个 Release，
 # 否则已装的旧版查不到新版。
@@ -92,7 +94,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $f = Get-Item release/ScriptWorkbench-Setup-1.1.8.exe
+          $f = Get-Item release/ScriptWorkbench-Setup-1.1.9.exe
           Write-Output "installer size: $($f.Length) bytes"
           Write-Output "installer SHA-256: $((Get-FileHash $f -Algorithm SHA256).Hash)"
           # 真实安装包约 242MB；未完成的 NSIS 壳只有约 161KB。200MB 下限既能拦住未完成品，又不会误杀正常包。
@@ -101,14 +103,14 @@ jobs:
           # 否则已装的旧版查不到新版；文件名与版本号不对也算失败。
           if (-not (Test-Path release/latest.yml)) { throw 'latest.yml 缺失，自动更新元数据没生成' }
           $ym = Get-Content release/latest.yml -Raw
-          if ($ym -notmatch 'version: 1.1.8') { throw 'latest.yml 里的版本号不是 1.1.8' }
-          if ($ym -notmatch 'ScriptWorkbench-Setup-1.1.8.exe') { throw 'latest.yml 里的安装包文件名不对' }
+          if ($ym -notmatch 'version: 1.1.9') { throw 'latest.yml 里的版本号不是 1.1.9' }
+          if ($ym -notmatch 'ScriptWorkbench-Setup-1.1.9.exe') { throw 'latest.yml 里的安装包文件名不对' }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ScriptWorkbench-Setup-1.1.8
-          path: release/ScriptWorkbench-Setup-1.1.8.exe
+          name: ScriptWorkbench-Setup-1.1.9
+          path: release/ScriptWorkbench-Setup-1.1.9.exe
           if-no-files-found: error
 
       - name: Publish to Releases
@@ -116,8 +118,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create v1.1.8 release/ScriptWorkbench-Setup-1.1.8.exe --title 'ScriptWorkbench 1.1.8' --notes 'Windows 安装包（NSIS，per-user 一键安装，无需管理员权限）。本次：工作台升到 v6.04，左下角「设置」新增「监控中转站」自填段（地址＋密钥，留空用内置值，带测试连接与清除确认），监控页轮询/测试/刷新转发走这份设置；左栏真 Muse 网页与分界拖拽条不变。' --target main
-          if ($LASTEXITCODE -ne 0) { gh release upload v1.1.8 release/ScriptWorkbench-Setup-1.1.8.exe --clobber }
+          gh release create v1.1.9 release/ScriptWorkbench-Setup-1.1.9.exe --title 'ScriptWorkbench 1.1.9' --notes 'Windows 安装包（NSIS，per-user 一键安装，无需管理员权限）。本次：工作台升到 v6.11：监控页视图按钮精简与链接备忘录按钮、exe 预检改走临时文件、分片改小一半修大图换图失败、子文件卡存图同步到宿主卡；左栏真 Muse 网页与分界拖拽条不变。' --target main
+          if ($LASTEXITCODE -ne 0) { gh release upload v1.1.9 release/ScriptWorkbench-Setup-1.1.9.exe --clobber }
           # 自动更新元数据随安装包一起进同一 Release（差分更新用的 blockmap 有就一起传，没有也不强求）。
-          gh release upload v1.1.8 release/latest.yml --clobber
-          if (Test-Path release/ScriptWorkbench-Setup-1.1.8.exe.blockmap) { gh release upload v1.1.8 release/ScriptWorkbench-Setup-1.1.8.exe.blockmap --clobber }
+          gh release upload v1.1.9 release/latest.yml --clobber
+          if (Test-Path release/ScriptWorkbench-Setup-1.1.9.exe.blockmap) { gh release upload v1.1.9 release/ScriptWorkbench-Setup-1.1.9.exe.blockmap --clobber }
