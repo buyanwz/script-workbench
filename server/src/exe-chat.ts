@@ -325,13 +325,20 @@ export const EXE_CHAT_PAGE_HTML = `<!doctype html>
 <title>聊天</title>
 <style>
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; background: #fdf8ef; color: #2b2b2b; }
+html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: system-ui, sans-serif; background: #fdf8ef; color: #2b2b2b; }
 #strip { display: none; height: 100%; flex-direction: column; align-items: center; padding-top: 12px; gap: 8px; background: #1f2a44; }
 body.collapsed #strip { display: flex; }
 body.collapsed #full { display: none; }
 #strip button { writing-mode: vertical-rl; font-size: 15px; padding: 12px 6px; border: none; border-radius: 8px; background: #f7c948; color: #1f2a44; cursor: pointer; }
 #strip .hint { writing-mode: vertical-rl; color: #cfd6e4; font-size: 12px; }
-#full { display: flex; flex-direction: column; height: 100%; }
+#full { display: flex; flex-direction: column; height: 100%; padding-right: 8px; overflow-y: auto; }
+/* 滚动收进 #full 而不是文档：文档一旦出现滚动条，fixed 的 #resizer 会被顶到滚动条左侧、离视图真边缘差一条滚动条宽，分界就歪了；收进 #full 后滚动条归 #full 所有，分界贴紧真边缘，滚动行为不变。 */
+#resizer { display: none; position: fixed; top: 0; right: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 50; background: transparent; border-left: 1px solid #e5dcc4; touch-action: none; }
+body:not(.collapsed) #resizer { display: block; }
+#resizer:hover, #resizer.dragging { background: #f7c948; border-left-color: #f7c948; }
+#resizer::after { content: ""; position: absolute; top: 50%; left: 3px; width: 2px; height: 48px; margin-top: -24px; background: #c9bfa4; border-radius: 1px; }
+#resizer:hover::after, #resizer.dragging::after { background: #1f2a44; }
+@media (max-width: 100px) { #resizer { display: none !important; } }
 header { padding: 10px 12px; border-bottom: 1px solid #e5dcc4; display: flex; align-items: center; gap: 8px; }
 header h1 { font-size: 16px; margin: 0; flex: 1; }
 header .sub { font-size: 11px; color: #8a8378; }
@@ -371,6 +378,7 @@ footer { padding: 6px 12px; font-size: 11px; color: #8a8378; border-top: 1px sol
 <button id="expandBtn" type="button">展开聊天</button>
 <span class="hint">点一下滑出聊天框</span>
 </div>
+<div id="resizer" title="按住左右拖动，调宽聊天栏"></div>
 <div id="full">
 <header>
 <h1>聊天</h1>
@@ -453,6 +461,38 @@ footer { padding: 6px 12px; font-size: 11px; color: #8a8378; border-top: 1px sol
   }
   $('expandBtn').addEventListener('click', function () { setExpanded(true); });
   $('collapseBtn').addEventListener('click', function () { setExpanded(false); });
+  // ---- 拖拽调宽：按住右边缘分界左右拖，宽度经主进程钳制 280–640px 并记到本机 ----
+  var resizer = $('resizer');
+  var resizing = false;
+  function pushWidth(clientX) {
+    if (window.electronAPI && window.electronAPI.setChatWidth) {
+      try {
+        var p = window.electronAPI.setChatWidth(Math.round(clientX));
+        if (p && p.catch) { p.catch(function () {}); }
+      } catch (e) {}
+    }
+  }
+  resizer.addEventListener('pointerdown', function (e) {
+    if (e.button !== 0) { return; }
+    resizing = true;
+    resizer.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    try { resizer.setPointerCapture(e.pointerId); } catch (err) {}
+    e.preventDefault();
+  });
+  resizer.addEventListener('pointermove', function (e) {
+    if (!resizing) { return; }
+    pushWidth(e.clientX);
+  });
+  function endResize() {
+    if (!resizing) { return; }
+    resizing = false;
+    resizer.classList.remove('dragging');
+    document.body.style.userSelect = '';
+  }
+  resizer.addEventListener('pointerup', endResize);
+  resizer.addEventListener('pointercancel', endResize);
+  window.addEventListener('pointerup', endResize);
   try {
     var savedKey = localStorage.getItem('exeChat.apiKey');
     var savedBase = localStorage.getItem('exeChat.apiBase');

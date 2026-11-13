@@ -4,6 +4,7 @@
 // 更新结果的提示框由主进程弹（原生 dialog），渲染进程只管触发与显示状态。
 // 左聊天（第一期）：加聊天栏展开/收起两个接口，供左聊天视图调用；
 // 工作台视图也加载同一份 preload，多出的接口对工作台无任何影响。
+// 拖拽调宽：加聊天栏宽度设置/读取两个接口，供聊天页分界手柄调用。
 import { contextBridge, ipcRenderer } from "electron";
 
 export type UpdateCheckResult =
@@ -21,6 +22,10 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.invoke("chat-set-expanded", expanded),
   getChatExpanded: (): Promise<{ expanded: boolean }> =>
     ipcRenderer.invoke("chat-get-expanded"),
+  setChatWidth: (width: number): Promise<{ expanded: boolean; width: number }> =>
+    ipcRenderer.invoke("chat-set-width", width),
+  getChatWidth: (): Promise<{ expanded: boolean; width: number }> =>
+    ipcRenderer.invoke("chat-get-width"),
 });
 
 declare global {
@@ -31,6 +36,8 @@ declare global {
       getAppVersion: () => Promise<string>;
       toggleChat: (expanded: boolean) => Promise<{ expanded: boolean }>;
       getChatExpanded: () => Promise<{ expanded: boolean }>;
+      setChatWidth: (width: number) => Promise<{ expanded: boolean; width: number }>;
+      getChatWidth: () => Promise<{ expanded: boolean; width: number }>;
     };
   }
 }

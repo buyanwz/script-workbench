@@ -2,9 +2,10 @@
 //
 // 双视图（左聊天第一期）：主窗口内两个 WebContentsView——左视图加载
 // exe 专属聊天页（/exe-chat/），右视图原样加载工作台（/）。默认左视图
-// 收成 36px 窄边，点小边滑出到 380px，点收起回到窄边；工作台视图的
-// URL 与加载方式与原来完全一致，工作台代码零改动。切工作台页面时
-// 聊天视图独立存在，聊天不丢。
+// 收成 36px 窄边，点小边滑出到 380px，点收起回到窄边；展开后可按住
+// 聊天页右边缘的分界左右拖动调宽（280–640px），拖好的宽度记在本机，
+// 下次打开还在。工作台视图的 URL 与加载方式与原来完全一致，工作台
+// 代码零改动。切工作台页面时聊天视图独立存在，聊天不丢。
 //
 // 职责（port-plan.md D2）：
 //   1. 找一个本机空闲端口（默认 3000，被占则往后顺延）；
@@ -26,17 +27,35 @@
 
 import { spawn, execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain, Menu, WebContentsView } from "electron";
 import type { MenuItemConstructorOptions } from "electron";
 import { autoUpdater } from "electron-updater";
 import type { UpdateInfo } from "electron-updater";
 
-// 编译产物所在目录（electron/dist/）；import.meta.url 在 Node 与 Bun 下都可用。
-const DIST_DIR = dirname(fileURLToPath(import.meta.url));
+// 编译产物所在目录（electron/dist/）。
+// 注意：import.meta.url 与 __filename 都不能用——Bun 打包会把二者都烤成
+// 构建机上的源文件绝对路径（…/electron/main.ts），运行期在别的电脑上根本
+// 不存在，导致 preload 路径 ENOENT、渲染进程拿不到 electronAPI（沙箱实测
+// 已证实：两个视图都报 Unable to load preload script，window.electronAPI
+// 缺失）。改用 Electron 运行期 API + 存在性探测定位，三种启动方式都通：
+//  - 开发期 electron electron/dist/main.cjs：getAppPath() = electron/dist；
+//  - 开发期 electron .：getAppPath() = 工程根，dist 在 工程根/electron/dist；
+//  - 打包后：getAppPath() = resources/app.asar，dist 在 app.asar/electron/dist。
+// isPackaged 不可靠（直接跑 electron app.asar 时它是 false），故不以它分流，
+// 改为按 preload.cjs 是否存在选目录；两个候选都不存在时回落到打包形态路径，
+// 让 Electron 报错可见。
+const DIST_DIR = (() => {
+  const appPath = app.getAppPath();
+  const candidates = [appPath, join(appPath, "electron", "dist")];
+  for (const c of candidates) {
+    if (existsSync(join(c, "preload.cjs"))) return c;
+  }
+  return join(appPath, "electron", "dist");
+})();
 
 const DEFAULT_PORT = 3000;
 const HEALTH_TIMEOUT_MS = 30_000;
@@ -58,28 +77,51 @@ const SHUTDOWN_TIMEOUT_MS = 5_000;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const UPDATE_FIRST_CHECK_DELAY_MS = 20_000;
 
+// 左聊天栏宽度：收起时只留一条窄边（点一下滑出），展开时默认 380px。
+// 展开宽度可拖拽：聊天页右边缘有一条分界，鼠标按住左右拖动即调宽，
+// 范围钳制在 280–640px；拖好的宽度记在 userData 的 chat-layout.json
+// 里（只存展开宽度一个数），下次打开 exe 还在。
+const CHAT_COLLAPSED_WIDTH = 36;
+const CHAT_DEFAULT_WIDTH = 380;
+const CHAT_MIN_WIDTH = 280;
+const CHAT_MAX_WIDTH = 640;
+
 let serverChild: ChildProcess | null = null;
 let serverPort = DEFAULT_PORT;
 let mainWindow: BrowserWindow | null = null;
 let chatView: WebContentsView | null = null;
 let workView: WebContentsView | null = null;
 let chatExpanded = false;
+// 当前展开宽度：启动时从本机记忆文件读回（读不到就用默认 380px），
+// 拖拽时更新并立即写回文件；收起/展开切换不改它，窗口 resize 也不改它。
+let chatExpandedWidth = CHAT_DEFAULT_WIDTH;
 let shuttingDown = false;
 let serverCrashed = false;
-
-// 左聊天栏宽度：收起时只留一条窄边（点一下滑出），展开时 380px。
-const CHAT_COLLAPSED_WIDTH = 36;
-const CHAT_EXPANDED_WIDTH = 380;
 
 function log(...args: unknown[]): void {
   console.log(`[electron-main ${new Date().toISOString()}]`, ...args);
 }
 
 // 工程根（开发期）或安装包 resources 目录（打包后）：
-// 开发期 main.js 编译到 electron/dist/，往上一级即工程根；
+// 开发期 DIST_DIR 是 electron/dist，往上两级即工程根；若以 electron . 方式
+// 启动，getAppPath 本身就是工程根，直接用它；
 // 打包后 server.exe 与 client/dist 都放在 resources/ 下（见 electron-builder.yml）。
-const BASE_DIR = app.isPackaged ? process.resourcesPath : join(DIST_DIR, "..");
+const BASE_DIR = app.isPackaged
+  ? process.resourcesPath
+  : existsSync(join(DIST_DIR, "server.ts"))
+    ? DIST_DIR
+    : join(DIST_DIR, "..", "..");
 const CLIENT_DIST_DIR = join(BASE_DIR, "client", "dist");
+
+// preload 脚本路径：首选 DIST_DIR 下的 preload.cjs；若不存在（例如以
+// electron . 方式启动导致 getAppPath 指向工程根），改从工程根推导；
+// 都不存在时仍返回首选，让 Electron 报错可见。
+const PRELOAD_PATH = (() => {
+  const direct = join(DIST_DIR, "preload.cjs");
+  if (existsSync(direct)) return direct;
+  const viaBase = join(BASE_DIR, "electron", "dist", "preload.cjs");
+  return existsSync(viaBase) ? viaBase : direct;
+})();
 
 /** 找空闲端口：从 startPort 起逐个试 bind，第一个能 bind 的即空闲。 */
 function findFreePort(startPort: number): Promise<number> {
@@ -211,11 +253,46 @@ div{max-width:420px;text-align:center;padding:24px}button{font-size:16px;padding
   void mainWindow.loadURL(url);
 }
 
+/** 展开宽度记忆文件：userData 目录下的 chat-layout.json（只存一个数）。 */
+function chatLayoutFilePath(): string {
+  return join(app.getPath("userData"), "chat-layout.json");
+}
+
+function clampChatWidth(width: number): number {
+  if (!Number.isFinite(width)) return CHAT_DEFAULT_WIDTH;
+  return Math.min(CHAT_MAX_WIDTH, Math.max(CHAT_MIN_WIDTH, Math.round(width)));
+}
+
+/** 启动时读回上次拖好的宽度；文件不存在或内容不对就用默认 380px。 */
+function loadChatExpandedWidth(): number {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(chatLayoutFilePath(), "utf-8"),
+    ) as { expandedWidth?: unknown };
+    if (typeof parsed.expandedWidth === "number") {
+      return clampChatWidth(parsed.expandedWidth);
+    }
+  } catch {
+    // 首次打开或文件损坏：用默认值，不报错打扰。
+  }
+  return CHAT_DEFAULT_WIDTH;
+}
+
+function saveChatExpandedWidth(width: number): void {
+  try {
+    const file = chatLayoutFilePath();
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ expandedWidth: width }), "utf-8");
+  } catch (err) {
+    log("failed to save chat width:", err);
+  }
+}
+
 /** 按当前展开状态排两个视图：左聊天栏 + 右工作台，窗口 resize 时重排。 */
 function layoutViews(): void {
   if (!mainWindow || mainWindow.isDestroyed() || !chatView || !workView) return;
   const bounds = mainWindow.getContentBounds();
-  const chatWidth = chatExpanded ? CHAT_EXPANDED_WIDTH : CHAT_COLLAPSED_WIDTH;
+  const chatWidth = chatExpanded ? chatExpandedWidth : CHAT_COLLAPSED_WIDTH;
   chatView.setBounds({ x: 0, y: 0, width: chatWidth, height: bounds.height });
   workView.setBounds({
     x: chatWidth,
@@ -231,6 +308,22 @@ function setChatExpanded(expanded: boolean): { expanded: boolean } {
   return { expanded: chatExpanded };
 }
 
+/** 拖拽调宽：钳制到 280–640px，立即记到本机文件，下次打开还在。
+ *  收起时只记宽度、不改当前窄边（分界手柄收起时不显示，本来也拖不到）。
+ *  非数字入参直接忽略，返回当前状态，不改任何东西。 */
+function setChatWidth(width: unknown): { expanded: boolean; width: number } {
+  if (typeof width !== "number" || !Number.isFinite(width)) {
+    return { expanded: chatExpanded, width: chatExpandedWidth };
+  }
+  const clamped = clampChatWidth(width);
+  if (clamped !== chatExpandedWidth) {
+    chatExpandedWidth = clamped;
+    saveChatExpandedWidth(clamped);
+  }
+  layoutViews();
+  return { expanded: chatExpanded, width: chatExpandedWidth };
+}
+
 /** 建双视图壳窗口（两个视图共用同一份 preload，隔离配置与原来一致）。 */
 function createShellWindow(width: number, height: number): void {
   mainWindow = new BrowserWindow({
@@ -244,7 +337,7 @@ function createShellWindow(width: number, height: number): void {
     },
   });
   const viewPreferences = {
-    preload: join(DIST_DIR, "preload.cjs"),
+    preload: PRELOAD_PATH,
     contextIsolation: true,
     nodeIntegration: false,
     sandbox: true,
@@ -530,6 +623,7 @@ function setupApplicationMenu(): void {
 
 async function boot(): Promise<void> {
   await app.whenReady();
+  chatExpandedWidth = loadChatExpandedWidth();
   setupApplicationMenu();
   setupAutoUpdater();
   serverPort = await findFreePort(
@@ -562,6 +656,13 @@ ipcMain.handle("chat-set-expanded", (_event, expanded: unknown) =>
   setChatExpanded(expanded === true),
 );
 ipcMain.handle("chat-get-expanded", () => ({ expanded: chatExpanded }));
+
+// 左聊天栏拖拽调宽（分界手柄经 preload 调用；钳制与记忆都在主进程做）。
+ipcMain.handle("chat-set-width", (_event, width: unknown) => setChatWidth(width));
+ipcMain.handle("chat-get-width", () => ({
+  expanded: chatExpanded,
+  width: chatExpandedWidth,
+}));
 
 // 自动更新（v1.1.0）：设置页手动检查；结果回设置页显示，下载完由
 // update-downloaded 事件弹原生提示（见 setupAutoUpdater）。
