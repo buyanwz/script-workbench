@@ -12533,7 +12533,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v6.03";
+const WORKSPACE_VERSION = "v6.04";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12545,9 +12545,15 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
-    version: "v6.03",
+    version: "v6.04",
     date: "2026-11-12",
     current: true,
+    text: "这一版按你问题 #111301 里说的，给左下角「设置」里加了一段「监控中转站」。背景是这样：监控账号页要跟另一个浏览器里的扩展互通，靠一个中转站服务器转交数据——扩展把新视频上报到中转站、工作台去拉回来，你点「刷新链接」拿到的新链接也要经中转站转发出去。连这个中转站要用的地址和密钥，以前写死在工作台服务端里、你在界面上改不了；现在设置里多了两个填写框：中转站地址、中转站密钥（密码框、永远不明文）。两项都留空就跟以前一模一样，用服务端内置的地址和密钥；只填地址就用你填的地址＋内置密钥，只填密钥就用内置地址＋你填的密钥。框下面有「测试连接」按钮，点一下就按你填的地址和密钥实际测一遍（先试通不通、再带密钥拉一次），结果逐行显示在框里；密钥不对时只会说「密钥可能不对」，密钥本身绝不会出现在任何结果、记录或报错里。标题旁有一行「当前用：…」只告诉你现在用的是填的地址还是内置地址，不露密钥。这两项和生图接口设置一样，只存在这台设备的浏览器本机里，不进数据库、不进备份包、不进任何记录和日志；点「清除」前会先弹确认、并明说密钥清掉就找不回来。监控页的拉取、测试连接、刷新转发三条路都走这同一份设置；内置地址和密钥本身没动、仍作留空时的回落值；扩展自己选项页里的中转设置是另一回事、这次没动；其他功能、你的数据一个字没动，也没有提交任何生图。真机等你亲验：点左下角「设置」，在生图接口下面找到「监控中转站」，先什么都不填点「测试连接」看两步都通（这时用的是内置值）；再随便填一个错密钥点测试，看是不是只提示密钥可能不对、且不露密钥原文；最后点「清除」恢复留空。",
+    features: "设置新增「监控中转站」自填段（v6.04，问题 #111301，用户原话「监控账号使用中转站时如果也需要填写什么，请添加到设置当中……我们监控账号也需要用到中转站」；客户端 settingsfloat.tsx + 新模块 relaysettings.ts + monitorbench.tsx 三处接线 + 服务端 actions.ts 三动作与 privileged.ts 三契约/RELAY_PY 透传 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【核实】监控页中转确需两项且原先都写死在服务端 RELAY_PY（BASE=https://smzs-relay.weathered-breeze-337c.workers.dev、TOKEN 随 x-token 头发送，/intake 与 /report 带密钥、/ping 免密钥），界面无处可改。【设置段】SettingsDock 在 ImageApiSettingsForm 下加分隔线 + RelaySettingsForm：标题行「监控中转站」+ 右侧来源行（resolveRelayConfig sourceLabel，只显示地址来源「当前用：填的地址 / 内置地址」、绝不含密钥）；中转站地址文本框（placeholder「留空 = 用内置地址」）+ 中转站密钥密码框（placeholder「留空 = 用内置密钥」、永不明文），每框旁只留一行最短提示（地址「留空用内置地址，一般不用改。」/ 密钥「留空用内置密钥；换地址须同时填对应密钥。」），介绍整段收进末尾默认收起 help-fold「查看说明」；「测试连接」按钮按当前填值调 testRelayConnection 两步（ping + intake），结果逐行显示框内、失败转红，401/403 只说「密钥可能不对」；「清除」走 ConfirmDialog（明说密钥清掉找不回），确认后回落服务端内置值。【存储】新模块 relaysettings.ts 照 imageapi.ts 口径：只存本机 localStorage 键 monitor.relaySettings.v1（不在备份 localSettings 白名单、不进数据库/备份/记录/日志），RELAY_SETTINGS_EVENT + storage 同步，resolveRelayConfig 逐项解析（trim、地址去尾斜杠）、relayActionArgs 只回两字段供动作展开。【接线】监控页三条路当次现读同一份设置透传：轮询 pollOnce 的 fetchRelayIntake、页内 testRelayConnection、刷新写回后的 forwardRefreshToRelay 均展开 relayActionArgs(loadRelaySettings())；服务端三动作 request 各加 relayBase/relayToken（trim、max 500、default 空串）透传特权层；特权层三契约同加两字段，RELAY_PY 的 main() 起手解析 base/token 入参：非空覆盖内置 BASE/TOKEN、空回落内置（内置值本身一字未动），/ping 只用地址。【不动】监控页轮询逻辑、清除下限、去重、刷新链接流程、扩展侧配置、封面记录 id 43 与全部存量数据；不自动生图。基线升 v6.04（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、本条 DATA-PLAN）。真机待核：设置里看新段与来源行；留空点测试连接两步通；填错密钥只提示可能不对且不露原文；监控页轮询与刷新转发照旧；清除确认与回落正常。",
+  },
+  {
+    version: "v6.03",
+    date: "2026-11-12",
     text: "这一版按你售后单 #111232 里说的，把左下角「设置」按钮点开的那个悬浮窗瘦了身。以前它又高又占地方、里面写了一大堆介绍文字；现在窗子明显变小了：宽度收窄、高度封顶变矮，不再从上到下占半屏，内容真超了就在窗子里面自己滚动。原来那三大段介绍（开头讲总开关的那段、API 地址下面的「干什么用的」、密钥下面的「干什么用的」加「注意」）默认都不再显示了，整段收进窗子末尾一个默认收起的「查看说明」里，你想看时点开就在，不想看一点不占地方；每个填写框旁边只留了一行最短的提示。功能一个没少：API 地址输入框、密钥输入框、检测这份设置（只读预检）按钮、清除按钮、右上角那行「当前用：…」都还在原位，生效顺序（封面页单次输入＞这里的总设置＞已连接凭证）也没变；密钥还是只存这台设备的浏览器本机里、不进数据库、不进备份、不进任何记录和日志；点「清除」前照旧先弹确认、并明说密钥清掉就找不回来。其他页面、其他功能一个字没动，也没有提交任何生图、没动你的任何数据。真机等你亲验：点左下角「设置」，看窗子是不是明显变小、打开时只剩两个填写框和两个按钮；再点一下末尾的「查看说明」，看三段介绍是不是都在里面。",
     features: "设置悬浮窗瘦身（v6.03，售后单 #111232，用户原话「设置按钮这个悬浮窗占的位置太大了，介绍的内容太多了，我们现在的整个工作台都是一个问题，介绍太多了，一些介绍就没必要了，我不会去看的」；纯客户端 settingsfloat.tsx + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【变小】SettingsDock 悬浮框宽度 w-[min(380px,…)] → w-[min(320px,calc(100vw-24px))]；高度封顶 max-h-[calc(100dvh-120px)] → max-h-[min(440px,calc(100dvh-96px))]，内容超出仍框内 overflow-y-auto 滚动、不靠撑高窗口；内边距 p-4 → p-3、标题行下距 mb-3 → mb-2、表单各段上距 mt-3 → mt-2。【介绍收起】三段大白话介绍默认全部不显示：顶部总开关说明段、API 地址下「干什么用的」段、密钥下「干什么用的」段 + 「注意」段——原文整段搬进表单末尾默认收起的 <details className=\"help-fold\">（全站统一折叠说明样式）「查看说明」里，点开才看得到、一字未删；字段旁只留一行极短提示（地址：「留空用默认地址，一般不用改。」；密钥：「留空用已连接凭证；换地址须同时填对应 Key。」）。【功能不变】API 地址输入框 / 密钥密码框 / 「检测这份设置（只读预检）」按钮（probeGeeknowAuth 逻辑与回执文案逐字未动）/ 「清除」按钮与确认框（仍明说 Key 清掉找不回）/ 标题行右侧「当前用：…」来源行（resolveImageApiConfig 的 sourceLabel）/ 生效顺序（封面页单次输入＞总设置＞已连接凭证，imageapi.ts 逐项解析）/ 存储键 imagegen.apiSettings.v1 与 IMAGE_API_SETTINGS_EVENT 同步——全部逐字未动；Key 仍只存本机 localStorage、不进数据库 / 备份 / 记录 / 日志。【不动】其他页面与全部功能、服务端全部动作、封面记录 id 43 与全部存量数据；不自动生图。基线升 v6.03（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 封面/生图提交修复规则尾补 v6.03 段、DATA-PLAN 本条）。真机待核：点开左下角「设置」看窗体明显变小（不再占半屏）、默认只剩两框两钮与一行短提示；点「查看说明」展开核对三段原文都在；填一次地址/Key 后看「当前用：…」来源行与预检、清除确认照旧工作。",
   },
