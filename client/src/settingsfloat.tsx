@@ -13,6 +13,14 @@
 //     的编辑入口（生图面板顶部不再另放一份）。
 //   - 「检测这份设置（只读预检）」与「清除」（先确认、明说 Key 清
 //     掉找不回）随表单一起搬来，行为与 v5.70 一字不变。
+// v6.03 瘦身（售后单 #111232，用户原话「悬浮窗占的位置太大了，介绍
+// 的内容太多了」）：悬浮框收窄、高度封顶改小（内容超出框内滚动），
+// 三段大白话介绍（顶部总开关说明、地址「干什么用的」、密钥「干什么
+// 用的」+「注意」段）默认全部不显示——原文整段收进表单末尾默认收起
+// 的「查看说明」折叠区（help-fold），点开才看得到；每个字段旁只留
+// 一行极短提示。功能与口径一字不变：地址框 / 密钥框 / 只读预检 /
+// 带确认的清除 / 「当前用：…」来源行 / 生效顺序（单次输入＞总设置
+// ＞已连接凭证）/ Key 只存本机不进数据库·备份·记录·日志。
 // 悬浮框 z-[55]：低于生图面板（z-[60]）与各类确认弹窗（z-50 起的
 // ConfirmDialog 在本框之上弹出清除确认时仍可点），高于主内容区。
 // ---------------------------------------------------------------------------
@@ -128,11 +136,7 @@ function ImageApiSettingsForm() {
           {resolved.sourceLabel}
         </span>
       </div>
-      <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-        这是工作台生图时「去哪儿生成、用谁的账户」的总开关：生图面板和封面生成都用这一份，填一次就行，不用每个地方各填一遍。下面两个框都只存在这台设备的浏览器本机里（刷新还在、换电脑要重填），不进数据库、不进备份包、不进任何记录和日志。
-      </p>
-
-      <div className="mt-3">
+      <div className="mt-2">
         <label className={labelCls} htmlFor="settings-api-base">
           API 地址
         </label>
@@ -149,12 +153,11 @@ function ImageApiSettingsForm() {
           }
         />
         <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-          干什么用的：这是生图请求要发去的服务器地址，相当于「去哪家店生成图片」。填了就按你填的地址发；不填就用默认地址
-          https://api.geeknow.top（也就是现在一直在用的 Geeknow）。一般不用改，只有换了别的生图服务、对方给了你新地址时才填。
+          留空用默认地址，一般不用改。
         </p>
       </div>
 
-      <div className="mt-3">
+      <div className="mt-2">
         <label className={labelCls} htmlFor="settings-api-key">
           密钥（Key）
         </label>
@@ -171,17 +174,11 @@ function ImageApiSettingsForm() {
           }
         />
         <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-          干什么用的：相当于生图账户的「密码」，服务器靠它认人、把费用记在对应账户上。填了就用你填的这把 Key
-          扣你自己的账户；不填就用工作台已经连好的 Geeknow
-          凭证，和以前一样，不用管。密码框输入、永远不明文显示。
-        </p>
-        <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-          注意：上面地址换成别的域名时，必须同时填那个地址对应的
-          Key——工作台绝不会把已连接凭证发去别的地址，没填 Key 会在提交前拦下，不会误扣、也不会泄露。
+          留空用已连接凭证；换地址须同时填对应 Key。
         </p>
       </div>
 
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-2 flex flex-wrap items-center gap-2">
         <button
           type="button"
           className="btn btn-sm"
@@ -210,6 +207,30 @@ function ImageApiSettingsForm() {
           {apiProbeMsg}
         </p>
       )}
+
+      {/* v6.03：三段大白话介绍默认收起，点「查看说明」才展开看；
+          内容是 v5.88 原文整段搬入，一字未改。 */}
+      <details className="help-fold">
+        <summary>查看说明</summary>
+        <div className="help-fold-body">
+          <p>
+            这是工作台生图时「去哪儿生成、用谁的账户」的总开关：生图面板和封面生成都用这一份，填一次就行，不用每个地方各填一遍。下面两个框都只存在这台设备的浏览器本机里（刷新还在、换电脑要重填），不进数据库、不进备份包、不进任何记录和日志。
+          </p>
+          <p className="mt-2">
+            API 地址干什么用的：这是生图请求要发去的服务器地址，相当于「去哪家店生成图片」。填了就按你填的地址发；不填就用默认地址
+            https://api.geeknow.top（也就是现在一直在用的 Geeknow）。一般不用改，只有换了别的生图服务、对方给了你新地址时才填。
+          </p>
+          <p className="mt-2">
+            密钥干什么用的：相当于生图账户的「密码」，服务器靠它认人、把费用记在对应账户上。填了就用你填的这把 Key
+            扣你自己的账户；不填就用工作台已经连好的 Geeknow
+            凭证，和以前一样，不用管。密码框输入、永远不明文显示。
+          </p>
+          <p className="mt-2">
+            注意：上面地址换成别的域名时，必须同时填那个地址对应的
+            Key——工作台绝不会把已连接凭证发去别的地址，没填 Key 会在提交前拦下，不会误扣、也不会泄露。
+          </p>
+        </div>
+      </details>
 
       {/* 清除确认：Key 清掉就找不回来（本机没有别处存份），先确认
           一次防手滑；确认后地址与 Key 一并清掉、回落已连接凭证。 */}
@@ -248,7 +269,7 @@ export function SettingsDock() {
     <div className="fixed bottom-4 left-3 z-[55] sm:left-4">
       {open && (
         <div
-          className="card-shadow mb-2 max-h-[calc(100dvh-120px)] w-[min(380px,calc(100vw-24px))] overflow-y-auto rounded-[14px] border p-4"
+          className="card-shadow mb-2 max-h-[min(440px,calc(100dvh-96px))] w-[min(320px,calc(100vw-24px))] overflow-y-auto rounded-[14px] border p-3"
           style={{
             borderColor: "var(--border)",
             background: "var(--surface)",
@@ -256,7 +277,7 @@ export function SettingsDock() {
           role="dialog"
           aria-label="设置"
         >
-          <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="mb-2 flex items-center justify-between gap-2">
             <p className="font-display text-base font-bold">设置</p>
             <button
               type="button"

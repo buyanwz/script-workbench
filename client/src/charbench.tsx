@@ -116,8 +116,20 @@
 // ②图片区下方加「把别的人物加进来当服装」：下拉选任意一张
 // 其他带图的人物卡，点「加进来」走新动作
 // attachPresetAsSubImage——对方的主体图连同它的造型挂到本
-// 卡图片列表末尾当一张服装图，来源卡本身还在、仍是独立人
-// 物。两处都不自动生图、不碰剧本项目。
+// 卡图片列表末尾当一张服装图。v6.01 起（售后单 #111229）：
+// 挂上之后来源卡从主文件列表消失、只在本卡下面以子文件存
+// 在（数据不删）；带来源标记的那行点「拆成独立人物」走服
+// 务端恢复分支、把来源卡原样拆回主文件列表（确认框默认名
+// = 来源卡原名、可改）；删掉那行同样恢复来源卡（删图确认
+// 框与回执都写明）。两处都不自动生图、不碰剧本项目。
+// v6.02 详情悬浮窗版式（问题 #111230，用户亲口定 8:2）：悬浮窗
+// 顶部那段长介绍文字整段删除，窗内只留操作与状态提示；「把别
+// 的人物加进来当服装」从图片区下方挪出，与主内容区（6 项表单
+// ＋图片区）左右并排同一行——主内容区占 8 成宽（4fr）、添加人
+// 物卡面板占 2 成宽（1fr）贴右侧，面板内下拉与「加进来」按钮
+// 上下排整行宽；悬浮窗面板放宽到 max-w-6xl 让 8 成主区不比改
+// 前窄。手机单栏时面板堆到主内容下方。加进来功能与 v6.01 口
+// 径一字不变，其余字段、按钮、滚动口径全不动。
 
 import { useEffect, useMemo, useRef, useState, type DragEvent as ReactDragEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -994,6 +1006,9 @@ function LibraryCard({
     imageId: number;
     idx: number;
     isPrimary: boolean;
+    // v6.01：这张图是子文件复制行时记来源卡名——删掉它来源
+    // 卡会恢复成独立主文件，确认框与回执都要写明。
+    sourceName: string | null;
   } | null>(null);
   const deleteImageMut = useMutation({
     mutationFn: (imageId: number) =>
@@ -1004,18 +1019,25 @@ function LibraryCard({
       onError(null);
       const nb = parseBasicInfo(res.preset);
       const left = res.preset.images.length;
+      // v6.01：删掉的是子文件复制行时，服务端已把来源卡恢复
+      // 成独立主文件——回执尾巴上写明它已回到储存库列表。
+      const restoredTail = res.restoredSourceName
+        ? `「${res.restoredSourceName}」已恢复成独立人物，重新回到储存库列表里了（它的数据一直都在）。`
+        : "";
       if (t?.isPrimary) {
         // 主体换人（或图删光）：左侧「造型」同步成服务端回的
         // 最新已存值（新主体造型 / 图删光时保留的原造型）。
         setDLook(nb.appearance);
         setImgLookNotice(
-          left > 0
+          (left > 0
             ? `已删除「${p.name || "未命名人物"}」的主体图：下一张已接任主体，卡片造型已换成新主体图的造型（${nb.appearance || "沿用原造型"}），音色与语气基调没动。`
-            : `已删除「${p.name || "未命名人物"}」的最后一张图：卡还在，卡片造型文字保留没清空。`,
+            : `已删除「${p.name || "未命名人物"}」的最后一张图：卡还在，卡片造型文字保留没清空。`) +
+            restoredTail,
         );
       } else {
         setImgLookNotice(
-          `已删除「${p.name || "未命名人物"}」的第${(t?.idx ?? 0) + 1}张图，其余图片与主体图都没动。`,
+          `已删除「${p.name || "未命名人物"}」的第${(t?.idx ?? 0) + 1}张图，其余图片与主体图都没动。` +
+            restoredTail,
         );
       }
       invalidate();
@@ -1029,14 +1051,21 @@ function LibraryCard({
   // 哪套衣服）。确认后走 promotePresetImage：拆的是主体图时左
   // 侧「造型」同步成服务端回的原卡最新已存值（接任口径与删
   // 图一致）；回执统一写图片区下方的 imgLookNotice。
+  // v6.01：这张图若是子文件复制行（sourcePresetId 非空），
+  // promoteTarget.restoreName 记来源卡名、默认名改填来源卡原
+  // 名，确认框换恢复文案，服务端走恢复分支（不新建卡、把来
+  // 源卡原样放回主文件列表），回执按 res.restored 分支写。
   // attachSourceId = 「把别的人物加进来当服装」下拉选中的来
   // 源卡 id；确认按钮走 attachPresetAsSubImage（加对方主体图
-  // 连同造型进来、来源卡保留），成功后清空选择、回执同上。
+  // 连同造型进来，v6.01 起来源卡随即从主文件列表消失、只在
+  // 本卡下面当子文件），成功后清空选择；#111231 起不再写
+  // 子文件说明回执（见 attachMut）。
   const [promoteTarget, setPromoteTarget] = useState<{
     imageId: number;
     idx: number;
     isPrimary: boolean;
     defaultName: string;
+    restoreName: string | null;
   } | null>(null);
   const [promoteName, setPromoteName] = useState("");
   const promoteMut = useMutation({
@@ -1054,7 +1083,9 @@ function LibraryCard({
       const nb = parseBasicInfo(res.source);
       setDLook(nb.appearance);
       setImgLookNotice(
-        `已把这张服装拆成独立人物「${res.created.name}」：它现在是储存库里一张单独的人物卡，主体图就是这张图、造型就是这张图的造型；「${p.name || "未命名人物"}」这边还剩 ${res.source.images.length} 张图。`,
+        res.restored
+          ? `已把「${res.created.name}」拆回成独立人物：它已经重新回到储存库列表里，还是原来那张卡（它自己的图片、造型、音色、语气基调都原样保留）；「${p.name || "未命名人物"}」这边还剩 ${res.source.images.length} 张图。`
+          : `已把这张服装拆成独立人物「${res.created.name}」：它现在是储存库里一张单独的人物卡，主体图就是这张图、造型就是这张图的造型；「${p.name || "未命名人物"}」这边还剩 ${res.source.images.length} 张图。`,
       );
       invalidate();
     },
@@ -1067,13 +1098,12 @@ function LibraryCard({
         sourcePresetId,
         targetPresetId: p.id,
       }),
-    onSuccess: (_res, sourcePresetId) => {
+    onSuccess: () => {
       onError(null);
-      const src = allPresets.find((x) => x.id === sourcePresetId);
       setAttachSourceId("");
-      setImgLookNotice(
-        `已把「${src?.name || "未命名人物"}」的主体图加进「${p.name || "未命名人物"}」当服装（排在本卡图片最后）：这张服装的造型用的就是来源卡的造型；来源卡本身还在储存库里、仍是独立人物。`,
-      );
+      // #111231：挂靠成功不再在卡面 / 图片区写那段子文件说明
+      // 回执（用户亲口定没必要显示、取消）；挂靠动作本身、
+      // 来源卡消失与子文件行、拆成独立人物入口一字不动。
       invalidate();
     },
     onError: fail,
@@ -1611,7 +1641,7 @@ function LibraryCard({
           }}
         >
           <div
-            className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-[14px] border p-5"
+            className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-[14px] border p-5"
             style={{
               borderColor: "var(--border)",
               background: "var(--surface)",
@@ -1669,11 +1699,14 @@ function LibraryCard({
                 </button>
               </div>
             </div>
-            <p className="mt-1.5 shrink-0 text-sm leading-6 text-[var(--dim)]">
-              左边 6 项已有内容已预填，可直接改；空着的项留空。点「确认保存」才写回卡片，关掉悬浮窗什么都不改。点标题行「＋上传服装图」能从本地选图传进这张卡（可多选），新图会逐行出现在右边并自动分析造型进待确认。右边是这张卡的全部图片，一件衣服一行（图在左、造型在右），图片多时只在图片区里滚动、左边不动：每张图各存自己的造型（默认只显 3 行，长了点行下「展开」看全文），点「设为主体」后卡片造型跟着换成那张图的造型，音色与语气基调不动。每行还有「删除这张图」：点了先弹确认框，确认后才删、删了无法恢复；删掉主体图时下一张接任主体。每行还有「拆成独立人物」：把这件服装连图带造型从本卡拆出去、单独做成一张人物卡（先弹确认框、可改新卡名）。图片区下方还能「把别的人物加进来当服装」：选任意一张其他人物卡，对方的主体图就挂到本卡下面当一件服装，对方那张卡本身还在、仍是独立人物。
-            </p>
             <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto md:overflow-visible">
-              <div className="grid gap-4 md:min-h-0 md:flex-1 md:grid-cols-[minmax(0,1fr)_360px]">
+              {/* v6.02（问题 #111230）：主内容区与「添加人物卡」面板
+                  左右并排 8:2——本层 md 起改两列网格：左列（4fr）是
+                  主内容区（6 项表单＋图片区），右列（1fr）是「把别
+                  的人物加进来当服装」面板，贴在右侧。手机单栏时上
+                  下堆叠：主内容在上、面板在下。 */}
+              <div className="flex min-w-0 flex-col gap-4 md:grid md:min-h-0 md:flex-1 md:grid-cols-[minmax(0,4fr)_minmax(0,1fr)]">
+              <div className="grid min-w-0 gap-4 md:min-h-0 md:grid-cols-[minmax(0,1fr)_360px]">
               <div className="space-y-3 md:min-h-0 md:overflow-y-auto md:pr-1">
               <div>
                 <label
@@ -1911,6 +1944,11 @@ function LibraryCard({
                             )}
                           </div>
                           <div className="min-w-0 flex-1 space-y-1.5 p-2">
+                            {im.sourcePresetId != null && (
+                              <p className="text-[11px] leading-4 font-semibold text-[var(--accent)]">
+                                子文件：由「{im.sourcePresetName || "另一张人物卡"}」加进来当服装，它现在只在本卡下面存在
+                              </p>
+                            )}
                             <p className="text-[11px] font-medium text-[var(--dim)]">
                               这张图的造型
                             </p>
@@ -2017,6 +2055,11 @@ function LibraryCard({
                                   imageId: im.id,
                                   idx,
                                   isPrimary,
+                                  sourceName:
+                                    im.sourcePresetId != null
+                                      ? im.sourcePresetName ||
+                                        "来源人物卡"
+                                      : null,
                                 })
                               }
                             >
@@ -2028,18 +2071,30 @@ function LibraryCard({
                               type="button"
                               className="btn btn-sm w-full"
                               style={{ whiteSpace: "normal" }}
-                              aria-label={`把${p.name}的第${idx + 1}张图拆成独立人物（先弹确认框、可改新卡名；这张图连同它自己的造型从本卡移出、成为一张新的人物卡）`}
+                              aria-label={
+                                im.sourcePresetId != null
+                                  ? `把${im.sourcePresetName || "来源人物卡"}从${p.name}下面拆回成独立人物（先弹确认框；它会重新回到储存库列表）`
+                                  : `把${p.name}的第${idx + 1}张图拆成独立人物（先弹确认框、可改新卡名；这张图连同它自己的造型从本卡移出、成为一张新的人物卡）`
+                              }
                               disabled={promoteMut.isPending}
                               onClick={() => {
                                 const seg = [p.gender, p.ageGroup]
                                   .filter(Boolean)
                                   .join("");
-                                const dn = `${p.name || "未命名人物"}${seg ? `（${seg}）` : ""}·服装${idx + 1}`;
+                                const dn =
+                                  im.sourcePresetId != null
+                                    ? im.sourcePresetName || "未命名人物"
+                                    : `${p.name || "未命名人物"}${seg ? `（${seg}）` : ""}·服装${idx + 1}`;
                                 setPromoteTarget({
                                   imageId: im.id,
                                   idx,
                                   isPrimary,
                                   defaultName: dn,
+                                  restoreName:
+                                    im.sourcePresetId != null
+                                      ? im.sourcePresetName ||
+                                        "来源人物卡"
+                                      : null,
                                 });
                                 setPromoteName(dn);
                               }}
@@ -2054,68 +2109,6 @@ function LibraryCard({
                     })}
                   </div>
                 )}
-                {/* v5.98：把任意一张其他人物卡加进来当本卡的服装
-                    （主文件挂到主文件下面当子文件）：下拉选来源
-                    卡 →「加进来」走 attachPresetAsSubImage，对方
-                    主体图连同它的造型挂到本卡图片列表末尾；来源
-                    卡本身保留、仍是独立人物。本卡没图时也显示
-                    （可拿别人的图当第一张服装）。 */}
-                <div
-                  className="mt-2 shrink-0 rounded-[10px] border p-2.5"
-                  style={{
-                    borderColor: "var(--border)",
-                    background: "var(--surface)",
-                  }}
-                >
-                  <label
-                    className="mb-1 block text-xs font-medium text-[var(--dim)]"
-                    htmlFor={`attach-src-${p.id}`}
-                  >
-                    把别的人物加进来当服装
-                  </label>
-                  {attachCandidates.length === 0 ? (
-                    <p className="text-xs leading-5 text-[var(--dim)]">
-                      储存库里还没有其他带图的人物卡可以加进来。
-                    </p>
-                  ) : (
-                    <div className="flex gap-2">
-                      <select
-                        id={`attach-src-${p.id}`}
-                        className="field field-sm min-w-0 flex-1"
-                        aria-label={`选择要加进${p.name}当服装的人物卡（加的是对方的主体图）`}
-                        value={attachSourceId}
-                        onChange={(e) =>
-                          setAttachSourceId(
-                            e.target.value ? Number(e.target.value) : "",
-                          )
-                        }
-                      >
-                        <option value="">选一张人物卡…</option>
-                        {attachCandidates.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.name || "未命名人物"}（{c.images.length} 张图）
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        className="btn btn-sm shrink-0"
-                        aria-label={`把所选人物卡的主体图加进${p.name}当服装（来源卡本身保留）`}
-                        disabled={attachSourceId === "" || attachMut.isPending}
-                        onClick={() => {
-                          if (attachSourceId !== "") {
-                            attachMut.mutate(attachSourceId);
-                          }
-                        }}
-                      >
-                        {attachMut.isPending ? "添加中…" : "加进来"}
-                      </button>
-                    </div>
-                  )}
-                  <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-                    加进来的是对方的主体图连同它的造型，排在本卡图片最后；对方那张卡本身还在、仍是独立人物。
-                  </p>
-                </div>
                 {imgLookNotice && (
                   <p
                     className="mt-2 text-xs leading-5 text-[var(--dim)]"
@@ -2123,6 +2116,71 @@ function LibraryCard({
                   >
                     {imgLookNotice}
                   </p>
+                )}
+              </div>
+              </div>
+              {/* v6.02（问题 #111230）：「把别的人物加进来当服装」
+                  面板——v5.98 起在图片区下方，v6.02 起挪出主内容
+                  区、成为 8:2 右列（1fr）独立面板，与主内容区同一
+                  行并排。功能不变：下拉选来源卡 →「加进来」走
+                  attachPresetAsSubImage，对方主体图连同它的造型
+                  挂到本卡图片列表末尾；v6.01 口径不变（挂上之后
+                  来源卡从主文件列表消失、只在本卡下面以子文件存
+                  在，数据不删；子文件图上点「拆成独立人物」拆
+                  回）。窄面板内下拉与「加进来」按钮上下排、各占
+                  整行宽，保证放得下、点得到。本卡没图时也显示
+                  （可拿别人的图当第一张服装）。 */}
+              <div
+                className="shrink-0 rounded-[10px] border p-2.5 md:min-w-0"
+                style={{
+                  borderColor: "var(--border)",
+                  background: "var(--surface-alt)",
+                }}
+              >
+                <label
+                  className="mb-1 block text-xs font-medium text-[var(--dim)]"
+                  htmlFor={`attach-src-${p.id}`}
+                >
+                  把别的人物加进来当服装
+                </label>
+                {attachCandidates.length === 0 ? (
+                  <p className="text-xs leading-5 text-[var(--dim)]">
+                    储存库里还没有其他带图的人物卡可以加进来。
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    <select
+                      id={`attach-src-${p.id}`}
+                      className="field field-sm min-w-0 w-full"
+                      aria-label={`选择要加进${p.name}当服装的人物卡（加的是对方的主体图）`}
+                      value={attachSourceId}
+                      onChange={(e) =>
+                        setAttachSourceId(
+                          e.target.value ? Number(e.target.value) : "",
+                        )
+                      }
+                    >
+                      <option value="">选一张人物卡…</option>
+                      {attachCandidates.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name || "未命名人物"}（{c.images.length} 张图）
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="btn btn-sm w-full"
+                      aria-label={`把所选人物卡加进${p.name}下面当子文件（服装；对方会从储存库列表消失、只在本卡下面存在）`}
+                      disabled={attachSourceId === "" || attachMut.isPending}
+                      onClick={() => {
+                        if (attachSourceId !== "") {
+                          attachMut.mutate(attachSourceId);
+                        }
+                      }}
+                    >
+                      {attachMut.isPending ? "添加中…" : "加进来"}
+                    </button>
+                  </div>
                 )}
               </div>
               </div>
@@ -2308,11 +2366,14 @@ function LibraryCard({
       <ConfirmDialog
         title={`删除「${p.name || "未命名人物"}」的第${deleteImageTarget.idx + 1}张图？`}
         body={
-          deleteImageTarget.isPrimary
+          (deleteImageTarget.isPrimary
             ? p.images.length > 1
               ? "这张是主体图：删掉后下一张图会接任主体，卡片造型会跟着换成新主体图的造型，音色与语气基调不动。这张图自己的造型与待确认数据会一起删掉。删除后无法恢复。"
               : "这张是这张卡唯一的一张图（也是主体图）：删掉后卡还在，卡片造型文字会保留、不清空。这张图自己的造型与待确认数据会一起删掉。删除后无法恢复。"
-            : "这张图自己的造型与待确认数据会一起删掉，其余图片与主体图都不动。删除后无法恢复。"
+            : "这张图自己的造型与待确认数据会一起删掉，其余图片与主体图都不动。删除后无法恢复。") +
+          (deleteImageTarget.sourceName
+            ? `这张图是把「${deleteImageTarget.sourceName}」加进来当服装时挂进来的子文件：删掉它之后，「${deleteImageTarget.sourceName}」会重新回到储存库列表、恢复成独立人物（它自己的图片和数据一直都在，不会跟着删）。`
+            : "")
         }
         confirmLabel="确认删除这张图"
         cancelLabel="取消"
@@ -2323,10 +2384,16 @@ function LibraryCard({
     )}
     {/* v5.98 拆出确认框（同删图确认框一样渲染在 article 之外）：
         说明拆出后两边各变成什么样，框里可改新卡名（默认名已带
-        原卡的性别 / 年龄分类，拆完认得出是谁的哪套衣服）。 */}
+        原卡的性别 / 年龄分类，拆完认得出是谁的哪套衣服）。
+        v6.01：目标行是子文件复制行时换恢复文案（标题点名来
+        源卡、默认名 = 来源卡原名），确认走服务端恢复分支。 */}
     {promoteTarget && (
       <ConfirmDialog
-        title={`把「${p.name || "未命名人物"}」的第${promoteTarget.idx + 1}张图拆成独立人物？`}
+        title={
+          promoteTarget.restoreName
+            ? `把「${promoteTarget.restoreName}」拆回成独立人物？`
+            : `把「${p.name || "未命名人物"}」的第${promoteTarget.idx + 1}张图拆成独立人物？`
+        }
         body={
           <div>
             <p>
@@ -2336,13 +2403,17 @@ function LibraryCard({
                     `${p.images.length - 1} 张图。`
                   : "这张是本卡唯一的一张图：拆出后本卡就没有图了，卡还在、卡片造型文字保留不清空。"
                 : `这张图会从本卡移出，本卡其余 ${p.images.length - 1} 张图与主体图都不动。`}
-              拆出的图连同它自己的造型成为一张新的人物卡，新卡继承本卡的性别 / 年龄分类与音色、语气基调。
+              {promoteTarget.restoreName
+                ? `这张图是把「${promoteTarget.restoreName}」加进来当服装时挂进来的子文件：拆出后不新建卡，「${promoteTarget.restoreName}」会重新回到储存库列表、恢复成独立人物，还是原来那张卡——它自己的图片、造型、音色、语气基调都原样保留。`
+                : "拆出的图连同它自己的造型成为一张新的人物卡，新卡继承本卡的性别 / 年龄分类与音色、语气基调。"}
             </p>
             <label
               className="mt-3 mb-1 block text-xs font-medium text-[var(--dim)]"
               htmlFor={`promote-name-${p.id}`}
             >
-              新人物卡的名字
+              {promoteTarget.restoreName
+                ? "拆回后的人物卡名字"
+                : "新人物卡的名字"}
             </label>
             <input
               id={`promote-name-${p.id}`}
@@ -2353,7 +2424,9 @@ function LibraryCard({
               onChange={(e) => setPromoteName(e.target.value)}
             />
             <p className="mt-1.5 text-xs leading-5 text-[var(--dim)]">
-              名字之后也能在新卡的「展开详情」里改。
+              {promoteTarget.restoreName
+                ? "默认就是它原来的名字，改了就按新名字拆回；之后也能在它的「展开详情」里改。"
+                : "名字之后也能在新卡的「展开详情」里改。"}
             </p>
           </div>
         }
