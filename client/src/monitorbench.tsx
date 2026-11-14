@@ -67,6 +67,9 @@
 // 动触发在服务端 getMonitorCleanupStatus（打开本页距上次清理
 // ≥24 小时即跑一轮），跑完有删除 / 未判定时经 intakeToast 提示
 // 并刷新列表。规则全文见服务端 actions.ts 的 v5.55 注释。
+// v6.16 起记录区显示已按用户要求下线（只删显示，清理触发、
+// 规则与服务端删除日志存档照旧）；同版一并下线页面顶部的云
+// 端存储用量条、后台存入状态条与待解剖队列条，均为只删显示。
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -971,723 +974,6 @@ export function VideoPlayFailedNotice({
   );
 }
 
-// ---------------------------------------------------------------------------
-// v4.64 云端存储进度条：监控页顶部一条，调 getCloudStorage（对应
-// brief 的 GET /api/cloud-storage），显示「已用 XGB / 8GB（N%）」+
-// 视频条数，每 60 秒自动刷新一次。深色样式：超 80% 变黄、超 95%
-// 变红；XGB 保留 1 位小数。数据没回来 / 云端不可用时整条不渲染，
-// 不占版面也不报错（60 秒后还会再拉）。
-// v4.68 文案口径：条数改「云端共 N 条视频」——N 严格等于接口回的
-// video_count（云端文件总数 = state.json downloaded 条数），与
-// 「云端已存」tab 括号里的 M（有卡片的云端视频数、交集）区分开。
-// ---------------------------------------------------------------------------
-function CloudStorageBar() {
-  const storageQuery = useQuery({
-    queryKey: ["cloud-storage"],
-    queryFn: () => withReadTimeout(() => api.getCloudStorage({})),
-    retry: retryReadQuery,
-    refetchInterval: 60_000,
-  });
-  const data = storageQuery.data;
-  if (!data) return null;
-  const quota = data.quota_bytes;
-  const used = data.used_bytes;
-  const pct = quota > 0 ? (used / quota) * 100 : 0;
-  const usedGb = (used / 1073741824).toFixed(1);
-  const quotaGb = String(Math.round(quota / 1073741824));
-  const pctText = pct >= 10 ? String(Math.round(pct)) : pct.toFixed(1);
-  const barColor = pct > 95 ? "#f87171" : pct > 80 ? "#facc15" : "#34d399";
-  return (
-    <div
-      className="mt-2 rounded-lg border border-[var(--border)] bg-[#0b1220] px-3 py-2 text-slate-200"
-      role="status"
-      aria-label="云端视频存储用量"
-    >
-      <div className="flex flex-wrap items-center gap-x-2 text-[13px] leading-5">
-        <span className="font-semibold">云端存储</span>
-        <span>
-          已用 {usedGb}GB / {quotaGb}GB（{pctText}%）
-        </span>
-        <span className="text-slate-400">· 云端共 {data.video_count} 条视频</span>
-      </div>
-      <div
-        className="mt-1.5 h-2 overflow-hidden rounded-full bg-white/10"
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={Math.round(pct)}
-        aria-label="云端存储已用比例"
-      >
-        <div
-          className="h-full rounded-full transition-all"
-          style={{ width: `${Math.min(100, pct)}%`, background: barColor }}
-        />
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// v4.67 云端后台队列状态：渲染在存储进度条正下方的一条常驻小状态。
-// 数据来自服务端 getCloudQueueStatus（queue.json 最新批次），每
-// 4 秒轮询一次——后台下载进程在服务端独立跑，这条状态刷新页面
-// 也不会丢（队列持久化在文件里）。运行中显示「后台存入中 x/y」
-//（x = 已完成条数 success+failed、y = 本批总数），点它展开看每
-// 条的状态（排队中 / 存入中 / 成功 / 失败 + 失败原因）。全部跑
-// 完后小状态变成完成汇总，并经 onToast 弹一次「后台存入完成：
-// 成功 N 条，失败 M 条」（localStorage 记已弹过的 batch_id，刷
-// 新不重复弹；完成时页面没开着，下次打开补弹一次）。有新存成
-// 功时顺带刷云端清单与存储进度条，让卡片「已存」标识跟上。
-// v4.69 失败清单可见：整批跑完除 toast 汇总外，自动弹一次结果
-// 清单悬浮窗 CloudQueueResultModal；完成态的状态条点开也是这个
-// 窗（运行中仍是原地展开每条状态）。窗里成功列表绿色勾可折
-// 叠，失败列表红色叉 + 标题 + 失败原因，每条失败带「重试」、
-// 底部有「重试全部失败」——都走 retryCloudQueueFailed 只重置
-// 失败条目，已成功的绝不重下。
-// v5.69 弹窗触发口径收紧（用户 2026-11-10 01:08 亲口定）：旧版
-// 靠 localStorage 记「已弹过的 batch_id+finished_at」、页面打开
-// 时读到已完成批次没记过就补弹——实际环境里这份 localStorage
-// 记录跨打开留不住，结果每次打开监控页都弹。改成纯本页会话内
-// 触发：只有本页亲眼看着这批从「运行中」走到「完成」（用户刚
-// 点了存云端 / 重试、本轮刚跑完）才自动弹一次；页面打开时批次
-// 就已经完成的，永不自动弹，只能点状态条「看清单」手动打开。
-// 触发状态只活在本组件的 ref 里，关窗即了，刷新 / 切走再切回
-// 都不会再触发。
-// ---------------------------------------------------------------------------
-const CLOUD_QUEUE_TOASTED_KEY = "cloud-queue-toasted-batch-v1";
-
-type CloudQueueItemView = {
-  id: string;
-  videoId: string;
-  title: string;
-  creatorName: string;
-  status: string;
-  error: string | null;
-  attempts: number;
-  size_bytes: number;
-};
-
-// v4.69 存云端结果清单悬浮窗（深色，与队列状态条同一套 #0b1220
-// 深色面）：上半失败区（红叉 + 标题 + 达人 + 失败原因 + 单条重
-// 试），下半成功区（绿勾 + 标题，整区可折叠，有失败时默认收
-// 起），底部「重试全部失败」（无失败时不渲染）+「关闭」。重试
-// 触发后由父组件关窗并把状态条切回「后台存入中」。
-function CloudQueueResultModal({
-  items,
-  success,
-  failed,
-  retryingIds,
-  retryingAll,
-  onRetryItem,
-  onRetryAll,
-  onClose,
-}: {
-  items: CloudQueueItemView[];
-  success: number;
-  failed: number;
-  retryingIds: Set<string>;
-  retryingAll: boolean;
-  onRetryItem: (id: string) => void;
-  onRetryAll: () => void;
-  onClose: () => void;
-}) {
-  const [successOpen, setSuccessOpen] = useState(failed === 0);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  const failedItems = items.filter((it) => it.status === "failed");
-  const successItems = items.filter((it) => it.status === "success");
-  const anyRetrying = retryingAll || retryingIds.size > 0;
-  return (
-    <div
-      className="fixed inset-0 z-[90] flex items-center justify-center bg-black/70 p-3 sm:p-6"
-      role="dialog"
-      aria-modal="true"
-      aria-label="存云端结果清单：成功与失败列表，失败可重试"
-      onClick={onClose}
-    >
-      <div
-        className="flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-white/15 bg-[#0b1220] text-slate-200 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start gap-2.5 p-3 pb-2">
-          <div className="min-w-0 flex-1">
-            <p className="text-[15px] font-bold">存云端结果</p>
-            <p className="mt-0.5 text-xs text-slate-400">
-              成功 {success} 条，失败 {failed} 条
-              {failed > 0 && "——失败的在下面写清了原因，可以直接重试"}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="shrink-0 rounded border border-white/20 px-2 py-1 text-xs font-bold text-slate-200"
-            onClick={onClose}
-            aria-label="关闭存云端结果清单"
-          >
-            关闭 ✕
-          </button>
-        </div>
-        <div
-          className="border-t border-white/10 px-3 py-2"
-          style={{ overflowY: "auto" }}
-          aria-label="存云端成功与失败清单（可滚动）"
-        >
-          {failedItems.length > 0 && (
-            <div className="mb-3">
-              <p className="mb-1.5 text-[13px] font-bold" style={{ color: "#fca5a5" }}>
-                失败（{failedItems.length}）
-              </p>
-              <div className="space-y-1.5">
-                {failedItems.map((it) => {
-                  const retrying = retryingAll || retryingIds.has(it.id);
-                  return (
-                    <div
-                      key={it.id}
-                      className="flex items-start gap-2 rounded bg-white/5 px-2 py-1.5"
-                    >
-                      <span
-                        className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white"
-                        style={{ background: "#b91c1c" }}
-                        aria-hidden="true"
-                      >
-                        ✕
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] font-semibold leading-5">
-                          {it.title || it.videoId || "未命名视频"}
-                        </span>
-                        <span className="block text-xs leading-4 text-slate-400">
-                          {it.creatorName || "达人未填"}
-                          {it.attempts > 1 && <> · 已试过 {it.attempts} 次</>}
-                        </span>
-                        {it.error && (
-                          <span
-                            className="mt-0.5 block text-xs leading-4"
-                            style={{ color: "#fca5a5" }}
-                          >
-                            {it.error}
-                          </span>
-                        )}
-                      </span>
-                      <button
-                        type="button"
-                        className="shrink-0 rounded bg-[#1d4ed8] px-2 py-1 text-[11px] font-bold leading-4 text-white disabled:opacity-50"
-                        disabled={anyRetrying}
-                        onClick={() => onRetryItem(it.id)}
-                        aria-label={`重试存入云端：${it.title || it.videoId || "未命名视频"}`}
-                      >
-                        {retrying ? "重试中…" : "重试"}
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-          {successItems.length > 0 && (
-            <div>
-              <button
-                type="button"
-                className="mb-1.5 flex items-center gap-1 text-[13px] font-bold text-emerald-300"
-                aria-expanded={successOpen}
-                aria-label={`成功列表（${successItems.length} 条），点击${successOpen ? "折叠" : "展开"}`}
-                onClick={() => setSuccessOpen((v) => !v)}
-              >
-                成功（{successItems.length}）{successOpen ? "▾" : "▸"}
-              </button>
-              {successOpen && (
-                <div className="space-y-1.5">
-                  {successItems.map((it) => (
-                    <div
-                      key={it.id}
-                      className="flex items-start gap-2 rounded bg-white/5 px-2 py-1.5"
-                    >
-                      <span
-                        className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white"
-                        style={{ background: "rgba(5,150,105,0.92)" }}
-                        aria-hidden="true"
-                      >
-                        ✓
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[13px] font-semibold leading-5">
-                          {it.title || it.videoId || "未命名视频"}
-                        </span>
-                        <span className="block text-xs leading-4 text-slate-400">
-                          {it.creatorName || "达人未填"}
-                        </span>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          {failedItems.length === 0 && successItems.length === 0 && (
-            <p className="py-4 text-sm text-slate-400">这批没有可显示的条目。</p>
-          )}
-        </div>
-        <div className="flex flex-wrap items-center gap-2 border-t border-white/10 p-3">
-          <span className="ml-auto flex gap-2">
-            {failedItems.length > 0 && (
-              <button
-                type="button"
-                className="rounded bg-[#1d4ed8] px-3 py-1.5 text-[13px] font-bold text-white disabled:opacity-50"
-                disabled={anyRetrying}
-                onClick={onRetryAll}
-                aria-label={`重试全部失败的存云端条目（共 ${failedItems.length} 条）`}
-              >
-                {retryingAll ? "重试中…" : `重试全部失败（${failedItems.length}）`}
-              </button>
-            )}
-            <button
-              type="button"
-              className="rounded border border-white/20 px-3 py-1.5 text-[13px] font-bold text-slate-200"
-              onClick={onClose}
-              aria-label="关闭存云端结果清单"
-            >
-              关闭
-            </button>
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function CloudQueueStatus({
-  onToast,
-}: {
-  onToast: (msg: string) => void;
-}) {
-  const queryClient = useQueryClient();
-  const [expanded, setExpanded] = useState(false);
-  // v4.69 结果清单窗：整批完成时自动弹一次，平时由完成态状态条
-  // 点开；retryingIds / retryingAll 记正在提交重试的条目（防重复
-  // 点），重试提交成功即关窗（队列回到运行中，状态条接管显示）。
-  const [resultOpen, setResultOpen] = useState(false);
-  const [retryingIds, setRetryingIds] = useState<Set<string>>(() => new Set());
-  const [retryingAll, setRetryingAll] = useState(false);
-  const queueQuery = useQuery({
-    queryKey: ["cloud-queue"],
-    queryFn: () => api.getCloudQueueStatus({}),
-    refetchInterval: 4000,
-  });
-  const data = queueQuery.data;
-  const success = data?.success ?? 0;
-  const failed = data?.failed ?? 0;
-  const batchId = data?.batch_id ?? null;
-  const finishedAt = data?.finished_at ?? null;
-  const total = data?.total ?? 0;
-  const lastSuccessRef = useRef(0);
-  useEffect(() => {
-    if (success === lastSuccessRef.current) return;
-    lastSuccessRef.current = success;
-    if (success > 0) {
-      queryClient.invalidateQueries({ queryKey: ["cloud-saved"] });
-      queryClient.invalidateQueries({ queryKey: ["cloud-storage"] });
-    }
-  }, [success, queryClient]);
-  const toastedBatchRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!data || data.running || !batchId || !finishedAt || total === 0) return;
-    if (toastedBatchRef.current === batchId) return;
-    let toasted = "";
-    try {
-      toasted = window.localStorage.getItem(CLOUD_QUEUE_TOASTED_KEY) ?? "";
-    } catch {
-      // localStorage 不可用时靠上面的 ref 兜底，本页内只弹一次。
-    }
-    if (toasted === batchId) {
-      toastedBatchRef.current = batchId;
-      return;
-    }
-    toastedBatchRef.current = batchId;
-    try {
-      window.localStorage.setItem(CLOUD_QUEUE_TOASTED_KEY, batchId);
-    } catch {
-      // 写不进不拦弹 toast。
-    }
-    onToast(`后台存入完成：成功 ${success} 条，失败 ${failed} 条`);
-    // onToast 是父组件的 setState，稳定引用。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, batchId, finishedAt, total, success, failed]);
-  // v5.69：结果清单窗只在本页会话内、本轮刚跑完时自动弹一次。
-  // 触发条件（缺一不可）：①本页曾亲眼看到这批处于运行中（用户
-  // 刚点了「存云端」入队、或刚点了重试，队列在本页眼皮底下跑
-  // 起来过），或这批是在本页打开之后才出现的新批次（入队太快、
-  // 轮询没赶上运行中那一拍时兜底）；②现在整批已完成。页面打开
-  // 时就已经完成的旧批次（挂载时见到的第一批、且从没在本页跑
-  // 过）永不自动弹——关窗、刷新、切走再切回都不会再弹，旧结果
-  // 只留顶部状态条点「看清单」手动查看。已弹过的
-  // batch_id+finished_at 记在本页 ref 里，本轮只弹一次；重试后
-  // 再完成（finished_at 变了）会再弹新一轮的清单。
-  const autoPopRef = useRef<{
-    baselineBatch: string | null | undefined;
-    armedBatch: string | null;
-    poppedKey: string | null;
-  }>({ baselineBatch: undefined, armedBatch: null, poppedKey: null });
-  useEffect(() => {
-    if (!data) return;
-    const st = autoPopRef.current;
-    if (st.baselineBatch === undefined) {
-      // 挂载后见到的第一批 = 打开页面前就存在的批次，只作基线，
-      // 它本身永不触发自动弹（除非它在本页里又跑起来，见下）。
-      st.baselineBatch = batchId;
-    }
-    if (data.running) {
-      // 本页亲眼看到这批在跑 → 武装：它跑完时弹一次。
-      if (batchId) st.armedBatch = batchId;
-      return;
-    }
-    if (!batchId || !finishedAt || total === 0) return;
-    if (batchId !== st.baselineBatch) {
-      // 本页打开之后才出现的新批次（用户刚入的队）→ 武装。
-      st.armedBatch = batchId;
-    }
-    if (st.armedBatch !== batchId) return;
-    const key = `${batchId}|${finishedAt}`;
-    if (st.poppedKey === key) return;
-    st.poppedKey = key;
-    st.armedBatch = null;
-    setResultOpen(true);
-  }, [data, batchId, finishedAt, total]);
-  // v4.69 重试：只把指定失败条目（单条传 [id]、「重试全部失败」
-  // 传全部 failed 的 id）经 retryCloudQueueFailed 重置回队列，
-  // 已成功的服务端一字不动。提交成功关窗 + toast，状态条随轮询
-  // 回到「后台存入中 x/y」；重试跑完会再走一遍完成 toast + 清单。
-  const doRetry = async (ids: string[], isAll: boolean) => {
-    if (ids.length === 0) return;
-    if (isAll) setRetryingAll(true);
-    else setRetryingIds(new Set(ids));
-    try {
-      const res = await api.retryCloudQueueFailed({ itemIds: ids });
-      if (res.ok && res.retried > 0) {
-        onToast(`失败的 ${res.retried} 条已重新加入后台队列，正在重试`);
-        setResultOpen(false);
-        queryClient.invalidateQueries({ queryKey: ["cloud-queue"] });
-      } else {
-        onToast(`重试没成：${res.error ?? "请稍后再试"}`);
-      }
-    } catch (e) {
-      onToast(`重试没成：${describeThrownError(e)}`);
-    } finally {
-      setRetryingAll(false);
-      setRetryingIds(new Set());
-    }
-  };
-  if (!data || data.total === 0) return null;
-  const chipStyle = (status: string): { background: string; label: string } => {
-    if (status === "success")
-      return { background: "rgba(5,150,105,0.92)", label: "成功" };
-    if (status === "failed") return { background: "#b91c1c", label: "失败" };
-    if (status === "downloading")
-      return { background: "#1d4ed8", label: "存入中" };
-    return { background: "#475569", label: "排队中" };
-  };
-  return (
-    <>
-    <div
-      className="mt-2 rounded-lg border border-[var(--border)] bg-[#0b1220] px-3 py-2 text-slate-200"
-      role="status"
-      aria-label="云端后台存入队列状态"
-    >
-      <button
-        type="button"
-        className="flex flex-wrap items-center gap-x-2 text-[13px] leading-5"
-        aria-expanded={data.running ? expanded : resultOpen}
-        aria-label={
-          data.running
-            ? `后台存入中 ${data.done}/${data.total}，点击${expanded ? "收起" : "展开"}查看每条状态`
-            : `后台存入完成：成功 ${success} 条，失败 ${failed} 条，点击查看成功和失败清单`
-        }
-        onClick={() => {
-          // v4.69：运行中点开仍是原地展开每条状态；完成后点开
-          // 结果清单悬浮窗（成功/失败分开列、失败可重试）。
-          if (data.running) setExpanded((v) => !v);
-          else setResultOpen(true);
-        }}
-      >
-        {data.running ? (
-          <>
-            <span
-              className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400"
-              aria-hidden="true"
-            />
-            <span className="font-semibold">
-              后台存入中 {data.done}/{data.total}
-            </span>
-          </>
-        ) : (
-          <span className="font-semibold">
-            后台存入完成：成功 {success} 条，失败 {failed} 条
-          </span>
-        )}
-        <span className="text-slate-400">
-          {data.running ? (expanded ? "收起 ▾" : "每条状态 ▸") : "看清单 ▸"}
-        </span>
-      </button>
-      {expanded && data.running && (
-        <div
-          className="mt-2 space-y-1.5"
-          style={{ maxHeight: "40vh", overflowY: "auto" }}
-          aria-label="后台存入队列每条状态（可滚动）"
-        >
-          {data.items.map((it) => {
-            const chip = chipStyle(it.status);
-            return (
-              <div
-                key={it.id}
-                className="flex items-start gap-2 rounded bg-white/5 px-2 py-1.5"
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px] font-semibold leading-5">
-                    {it.title || it.videoId || "未命名视频"}
-                  </span>
-                  <span className="block text-xs leading-4 text-slate-400">
-                    {it.creatorName || "达人未填"}
-                    {it.attempts > 1 && <> · 已重试 {it.attempts - 1} 次</>}
-                  </span>
-                  {it.status === "failed" && it.error && (
-                    <span
-                      className="mt-0.5 block text-xs leading-4"
-                      style={{ color: "#fca5a5" }}
-                    >
-                      {it.error}
-                    </span>
-                  )}
-                </span>
-                <span
-                  className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-bold leading-4 text-white"
-                  style={{ background: chip.background }}
-                >
-                  {chip.label}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-    {resultOpen && !data.running && (
-      <CloudQueueResultModal
-        items={data.items}
-        success={success}
-        failed={failed}
-        retryingIds={retryingIds}
-        retryingAll={retryingAll}
-        onRetryItem={(id) => void doRetry([id], false)}
-        onRetryAll={() =>
-          void doRetry(
-            data.items.filter((it) => it.status === "failed").map((it) => it.id),
-            true,
-          )
-        }
-        onClose={() => setResultOpen(false)}
-      />
-    )}
-    </>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// v4.88 待解剖队列条：监控页顶部（云端后台队列状态条正下方）常驻。
-// 数据来自服务端 getDissectQueue（monitor_meta 持久化，刷新不丢）：
-// 标题行「待解剖（N）」N = 还没解剖的条数；展开逐条看标题 / 达人 /
-// 加入时间 / 状态——已解剖的（聊天解剖做完、分析记录里已有带结果
-// 的同 videoId 记录，服务端实时判定）显示绿色「已解剖 ✓」并给出
-// 去处（有已套用项目 → 打开项目；否则 → 查看分析记录）；待解剖
-// 的可「重新复制指令」（按 videoId 在当前 feed 里找卡片重组指令，
-// 卡片已被删的提示已删）；每条都能「移除」（只删队列条目）。
-// 空队列也常驻显示「待解剖（0）」，入口一直找得到。
-// ---------------------------------------------------------------------------
-function DissectQueueBar({
-  onToast,
-  onCopyFallback,
-  findVideo,
-  onOpenProject,
-  onOpenAnalysisRecord,
-}: {
-  onToast: (msg: string) => void;
-  onCopyFallback: (text: string) => void;
-  findVideo: (
-    videoId: string,
-  ) => { video: FeedVideo; creatorName: string } | null;
-  onOpenProject?: (projectId: number) => void;
-  onOpenAnalysisRecord?: (videoId: string) => void;
-}) {
-  const queryClient = useQueryClient();
-  const [expanded, setExpanded] = useState(false);
-  const [removingId, setRemovingId] = useState<string | null>(null);
-  const queueQuery = useQuery({
-    queryKey: ["dissect-queue"],
-    queryFn: () => withReadTimeout(() => api.getDissectQueue({})),
-    retry: retryReadQuery,
-  });
-  const items = queueQuery.data?.items ?? [];
-  const pendingCount = items.filter((it) => !it.dissected).length;
-  const doneCount = items.length - pendingCount;
-
-  // 队列还没加载完先不渲染（避免闪一帧空队列）；加载完后即使
-  // 是空队列也常驻显示「待解剖（0）」，让入口一直找得到。
-  if (!queueQuery.data) return null;
-
-  const handleRecopy = async (videoId: string) => {
-    const found = findVideo(videoId);
-    if (!found) {
-      onToast("这条视频的卡片已经不在监控页了，没法重组解剖指令。");
-      return;
-    }
-    const text = buildDissectInstruction(found.video, found.creatorName);
-    const ok = await copyTextToClipboard(text);
-    if (ok) onToast("已复制解剖指令，去聊天框粘贴发送");
-    else onCopyFallback(text);
-  };
-
-  const handleRemove = async (videoId: string) => {
-    setRemovingId(videoId);
-    try {
-      await api.removeDissectQueueItem({ videoId });
-      queryClient.invalidateQueries({ queryKey: ["dissect-queue"] });
-      onToast("已从待解剖队列移除");
-    } catch (e) {
-      onToast(`移除没成：${describeThrownError(e)}`);
-    } finally {
-      setRemovingId(null);
-    }
-  };
-
-  return (
-    <div
-      className="mt-2 rounded-lg border border-[var(--border)] bg-[#0b1220] px-3 py-2 text-slate-200"
-      role="status"
-      aria-label="待解剖队列"
-    >
-      <button
-        type="button"
-        className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 text-left"
-        aria-expanded={expanded}
-        aria-label={
-          expanded
-            ? "收起待解剖队列列表"
-            : `展开待解剖队列列表（待解剖 ${pendingCount} 条，已解剖 ${doneCount} 条）`
-        }
-        onClick={() => setExpanded((v) => !v)}
-      >
-        <span className="text-sm font-bold">
-          待解剖（{pendingCount}）
-        </span>
-        {doneCount > 0 && (
-          <span className="text-xs" style={{ color: "#34d399" }}>
-            已解剖 {doneCount} 条
-          </span>
-        )}
-        <span className="text-xs text-slate-400">
-          点卡片上的「发送到聊天解剖」会把视频排进这里，去聊天框粘贴指令就能开工
-        </span>
-        <span className="ml-auto text-xs text-slate-400">
-          {expanded ? "收起 ▾" : "展开 ▸"}
-        </span>
-      </button>
-      {expanded && items.length === 0 && (
-        <p className="mt-2 text-[13px] leading-5 text-slate-400">
-          队列是空的——在下面的视频卡片上点「发送到聊天解剖」，视频就会排进来。
-        </p>
-      )}
-      {expanded && items.length > 0 && (
-        <ul
-          className="mt-2 space-y-1.5 overflow-y-auto"
-          style={{ maxHeight: "40vh" }}
-          aria-label="待解剖队列列表"
-        >
-          {items.map((it) => (
-            <li
-              key={it.videoId}
-              className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md bg-white/5 px-2 py-1.5"
-            >
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[13px] font-semibold leading-5">
-                  {it.title || it.videoId}
-                </span>
-                <span className="block text-xs leading-4 text-slate-400">
-                  {it.creatorName || "达人未填"}
-                  {it.addedAt
-                    ? ` · 加入 ${formatDetailTime(it.addedAt)}`
-                    : ""}
-                </span>
-              </span>
-              {it.dissected ? (
-                <>
-                  <span
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-bold leading-4 text-white"
-                    style={{ background: "rgba(5,150,105,0.92)" }}
-                  >
-                    已解剖 ✓
-                  </span>
-                  {it.appliedProjectId !== null && onOpenProject && (
-                    <button
-                      type="button"
-                      className="btn btn-sm shrink-0"
-                      aria-label={`打开已套用的项目：${it.title || it.videoId}`}
-                      onClick={() => {
-                        if (it.appliedProjectId !== null) {
-                          onOpenProject(it.appliedProjectId);
-                        }
-                      }}
-                    >
-                      打开项目
-                    </button>
-                  )}
-                  {onOpenAnalysisRecord && (
-                    <button
-                      type="button"
-                      className="btn btn-sm shrink-0"
-                      aria-label={`查看分析记录：${it.title || it.videoId}`}
-                      onClick={() => onOpenAnalysisRecord(it.videoId)}
-                    >
-                      查看记录
-                    </button>
-                  )}
-                </>
-              ) : (
-                <>
-                  <span
-                    className="shrink-0 rounded px-1.5 py-0.5 text-[11px] font-bold leading-4 text-white"
-                    style={{ background: "#475569" }}
-                  >
-                    待解剖
-                  </span>
-                  <button
-                    type="button"
-                    className="btn btn-sm shrink-0"
-                    aria-label={`重新复制解剖指令：${it.title || it.videoId}`}
-                    onClick={() => void handleRecopy(it.videoId)}
-                  >
-                    复制指令
-                  </button>
-                </>
-              )}
-              <button
-                type="button"
-                className="btn btn-danger-ghost btn-sm shrink-0"
-                disabled={removingId === it.videoId}
-                aria-label={`从待解剖队列移除：${it.title || it.videoId}`}
-                onClick={() => void handleRemove(it.videoId)}
-              >
-                {removingId === it.videoId ? "移除中…" : "移除"}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 // v4.65 云端清单 at 字段解析：state.json 里的 at 可能是 ISO 串
 // 或数字毫秒——都换算成毫秒数排序，解析不了按 0（排最后）。
 function parseCloudSavedAt(at: string): number {
@@ -1821,12 +1107,6 @@ function formatDetailTime(iso: string | null): string {
   }).formatToParts(d);
   const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
   return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
-}
-
-// v5.55 清理记录用的时间格式：毫秒数 → 北京时间「YYYY-MM-DD HH:mm」。
-function formatCleanupTimeMs(ms: number | null): string {
-  if (ms === null || !Number.isFinite(ms)) return "—";
-  return formatDetailTime(new Date(ms).toISOString());
 }
 
 type CleanupCandidate = ApiResponse<
@@ -2247,6 +1527,26 @@ function sz(base: number, s: number): number {
   return Math.max(1, Math.round(base * s * 10) / 10);
 }
 
+// ---------------------------------------------------------------------------
+// v6.15「下载视频」文件名：用视频标题，没有标题用视频编号，后缀
+// .mp4。Windows 不允许出现在文件名里的字符（/ \ : * ? " < > |）
+// 与控制字符一律换成下划线，首尾的空格与句点去掉（Windows 会吞
+// 掉、容易下载失败），过长截断；换完为空时回落视频编号，再空回
+// 落「视频」。
+// ---------------------------------------------------------------------------
+export function downloadFileNameForVideo(video: FeedVideo, title: string): string {
+  const rawTitle = title && title !== "未命名视频" ? title : "";
+  const base = (rawTitle || video.videoId || "视频")
+    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[. ]+$/g, "")
+    .slice(0, 80)
+    .replace(/[. ]+$/g, "");
+  const safe = base || (video.videoId || "视频").replace(/[/\\:*?"<>|\u0000-\u001f]/g, "_");
+  return `${safe}.mp4`;
+}
+
 function MonitorCardButtons({
   video,
   title,
@@ -2285,6 +1585,52 @@ function MonitorCardButtons({
     padding: `${sz(4, s)}px ${sz(8, s)}px`,
     minHeight: 0,
     height: "auto",
+  };
+  // v6.15「下载视频」：点后把卡片当前最新的播放地址（videoFileUrl）
+  // 在浏览器里拉成 blob 再触发下载——快手播放地址是跨域 CDN 直链，
+  // 直接 <a download> 跨域只会打开播放、不会下载；fetch 拉 blob 后
+  // 用同源 object URL 点 <a download> 才是真下载（快手直链带 CORS
+  // 头，解剖抽帧用的就是同一条跨域读通道）。文件名走
+  // downloadFileNameForVideo（标题优先、无标题用编号、非法字符已
+  // 换掉、后缀 .mp4）。下载中按钮禁用显示「下载中…」不一直转圈无
+  // 期限：单次最长等 120 秒，超时 / 对方返回错误（403/410 等链接
+  // 过期）/ 拉不到文件一律停下来，按钮下方红字用既有过期口径提示
+  // 「视频直链已过期（快手链接有时效）……点下方刷新链接重新拿」，
+  // 不报技术错误。成功后按钮下方绿字写明已开始下载的文件名。
+  const [downloading, setDownloading] = useState(false);
+  const [downloadFailed, setDownloadFailed] = useState(false);
+  const [downloadedName, setDownloadedName] = useState("");
+  const handleDownload = async () => {
+    const url = (video.videoFileUrl ?? "").trim();
+    if (!url || downloading) return;
+    const fileName = downloadFileNameForVideo(video, title);
+    setDownloading(true);
+    setDownloadFailed(false);
+    setDownloadedName("");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120_000);
+    try {
+      const resp = await fetch(url, { mode: "cors", signal: controller.signal });
+      if (!resp.ok) throw new Error(`http ${resp.status}`);
+      const blob = await resp.blob();
+      if (!blob || blob.size === 0 || blob.type.includes("html")) {
+        throw new Error("empty");
+      }
+      const objUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objUrl;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
+      setDownloadedName(fileName);
+    } catch {
+      setDownloadFailed(true);
+    } finally {
+      clearTimeout(timer);
+      setDownloading(false);
+    }
   };
   return (
     <>
@@ -2325,6 +1671,51 @@ function MonitorCardButtons({
           </button>
         )}
       </div>
+      {video.videoFileUrl && (
+        <div
+          style={{ marginTop: sz(6, s) }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="btn btn-primary btn-sm w-full whitespace-nowrap"
+            style={btnStyle}
+            disabled={downloading}
+            aria-label={`下载视频：${title}（把视频文件下载到这台设备，文件名为标题加 .mp4）`}
+            onClick={() => void handleDownload()}
+          >
+            {downloading ? "下载中…" : "⬇ 下载视频"}
+          </button>
+          {downloadFailed && (
+            <p
+              className="text-center"
+              style={{
+                marginTop: sz(3, s),
+                fontSize: sz(10, s),
+                lineHeight: 1.35,
+                color: "var(--bad)",
+              }}
+              role="alert"
+            >
+              视频直链已过期（快手链接有时效），这次没下载成。请点下方「刷新链接」重新拿新地址，再点「下载视频」。
+            </p>
+          )}
+          {!downloadFailed && downloadedName && (
+            <p
+              className="text-center"
+              style={{
+                marginTop: sz(3, s),
+                fontSize: sz(10, s),
+                lineHeight: 1.35,
+                color: "var(--olive)",
+              }}
+              role="status"
+            >
+              已开始下载：{downloadedName}
+            </p>
+          )}
+        </div>
+      )}
       {onRefresh && (
         <div
           style={{ marginTop: sz(6, s) }}
@@ -4203,7 +3594,9 @@ export function MonitorBench({
   //     窗直接关闭，toast「已加入后台队列（N 条），后台存入中
   //     不影响你继续用」；下载由服务端后台进程 3 并发处理，
   //     进度与每条结果看存储进度条下方的 CloudQueueStatus 常驻
-  //     状态，全部完成另有汇总 toast。ID 不合法 / 没有文件链
+  //     状态，全部完成另有汇总 toast（v6.16 起存储进度条与队
+  //     列状态条显示已按用户要求下线，只删显示、后台队列与下
+  //     载进程照旧）。ID 不合法 / 没有文件链
   //     接的条目也照常入队，由后台逐条记失败原因（不冒泡拦住
   //     整批）。
   // ------------------------------------------------------------------
@@ -5161,7 +4554,6 @@ export function MonitorBench({
     queryFn: () => withReadTimeout(() => api.getMonitorCleanupStatus({})),
     retry: retryReadQuery,
   });
-  const cleanupStatus = cleanupStatusQuery.data;
   const cleanupAutoToastRef = useRef(false);
   useEffect(() => {
     const d = cleanupStatusQuery.data;
@@ -5171,7 +4563,7 @@ export function MonitorBench({
     invalidate();
     if (d.autoDeletedCount > 0 || d.autoUnjudgedCount > 0) {
       setIntakeToast(
-        `3 天留存自动清理：已删 ${d.autoDeletedCount} 条过期卡片（云端文件同步删除）${d.autoUnjudgedCount > 0 ? `；另有 ${d.autoUnjudgedCount} 条点赞播放都没采到数据、没删，见下方「清理记录」` : ""}。`,
+        `3 天留存自动清理：已删 ${d.autoDeletedCount} 条过期卡片（云端文件同步删除）${d.autoUnjudgedCount > 0 ? `；另有 ${d.autoUnjudgedCount} 条点赞播放都没采到数据、没删` : ""}。`,
       );
     }
     // invalidate 只依赖 queryClient，闭包引用稳定。
@@ -5182,7 +4574,6 @@ export function MonitorBench({
     useState<ApiResponse<typeof api, "previewMonitorCleanup"> | null>(null);
   const [cleanupPreviewBusy, setCleanupPreviewBusy] = useState(false);
   const [cleanupError, setCleanupError] = useState<string | null>(null);
-  const [cleanupLogOpen, setCleanupLogOpen] = useState(false);
   const openCleanupPreview = async () => {
     setCleanupError(null);
     setCleanupPreviewBusy(true);
@@ -5201,7 +4592,7 @@ export function MonitorBench({
       setCleanupPreview(null);
       setCleanupError(null);
       setIntakeToast(
-        `已按 3 天留存规则删掉 ${res.deleted.length} 条卡片（云端文件同步删除）${res.unjudged.length > 0 ? `；${res.unjudged.length} 条没采到点赞播放数据、没删，见「清理记录」` : ""}。删除记录已存档，可在下方「清理记录」里查。`,
+        `已按 3 天留存规则删掉 ${res.deleted.length} 条卡片（云端文件同步删除）${res.unjudged.length > 0 ? `；${res.unjudged.length} 条没采到点赞播放数据、没删` : ""}。删除记录已存档。`,
       );
       invalidate();
       queryClient.invalidateQueries({ queryKey: ["monitor-cleanup-status"] });
@@ -5355,106 +4746,6 @@ export function MonitorBench({
           </button>
         </span>
       </div>
-      <CloudStorageBar />
-      <CloudQueueStatus onToast={setIntakeToast} />
-      {/* v5.55 3 天留存清理记录：上次 / 下次清理时间 + 删除日志 +
-          最近一轮「无数据未判定」。规则：发布超 3 天（没发布时
-          间按入库时间）且点赞 <1000、播放 <50000 才删，任一达
-          标就留；点赞播放都是 0（没采到数据）的不删、列在未判
-          定里等用户定。自动清理在打开本页时由服务端判断（距上
-          次满 24 小时才跑），手动点右上角「立即清理」先出清单、
-          确认后再删。删除不可恢复，日志只作备查。 */}
-      <div
-        className="mt-2 rounded-[10px] border px-3 py-2"
-        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-        aria-label="3天留存清理记录"
-      >
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <span className="text-[13px] font-semibold">3 天留存清理</span>
-          <span className="text-[12px] leading-5 text-[var(--dim)]">
-            上次清理：
-            {cleanupStatus
-              ? formatCleanupTimeMs(cleanupStatus.lastRunAtMs)
-              : "读取中…"}
-            {" · "}下次约：
-            {cleanupStatus
-              ? formatCleanupTimeMs(cleanupStatus.nextRunAtMs)
-              : "—"}
-            {" · "}已删记录 {cleanupStatus?.logs.length ?? 0} 条
-            {cleanupStatus && cleanupStatus.lastUnjudged.length > 0
-              ? ` · 无数据未判定 ${cleanupStatus.lastUnjudged.length} 条`
-              : ""}
-          </span>
-          <button
-            type="button"
-            className="btn btn-sm ml-auto"
-            aria-expanded={cleanupLogOpen}
-            aria-label={cleanupLogOpen ? "收起清理记录" : "展开清理记录（删除日志与无数据未判定清单）"}
-            onClick={() => setCleanupLogOpen((v) => !v)}
-          >
-            {cleanupLogOpen ? "收起记录" : "查看记录"}
-          </button>
-        </div>
-        <p className="mt-0.5 text-[12px] leading-5 text-[var(--dim)]">
-          规则：发布超过 3 天、点赞不到 1000 且播放不到 5 万的卡片会被删掉（云端文件一起删）；点赞或播放任一达标就留；点赞和播放都没采到数据的先不删、列在「无数据未判定」里。每天自动检查一次（打开本页时），也可以点右上角「立即清理」先看清单再删。删除不可恢复，下面这份日志只作备查。
-        </p>
-        {cleanupError && (
-          <p className="mt-1 text-[13px] leading-5" style={{ color: "var(--bad)" }} role="alert">
-            {cleanupError}
-          </p>
-        )}
-        {cleanupLogOpen && cleanupStatus && (
-          <div className="mt-2 grid gap-3 lg:grid-cols-2">
-            <div>
-              <p className="text-[13px] font-semibold">删除记录（最近 {cleanupStatus.logs.length} 条）</p>
-              {cleanupStatus.logs.length === 0 ? (
-                <p className="mt-1 text-[12px] leading-5 text-[var(--dim)]">还没有删过任何卡片。</p>
-              ) : (
-                <ul className="mt-1 max-h-64 space-y-1 overflow-y-auto pr-1">
-                  {cleanupStatus.logs.map((l) => (
-                    <li key={l.id} className="text-[12px] leading-5">
-                      <span className="font-medium">{l.title}</span>
-                      <span className="text-[var(--dim)]">
-                        {" "}· {l.creatorName || "—"} · 视频ID {l.videoId || "—"} · 点赞 {l.likeCount} · 播放 {l.playCount} · 发布 {formatCleanupTimeMs(l.publishedAtMs)} · 删除于 {formatCleanupTimeMs(l.deletedAtMs)}（{l.trigger === "auto" ? "自动清理" : "手动清理"}）
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            <div>
-              <p className="text-[13px] font-semibold">无数据未判定（最近一轮，点赞播放都没采到，先不删）</p>
-              {cleanupStatus.lastUnjudged.length === 0 ? (
-                <p className="mt-1 text-[12px] leading-5 text-[var(--dim)]">最近一轮没有这类卡片。</p>
-              ) : (
-                <ul className="mt-1 max-h-64 space-y-1 overflow-y-auto pr-1">
-                  {cleanupStatus.lastUnjudged.map((u) => (
-                    <li key={u.id} className="text-[12px] leading-5">
-                      <span className="font-medium">{u.title}</span>
-                      <span className="text-[var(--dim)]">
-                        {" "}· {u.creatorName || "—"} · 视频ID {u.videoId || "—"} · 已发布约 {u.ageDays} 天 · 发布 {formatCleanupTimeMs(u.publishedAtMs)}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-      <DissectQueueBar
-        onToast={setIntakeToast}
-        onCopyFallback={setDissectCopyFallback}
-        findVideo={(videoId) => {
-          for (const a of accounts) {
-            const v = a.videos.find((x) => x.videoId === videoId);
-            if (v) return { video: v, creatorName: a.name };
-          }
-          return null;
-        }}
-        onOpenProject={onOpenProject}
-        onOpenAnalysisRecord={onOpenAnalysisRecord}
-      />
       <div className="mt-1">
         <button
           type="button"

@@ -17,6 +17,7 @@ import { CharacterBench, type CharWindow } from "./charbench";
 import { MonitorBench } from "./monitorbench";
 import { ArchiveBench } from "./archivebench";
 import { PromptCheckBench } from "./promptcheck";
+import { OptionBench } from "./optionbench";
 import { AnalysisBench, type AnalysisPrefill } from "./analysisbench";
 import { ModeSection } from "./modebench";
 import { ConfirmDialog } from "./confirm";
@@ -221,7 +222,7 @@ export const tiltCardHandlers = {
   onMouseLeave: (_e: ReactMouseEvent<HTMLElement>) => {},
 };
 
-type Bench = "script" | "character" | "monitor" | "archive" | "promptcheck";
+type Bench = "script" | "character" | "monitor" | "archive" | "promptcheck" | "options";
 type ScriptWindow =
   | "mode"
   | "characters"
@@ -1324,6 +1325,13 @@ export function App() {
             >
               提示词检查
             </button>
+            <button
+              type="button"
+              aria-pressed={bench === "options"}
+              onClick={() => switchBench("options")}
+            >
+              选配台
+            </button>
           </div>
           <div className="flex min-w-0 items-center">
             <label className="sr-only" htmlFor="topbar-project-select">
@@ -1357,7 +1365,9 @@ export function App() {
                     ? "储存箱窗口列表"
                     : bench === "promptcheck"
                       ? "提示词检查窗口列表"
-                      : "监控账号窗口列表"
+                      : bench === "options"
+                        ? "选配台窗口列表"
+                        : "监控账号窗口列表"
             }
           >
             {bench === "script"
@@ -1396,7 +1406,15 @@ export function App() {
                         () => {},
                         "当前窗口：提示词检查",
                       )
-                    : MONITOR_WINDOWS.map((w) =>
+                    : bench === "options"
+                      ? navBtn(
+                          true,
+                          "选配台",
+                          "工作台 / 小程序 / exe 三个独立选配页",
+                          () => {},
+                          "当前窗口：选配台",
+                        )
+                      : MONITOR_WINDOWS.map((w) =>
                       navBtn(
                         monitorWindow === w.id,
                         w.label,
@@ -1716,6 +1734,17 @@ export function App() {
           {mountedBenches.has("promptcheck") && (
           <div hidden={bench !== "promptcheck"}>
             <PromptCheckBench />
+          </div>
+          )}
+
+          {/* 选配台（v6.14）：与项目无关的独立选配页——把三批 GitHub
+              调研（26 个仓库）学到的排版布局做法做成可真选的选项，
+              工作台 / 小程序 / exe 三个独立页面各自选配 + 实时预览，
+              配置只存本机。首次切到才挂载（打开提速），挂载后 hidden
+              常驻保住三页选择状态。 */}
+          {mountedBenches.has("options") && (
+          <div hidden={bench !== "options"}>
+            <OptionBench />
           </div>
           )}
 
@@ -12136,6 +12165,10 @@ function ReallocationDialog({
   const [perLensSel, setPerLensSel] = useState<string>(
     String(config.groupSeconds),
   );
+  // v6.13：手机上预览悬浮窗默认收成一条（只露标题汇总），点
+  // 「展开」才看完整列表；桌面端悬浮窗恒展开（CSS 控制），此
+  // 状态只影响窄屏。
+  const [previewOpen, setPreviewOpen] = useState(false);
   const segments = useMemo(
     () => storyboardSegmentsForCuts(script, cuts),
     [script, cuts],
@@ -12182,7 +12215,7 @@ function ReallocationDialog({
       onClick={onCancel}
     >
       <div
-        className="flex max-h-[88dvh] w-full max-w-2xl flex-col rounded-[14px] border p-5"
+        className="flex max-h-[88dvh] w-full max-w-2xl flex-col rounded-[14px] border p-5 lg:max-w-5xl"
         style={{
           borderColor: "var(--border)",
           background: "var(--surface)",
@@ -12192,7 +12225,7 @@ function ReallocationDialog({
       >
         <p className="font-display text-lg font-bold">重新进行分镜分配</p>
         <p className="mt-1.5 text-sm leading-6 text-[var(--dim)]">
-          内容一个字不改，只重新分配镜头：在节拍列表里勾选「在此拍后切一镜」自己定切分点，下面实时预览新镜头列表。全部镜头都不超
+          内容一个字不改，只重新分配镜头：在节拍列表里勾选「在此拍后切一镜」自己定切分点，旁边的悬浮窗会实时预览新镜头列表（手机上悬浮窗在下方，点「展开」看完整列表）。全部镜头都不超
           30 秒可以直接确认；仍有镜头超 30
           秒时，普通确认仍不可用，但可以用下方的高权限确认按现状生成（会再弹一次确认框，超长由你自担、会留痕）；确认后才按这份分配生成分镜。
         </p>
@@ -12245,8 +12278,15 @@ function ReallocationDialog({
             按此秒数重新分配
           </button>
         </div>
-        <div className="mt-3 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
-          <div aria-label="节拍列表与切分点">
+        {/* v6.13 预览改悬浮窗：节拍列表与新镜头预览拆开——列表
+            自己滚，预览做成悬浮窗（桌面右侧、手机下方）始终钉在
+            眼前、窗内自己滚，不再排在列表下面跟列表一起滚走；
+            窗口同步由 max-w-2xl 加宽到桌面 max-w-5xl。 */}
+        <div className="mt-3 flex min-h-0 flex-1 flex-col gap-3 lg:flex-row lg:gap-4">
+          <div
+            aria-label="节拍列表与切分点"
+            className="min-h-0 flex-1 overflow-y-auto pr-1"
+          >
             <h4 className="text-sm font-bold">
               全部节拍（共 {flat.length} 拍 · 当前语速 {script.speechRate}{" "}
               字/秒）
@@ -12302,12 +12342,44 @@ function ReallocationDialog({
               })}
             </ul>
           </div>
-          <div aria-label="新镜头列表预览">
-            <h4 className="text-sm font-bold">
-              预览：新镜头列表（共 {segments.length} 个镜头 · 总时长{" "}
-              {totalSeconds.toFixed(1)} 秒）
-            </h4>
-            <ul className="mt-1.5 space-y-1.5">
+          <aside
+            aria-label="新镜头列表预览悬浮窗"
+            className="flex shrink-0 flex-col overflow-hidden rounded-[12px] border lg:min-h-0 lg:w-[400px]"
+            style={{
+              borderColor: "var(--accent)",
+              background: "var(--surface-alt)",
+              boxShadow: "0 10px 30px rgba(0, 0, 0, 0.45)",
+            }}
+          >
+            <div className="flex flex-wrap items-center gap-2 px-3 pt-3">
+              <h4 className="min-w-0 flex-1 text-sm font-bold">
+                预览：新镜头列表（共 {segments.length} 个镜头 · 总时长{" "}
+                {totalSeconds.toFixed(1)} 秒）
+                {overSegments.length > 0 && (
+                  <strong style={{ color: "var(--bad)" }}>
+                    {" "}
+                    · {overSegments.length} 个超 30 秒
+                  </strong>
+                )}
+              </h4>
+              <button
+                type="button"
+                className="btn btn-sm lg:hidden"
+                aria-expanded={previewOpen}
+                aria-label={previewOpen ? "收起新镜头列表预览" : "展开新镜头列表预览"}
+                onClick={() => setPreviewOpen((v) => !v)}
+              >
+                {previewOpen ? "收起" : "展开"}
+              </button>
+            </div>
+            <div
+              className={
+                previewOpen
+                  ? "mt-2 min-h-0 flex-1 overflow-y-auto px-3 pb-3 max-lg:max-h-[38dvh]"
+                  : "mt-2 hidden min-h-0 flex-1 overflow-y-auto px-3 pb-3 lg:block"
+              }
+            >
+            <ul className="space-y-1.5">
               {segments.map((seg, i) => {
                 const first = flat[seg.flatIndices[0] ?? 0];
                 const lastFb =
@@ -12374,7 +12446,8 @@ function ReallocationDialog({
                 秒：在超长镜头里再勾一个切分点，把它拆成两镜就好；不想再切，也可以用下方的高权限确认按现状生成。
               </p>
             )}
-          </div>
+            </div>
+          </aside>
         </div>
         <div className="mt-4 flex flex-wrap justify-end gap-2">
           <button type="button" className="btn" onClick={onCancel}>
@@ -12543,7 +12616,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v6.12";
+const WORKSPACE_VERSION = "v6.16";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12555,9 +12628,33 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
+    version: "v6.16",
+    date: "2026-11-14",
+    current: true,
+    text: "这一版按你截图里红框标出来的，把「监控账号」页顶部那四块显示删掉了，页面打开直接就是视图和视频卡片，清爽了。删掉的是这四块：①最上面那条「云端存储」用量条（已用多少 GB、云端共多少条视频、下面那根进度条）；②「后台存入完成」那条状态（成功几条、失败几条、点开看清单的那个窗也一起没了）；③「3 天留存清理」那一块（上次/下次清理时间、已删多少条、规则说明、查看记录按钮和展开的删除记录）；④「待解剖」那一块（排队等解剖的摘要、已解剖几条、展开列表）。要说清的是：这次只删了页面上的显示，背后的东西一样没动——监控的视频卡片和数据都在，云端里存好的文件没删，3 天自动清理照旧每天检查（打开这一页时触发，该删的还是会删，只是页面上不再摆那块记录了；清理完的提示也还在，就是不再写「去下面记录里查」），「立即清理」按钮照样能先看清单再删；点卡片上「发送到聊天解剖」照样会把视频排进待解剖队列，只是页面顶部不再显示那块队列了；「存云端」的后台存入也照旧在后台跑，只是不再显示进度和完成状态。页面上其他东西全保留：顶部的下载模板、导入 Excel、刷新、存云端、立即清理、一键清除按钮都在，使用说明、粘贴建卡的框、下面的视图按钮和视频卡片列表都没动，其他页面更没动，也没有提交任何生图。真机等你亲验：打开「监控账号」页看顶部——那四块应该都不见了，标题行按钮下面直接就是使用说明和粘贴框；再往下翻看视图切换和视频卡片是不是都正常；点一次「立即清理」看清单确认窗还弹不弹（只看清单、别真删）。",
+    features: "监控页顶部删四块显示（v6.16，用户截图红框亲口定「把监控账号页红框里的内容删掉，只保留视图区」；纯客户端 monitorbench.tsx 删除渲染/显示代码 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作删除；NO real image/video generation submitted）：【删除清单】①CloudStorageBar 组件（v4.64 云端存储用量条：已用 XGB/8GB＋云端共 N 条视频＋进度条，每 60 秒调 getCloudStorage）连同 MonitorBench 内的渲染调用整段删除；②CloudQueueStatus 组件（v4.67 后台存入状态条：运行中「后台存入中 x/y」/完成「后台存入完成：成功 N 条，失败 M 条」+ 完成 toast + v5.69 本页会话内自动弹结果窗）连同其专属 CloudQueueResultModal 结果清单窗、CloudQueueItemView 类型、CLOUD_QUEUE_TOASTED_KEY 常量与渲染调用整段删除；③「3 天留存清理」记录区 JSX 整段删除（上次/下次清理时间、已删记录条数、规则文字、「查看记录」按钮与展开的删除日志/无数据未判定两栏）；④DissectQueueBar 组件（v4.88 待解剖队列条：待解剖（N）标题行、已解剖 N 条、展开逐条列表/复制指令/移除）连同渲染调用整段删除。四处共删约 820 行。【连带摘除（仅供已删块使用的本地物）】formatCleanupTimeMs（只被清理记录区调用）、MonitorBench 内 cleanupStatus 别名与 cleanupLogOpen 状态（只被清理记录区读写）；cleanupStatusQuery 本体保留——它是服务端自动清理的触发点（打开本页调 getMonitorCleanupStatus、距上次满 24 小时服务端跑一轮），自动清理 toast 与「立即清理」runCleanupMut 的完成 toast 只去掉指向已下线记录区的尾巴（「见下方『清理记录』」删除、结尾改「删除记录已存档。」），删除事实与条数文案不变；CloudBatchSaveModal 上方注释补 v6.16 口径一句、文件头 v5.55 注释补下线说明一句。【不动】服务端全部动作（getCloudStorage / getCloudQueueStatus / retryCloudQueueFailed / getMonitorCleanupStatus / previewMonitorCleanup / runMonitorCleanup / getDissectQueue / addDissectQueueItem / removeDissectQueueItem 等一个未删）、监控数据与云端文件、清理规则与触发、待解剖队列数据与卡片「发送到聊天解剖」入队及回执文案、后台存入队列与下载进程、中转设置、顶部按钮组（下载模板/导入 Excel/刷新/存云端/立即清理/一键清除）、使用说明（内文仍提清理记录，按 v6.05 既定边界一字未动）、粘贴建卡框、视图按钮行、视频卡片列表、四窗口回归点验清单、整站备份、更新日志、设置按钮、其他页面、封面记录 id 43；不自动生图。基线升 v6.16（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 监控台条目尾补 v6.16 段、DATA-PLAN 本条）。真机待核：正式工作台打开监控页核对四块已消失且无空壳留白、视图与卡片完好；点「立即清理」只看清单不真删；点一张卡「发送到聊天解剖」看回执仍写已加入队列。",
+  },
+  {
+    version: "v6.15",
+    date: "2026-11-14",
+    text: "这一版按你说的，给「监控账号」页每张视频卡片加了一个「下载视频」按钮：以后看到想留下的视频，点卡片上的「下载视频」，视频文件就直接下载到你这台设备上，不用再先存云端慢慢等。四个视图里都有——按播放量排列、按达人分组、按最新排列、云端上传，每张卡片上都有一颗，就在「播放 / 详情」那行下面、上面一条整行蓝按钮，很显眼，样式和卡片上其他按钮同一套。文件名就是视频标题加 .mp4；标题里 Windows 不让用的符号（斜杠、冒号、问号这类）会自动换掉，不会因为文件名下载失败；没有标题的视频就用视频编号当文件名。下载用的是卡片上最新的播放地址。快手链接有时效：要是链接已经过期、下不动，按钮不会一直转圈、也不会甩一串看不懂的技术报错，按钮下面会直接红字写清——视频直链已过期（快手链接有时效），请点下方「刷新链接」重新拿新地址、再点「下载视频」；下载成功后按钮下面也会绿字写明已开始下载的文件名。云端这次一个字没动：「存云端」批量按钮、云端里已经存好的文件、云端计数、3 天留存清理、「发送到聊天解剖」全都照旧；你以后改用下载按钮留视频，云端自然就不再新增了，整套云端要不要拿掉等你另说。其他页面、布局和数据都没动，也没有提交任何生图。真机等你亲验：随便挑一张卡点「下载视频」，看视频文件是不是真下到电脑上、文件名是不是标题加 .mp4；再找一张链接过期的卡点一次，看按钮下面是不是出现红字提示、让你先点「刷新链接」。",
+    features: "监控卡片加「下载视频」（v6.15，用户原话「把这个监控账号增加功能，我希望后续云端不再存储，浪费时间，增加一个下载视频的按钮」；纯客户端 monitorbench.tsx 的 MonitorCardButtons 一处 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【落点】MonitorCardButtons 是三款卡片设计（极简信息流 / 大图视觉 / 紧凑数据）与四个视图（plays 按播放量排列 / creator 按达人分组——VideoCard、collected 按最新排列 / cloud 云端上传——CompactVideoCard）共用的唯一按钮渲染处，新按钮只加这一处即四视图全覆盖；位置在播放/详情/删除行之下、「🔄 刷新链接」块之上，整行 btn btn-primary btn-sm（与卡片既有按钮同一套 btn 样式、随版式等比档位 sz() 同步缩放），文字「⬇ 下载视频」，aria-label 写明把视频文件下载到这台设备、文件名为标题加 .mp4；videoFileUrl 为空时不渲染（与「播放」按钮同一口径）。【下载方式】跨域 CDN 直链直接 <a download> 只会打开播放、不会下载，故走浏览器拉 blob：fetch(videoFileUrl, mode cors) → resp.blob() → URL.createObjectURL → 临时 <a download=文件名> 点击 → 4 秒后 revoke；快手直链带 CORS 头（AI解剖抽帧 dissectframes 对同一直链用 crossOrigin anonymous 跨域读帧、同为跨域读通道）故浏览器可拉；不走服务端代取、不经云端中转，文件直接从快手 CDN 到用户设备。【文件名】新导出函数 downloadFileNameForVideo(video, title)：标题（splitDescription 后的 displayTitle，「未命名视频」视为无标题）优先、无标题回落 videoId、再回落「视频」；非法字符 [/\\\\:*?\"<>|] 与控制字符（\\u0000-\\u001f）换下划线、连续空白压成一个空格、首尾空格与尾部句点去掉、最长 80 字，后缀恒 .mp4。【状态与失败口径】每卡本地三态（MonitorCardButtons 内 useState）：下载中按钮禁用显示「下载中…」，AbortController 120 秒上限不无限转圈；resp 非 2xx（403/410 等过期）、空文件、HTML 错误页、fetch 抛错一律走失败——按钮下方红字（role=alert）沿用本页既有过期口径原文拼句：「视频直链已过期（快手链接有时效），这次没下载成。请点下方「刷新链接」重新拿新地址，再点「下载视频」。」（前半句与 VideoPlayFailedNotice 的「视频直链已过期（快手链接有时效）」逐字同源，后半句与存云端失败文案「先点卡片上的「刷新链接」拿新链接」同口径），不露任何技术错误；成功后按钮下方绿字（role=status）「已开始下载：{文件名}」。【云端不动】「存云端」批量入口与勾选窗、云端清单与计数、CloudStorageBar、3 天留存清理、下载器定时任务、「发送到聊天解剖」流程与按钮一字未动、云端现有文件不删；用户后续改用下载按钮后云端自然不再新增。【删除清单】零删除。【不动】其余按钮（播放/详情/删除/刷新链接）行为与文案、卡片版式三款与等比档位、视图排序、监控数据、其他五台、封面记录 id 43；不自动生图。基线升 v6.15（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 监控台条目尾补 v6.15 段、DATA-PLAN 本条）。真机待核：正式工作台挑一张卡点下载视频看文件真落盘与文件名；过期链接卡点下载看红字提示后点刷新链接、刷新成功再下载一次。",
+  },
+  {
+    version: "v6.14",
+    date: "2026-11-14",
+    text: "这一版按你说的，给工作台新开了一台「选配台」（顶栏第六个入口），把三批调研从 GitHub 上超过 1000 星的工作台、小程序框架和桌面程序里学到的排版布局做法，全做成了能真选的选项，做了一次教科书级别的选配升级。选配台里有三个各自独立的页面：①「工作台」页——侧栏多宽（默认值按六家精确共识取 260px）、迷你栏、悬浮侧栏、分离式顶栏、顶栏毛玻璃、卡片头上叠、圆角、主色、字体、字阶、动效三档令牌，再加搭建画布那一套（12 列网格、编辑器三栏尺寸、间距体系）；②「小程序」页——独立的一套 rpx 数值：正文字号、按钮高度与胶囊圆角、微信绿主按钮色、导航栏与标签栏高度、安全区双写、1rpx 细线、层级分层表；③「exe 程序」页——只选窗口做法不换壳：窗口尺寸四档、标题栏三档、拖拽区四种写法、启动不闪白屏、窗口记忆、关窗行为、自动更新、托盘出处。每页都是左边选、右边立刻看预览效果，改任何一项预览马上跟着变；每个选项下面都写清了数值是哪家的做法、多少星，报告里提醒不能照抄的地方（比如 Mazer 的 0.7 秒动效时长、Wux 写死的安全区常量、打包体积没有 MB 数）都原样标了出来；Mantis 968 星、Datta Able 175 星没过 1000 星线，用到它们数值的地方单独标明了星数、没有冒充千星模板。选好的配置只存在你这台设备的浏览器里，每页都能一键复制配置摘要、也能一键恢复成调研推荐默认值。要先说清一句：这一版是把选配台本身做扎实，选出的配置还不会自动改工作台现在的样子——你先在这里选好、看好预览，再告诉我往工作台上落哪几项，我再按选好的配置去改全站。其他页面、项目和剧本数据一个字没动，也没有提交任何生图。真机等你亲验：点顶栏「选配台」，三个页面逐个切换看一遍；在工作台页把侧栏宽切到 300、顶栏切成毛玻璃，看右边预览是不是马上变；切到小程序页换个主按钮色、切到 exe 页换个窗口尺寸，同样看预览；随便改几项后刷新页面，看选择还在不在。",
+    features: "选配台教科书级升级（v6.14，用户亲口定：把 GitHub 上全部超过 1000 星的工作台或者小程序的排版布局功能技术都学习下来、加入到选配台里，对选配工作台先做一个教科书级别的选配升级；小程序和 exe 程序都有自己的独立页面；客户端新增 optionbench.tsx + App.tsx 顶栏接线（Bench 加 options、第六个台切换按钮、窗口标签与渲染区）+ 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更——配置只存本机 localStorage；NO real image/video generation submitted）：【数据来源】第三批调研报告（2026-11-14，26 个 GitHub 仓库源码实测，星数为当日连接器实测）：第 1 类后台模板 9 家 + 第 2 类小程序 UI 7 家 + 第 3 类低代码 5 家 + 第 4 类桌面壳 5 家；选配条目按报告第三节清单编号落地（W-01…W-42 / M-01…M-22 / E-01…E-16），每项带条目编号、来源仓库与原文 detail。【三页结构】OptionBench 内三页签（工作台 / 小程序 / exe），各有独立 PageDef（分组、来源星数条、localStorage 键 scriptbench.options.{workbench,mini,exe}.v1）、独立配置状态与独立预览，互不套用数值。【工作台页 28 项】布局骨架 8（侧栏宽四档默认 260 六家共识 W-01/W-02、迷你栏三档 60/72/95、侧栏样式贴边/悬浮 16px 圆角 12/浮层、窄栏悬停展开、顶栏高 48/64/74、顶栏样式贴顶/分离式/毛玻璃、内容内边距 16/20/24/40、断点自动收起）+ 卡片 4（内边距 16/20/24、头上叠 -24px、悬停上浮 2px、阴影三档）+ 侧栏细节 3（激活态二选一 W-16、角标浮出、菜单缩进两刻度）+ 视觉 6（圆角 4/6/10/12、主色四档、彩色阴影、字体四档、字阶三档、头像档位）+ 动效 1（三档令牌/全站 0.15s/easeOutQuint 曲线，只抄曲线不抄 Mazer 0.7s）+ 搭建画布 6（12 列×24px 网格、编辑器三栏、间距体系、颜色 10 阶、边距档位下拉、预览宽度档）。【小程序页 17 项】字阶行高配对、间距基数两派、页边距、按钮高 80/88/96rpx、胶囊圆角、主按钮色三家（微信绿/品牌红/品牌蓝，⚠️ 不默认用桌面蓝）、导航栏 88/92/96rpx、胶囊适配（注明依赖微信专属 API、网页端只示意）、标签栏 100/110rpx、安全区 env 双写 vs Wux 写死常量（标不推荐）、1rpx 细线、动效 0.2/0.25/0.3s、栅格三派、换肤三档、头像四档、阴影三档、z-index 分层表；预览为 375px 手机框（rpx÷2 换算），含胶囊示意、Cell 列表、安全区条。【exe 页 20 项】窗口尺寸四档、最小尺寸两口径（两家原值都标了不能直接照搬的 caveat）、窗口记忆（标恢复文件别放临时目录）、标题栏三档（Overlay 坑照搬报告）、藏标题、Win11 逐色配色（标 22621+ 门槛）、拖拽区四写法并列、启动三式（ready-to-show 主推/闪屏窗备选）、启动底色、启动即最小化、关窗三行为、单实例锁、自动更新、托盘三态（Wails v3 才有 API / Tauri 靠插件仓 / 两家未提供）、多窗口副窗 600×400、窗口截图、菜单 role 写法、electron-vite 三项归「构建/开发体验」组（E-14，不放窗口布局）；明示不换壳（E-16）、打包体积不写 MB 数（E-15）。【诚实标注】Mantis 968 星与 Datta Able 175 星未过千星线：来源条与相关选项均标星数与「未过千星线」、不标千星模板；报告的 ⚠️ 二选一与不适合抄清单落实为单选与 caveat 红字（Volt 深灰主色、Berry 中文字阶、Datta 三级缩进截断、卡片轻阴影深色糊雾、字节码非加密等）。【预览】三页各有实时预览（工作台壳可切展开/迷你态、小程序手机框、exe 窗口框按尺寸比例），改任一项即时重渲；每页带配置摘要（逐项带编号与来源）+ 复制摘要 + 恢复默认；已改项数实时计数。【不动】其余五台、全部项目与剧本数据、主题 token 本身（本版不落全站样式，先选配后落地）、封面记录 id 43、生图禁令。基线升 v6.14（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + workbenches 加第六台条目、DATA-PLAN 本条）。真机待核：顶栏点「选配台」三页切换；工作台页改侧栏宽/顶栏样式看预览即时变、切迷你态看角标浮出；小程序页换主按钮色与按钮高；exe 页换窗口尺寸看比例与规格表；改几项后刷新看本机存值还在；复制配置摘要粘出来核对编号与来源。",
+  },
+  {
+    version: "v6.13",
+    date: "2026-11-14",
+    text: "这一版按你说的，把「重新进行分镜分配」里的预览界面改成了悬浮窗。以前新镜头列表预览排在节拍列表的下面、跟列表装在同一个滚动区里：你在上面勾切分点的时候看不见预览，想看预览就得滚到最下面，滚下去又看不见上面的节拍，来回翻很费劲；而且整个窗口偏窄，预览挤着看不清。现在改成：整个窗口加宽了；节拍列表自己滚动，预览单独做成一个带阴影的悬浮窗停在旁边——电脑上在右边，手机上在下方——你怎么滚节拍列表它都一直在眼前，勾一下切分点，预览立刻跟着变；预览窗里内容多了自己也能上下滚，窗头一直写着共几个镜头、总时长多少、有几个超 30 秒（超的会标红）。手机上悬浮窗默认收成一条只露汇总，点「展开」看完整列表，点「收起」收回去，不挡你勾节拍。其他全没动：切分点怎么勾、智能建议、按剧情转折切分、每镜头秒数、超 30 秒的高权限确认、最后按这份分配生成分镜，都和以前一样，剧本内容一个字不改，也没有提交任何生图。真机等你亲验：打开一个长剧本的「重新进行分镜分配」，往下滚节拍列表，看预览是不是一直在旁边、勾一个切分点预览是不是马上变；手机上点一次「展开 / 收起」看悬浮窗开合是否正常。",
+    features: "再分配预览改悬浮窗（v6.13，用户 2026-11-14 报「预览界面」问题：节拍列表向下滚动时看不到新镜头列表预览、且预览界面窄小，要求升级为悬浮窗预览；纯客户端 App.tsx ReallocationDialog + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image generation submitted）：【改前结构】弹窗 max-w-2xl；节拍列表与「新镜头列表预览」同装在一个 overflow-y-auto 滚动区里、预览排在列表之后——勾切分点时预览不在视口内，滚到底看预览又离开切分点。【改法】弹窗桌面加宽 max-w-2xl → lg:max-w-5xl（手机仍 w-full）；滚动区拆成 flex 列（lg 改行）：节拍列表 div 改 min-h-0 flex-1 overflow-y-auto 独立滚动；预览改语义 aside 悬浮窗（accent 边框 + surface-alt 底 + 0 10px 30px 阴影，桌面 w-[400px]、窗内列表 flex-1 独立 overflow-y-auto，标题恒显汇总：镜头数 / 总时长 / 超 30 秒个数红字）；手机端 aside 钉在列表与底部按钮之间，默认收起只露标题汇总行 + 「展开」按钮（previewOpen 状态，aria-expanded），展开后列表 max-h-[38dvh] 窗内滚，桌面经 lg:block / lg:hidden 恒展开且无切换按钮。弹窗头说明句同步改「旁边的悬浮窗会实时预览新镜头列表（手机上悬浮窗在下方，点「展开」看完整列表）」。【不动】cuts 勾选逻辑、suggestStoryboardCuts / suggestPlotCuts / applyPerLens、segments / overSegments / unsplittable 计算、超长警示文案（随预览移入悬浮窗窗内）、高权限确认与确认生成按钮、onConfirm / onOverride / onCancel 回调、剧本与分镜数据；封面记录 id 43 未动；不自动生图。【删除清单】零删除（仅布局重构：原同滚区一分为二 + 新增手机展开/收起按钮一枚）。基线升 v6.13（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：长剧本再分配窗滚节拍时预览常驻、勾切分点预览实时变、手机展开/收起。",
+  },
+  {
     version: "v6.12",
     date: "2026-11-13",
-    current: true,
     text: "这一版只改 MiniMax H3 提示词的拼装文字，不动任何图片、不动剧本和台词，专治两个老毛病：生成的视频里人物身高一会儿高一会儿矮、镜头之间接不上。第一，分镜页的人物面板里多了一个「身高锚点」栏（在语气基调下面），一句话，你自己填，比如「站立同框时头顶约到 B 的肩膀」；填了点「确认并同步到分镜提示词」之后，这句话会原样出现在 H3 两版里这个人的定义句末尾，帮模型记住谁高谁矮；不填就什么都不加，和以前一字一样。Seedance 三版、通用版和导出都不带这一栏，只有 H3 用。第二，H3 两版的每段提示词自动多带了几句固定话：开头总结末尾加一句全片身高、站位、光线不变；保留说明里每人多写相对身高与体型不变、场景多写光线方向不变；正文里多人同框的镜头（不是特写、近景的）会带一段固定的身高锁定说明，全片每一镜都一模一样；从第二个镜头起，每镜开头先复述上一镜结尾时人物的状态、停顿半秒再开始本镜动作，每镜结尾也都会留一个停得住的姿势，方便下一镜接上；多人全身或中景的镜头、原分镜没写仰拍俯拍的，会写明平视机位。有一处要如实说：台词跨镜头接着说时的专门跨切标记，工作台原来的拼装里没有现成规矩，这次没有自创，等你定了格式再加。项目 46 里各人的身高锚点我没有替你填，你打开人物面板自己填、点同步就能在 H3 区看到。",
     features: "H3 身高与衔接纯文字拼装（v6.12，问题 #111312 用户点选「改工作台的 H3 拼装」——人物资产图已生成好、图不能改，只改提示词文字；定版图 / 首帧图 / 末帧图路线本版不做；客户端 scriptlib.ts（H3 拼装节 + CharacterRow + parseScript）+ App.tsx（人物面板新栏 + 同步链路 + 版本 / 日志）+ 服务端 actions.ts 仅 genCharacterRow 加可选字段 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【1·身高锚点栏】CharacterRow 新增可选 heightAnchor（scriptJson 内、旧数据缺省空值，parseScript 归一为字符串，服务端 genCharacterRow 加同名可选字段——生成剧本时不许填、只承接手填落库）；分镜页人物详情面板语气基调下方新增「身高锚点」input（id sb-char-height-anchor-N、带大白话说明与示例 placeholder），走既有 charEdits 编辑态（charBaseOf / charRowDirty / doCharSync stillDirty 均带此字段，改了亮「已改」），点「确认并同步到分镜提示词」经 StepThree syncCharBasics 写回 characterRows（changedNames 与同步成功回执字段清单同步带上）；不进 charPending 待确认深存（字段形状不动，刷新未同步会丢、与本版范围一致如实写明）；只读态面板有值时多一行展示。拼装落点只有一处：buildH3TextForGroup 的 subject_definitions——该人物行 heightAnchor trim 后有值才在定义句（造型句 + 音色句之后）末尾原样追加（不加字、不改字、不补标点），空值定义句与改前一字相同、绝不编造；grep 全出口确认 Seedance 三版 / 通用版 / Markdown / AI 清单 / 导出均不读 heightAnchor。【2·summary】两版每镜 summary 末尾恒加「全片人物相对身高、左右站位与光线方向保持不变。」（有人物与空镜两种文案同口径）。【3·retention】每人保留行改「{造型头}保持不变，相对身高与体型保持不变，只有表情、动作与朝向随剧情改变。」（行内已有同句不重复加的守卫在位）；有人物 / 参考图行且有场景名时补一行场景保留行「{场景名}（本镜头场景）: fully_preserved - 场景布置保持不变，光线方向保持不变。」（任一行已有该句不重复加；无人镜头兜底行本身已写「场景与光线保持一致」同义、不叠加）。【4·detailed_description 逐拍（两版同口径，句序全片统一：承接句 → 停顿句 → 机位句 → 尺度锁句 → 平视机位句 → 画面句 → 末帧 / 结束姿态句 → 音效句 → 台词句）】(a) 尺度锁：本拍在场（lensScreenCasts inclusive）≥2 人且景别非特写家族（大特写 / 特写 / 近景 / 中近景，景别判定与 h3CameraSentence 同源 H3_SCALE_WORDS）时，机位句后带固定全文 H3_SCALE_LOCK「参考图只用于锁定脸型、发型与服装，不用于决定身高与身材比例；各人相对身高与体型全片保持不变；同框站立时双脚站在同一地面上，不垫高、不错位站立，不因机位变化改变相对身高。」全片逐字复用；单人拍与特写 / 近景拍不带。(b) 承接句：第 2 拍起，取上一拍 splitVisualFinal 的末帧文本经 h3FixVisualText 同套提炼（站位 / 站坐 / 朝向 / 手持道具 / 动作落点都在这段原文里、光向由开场场景句与 summary 全片句承担不另编），拼「承接上一镜结尾：{末帧文本}。」+「先停顿约半秒，再开始本镜的主要动作。」置于本拍最前；上一拍无可用文本整组不写、绝不编造。(c) 结束姿态：原文有「末帧」走既有「最后停在…」句；没有末帧句且末帧片段（无标记时 = 画面最后一小段）不含停住类词（H3_HOLD_WORDS：停住 / 站定 / 坐定 / 定格 / 落下 / 看向 等）时才补一句通用停住句（有人物「本镜动作在此停住，人物保持结束姿态。」/ 无人物「画面在此停住。」），只说停住、不新增动作 / 道具 / 位置；本拍无画面文本不补。(d) 平视机位：多人且景别 ∈ 全景 / 中全景 / 中景、原文未指定仰拍 / 俯拍（仰拍 / 俯拍 / 仰视 / 俯视 / 仰角 / 俯角均算已指定）时在尺度锁句后加「镜头为平视机位。」；原机位句一字不动，近景 / 特写不加。(e) 台词跨切标记：全仓拼装代码里没有 <scenetrans> / <cutoff> 的既有规范（仅用户上传的 H3 规范资料里有此格式），且节拍数据里没有「一句台词跨切」的现成判定字段——按派工口径不自创新标记格式，本版未做、在回执中写明。(f) 红线：不写「首帧等于上一镜末帧」类无图承诺、不新增 <Picture N> 编号。【不动】任何图片与参考图、Seedance 三版、通用版、分镜结构、剧本、台词原文、镜数、时间码、运镜枚举、六段顺序与既有 H3 格式、其他页面；未替用户填任何人物数据（项目 46 锚点值留空待主代理后续处理）；封面记录 id 43 未动；不自动生图；存量数据零改写。【删除清单】零删除。基线升 v6.12（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 「MiniMax H3 两版拼装」规则补 ⑧段、DATA-PLAN 本条）。【沙箱证据】见本版回执（bun 函数级断言 + 沙箱探针）。真机待核：用户在正式工作台打开项目 46 分镜页，给某人填身高锚点、点确认同步后展开 H3 两版核对定义句末尾；再通读一镜 H3 核对尺度锁句、承接句与平视机位。",
   },
