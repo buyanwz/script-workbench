@@ -175,6 +175,14 @@ export interface CharacterRow {
    * 用版 + 导出）都从 characterRows 现算、自动跟随。
    */
   gender?: "男" | "女" | "";
+  /**
+   * v6.12 身高锚点（可选，一句话，用户在分镜页人物表面板里亲手
+   * 填，如「站立同框时头顶约到 B 的肩膀」）：只进 MiniMax H3 两
+   * 版的 subject_definitions——定义句末尾原样追加，有值才加、
+   * 空值时定义句与原来一字相同，任何拼装都不得编造。Seedance
+   * 三版、通用版、导出一律不引用这一栏。旧数据缺省 = 空值。
+   */
+  heightAnchor?: string;
 }
 
 /**
@@ -693,6 +701,9 @@ export function parseScript(json: string | null): ScriptData | null {
         r.tone = asStr(r.tone);
         // v5.30 性别单独字段：只认「男 / 女」，其余一律归未指定。
         r.gender = r.gender === "男" || r.gender === "女" ? r.gender : "";
+        // v6.12 身高锚点：只归一为字符串（缺失 / 非字符串归空串，
+        // 与未填同义；只有 H3 拼装读它，其余出口不引用）。
+        r.heightAnchor = asStr(r.heightAnchor);
       }
     }
     // v5.49 人物待确认草稿归一：形状不对的记录整条丢弃（按无待确
@@ -5438,6 +5449,29 @@ export function buildLensPackageText(
 // v5.91 起 10–15 秒版多一条：同一个动作没做完不切镜（动作链整
 // 段同进同出，见 actionUnits 上方说明），且逐镜正文开场带切镜
 // 规则一句；按剧情版分组与文本逐字不变。
+// v6.12 起两版再加「身高与衔接」纯文字口径（用户定：人物资产图
+// 已生成好、图不能改，只能改提示词文字；定版图 / 首帧图路线不
+// 做）：①人物行 heightAnchor（身高锚点，用户手填）有值时原样
+// 追加到该人物 H3 定义句末尾，空值定义句一字不变；②summary
+// 末尾恒加「全片人物相对身高、左右站位与光线方向保持不变。」；
+// ③retention 每人保留行加「相对身高与体型保持不变」、另加一
+// 行场景保留行带「光线方向保持不变」（已有同义句不重复加）；
+// ④detailed_description 逐拍新规（两版同口径，句序全片统一：
+// 承接句 → 停顿句 → 机位句 → 尺度锁句 → 平视机位句 → 画面句
+// → 末帧 / 结束姿态句 → 音效句 → 台词句）：多人同框且非特写 /
+// 近景的拍在机位句后带一段固定尺度锁句（H3_SCALE_LOCK，全片
+// 逐字复用同一句）；第 2 拍起带承接句——只复述上一拍末帧状态
+// （splitVisualFinal 的末帧文本经同一套标签提炼，缺数据就少
+// 写、绝不编造），其后接「先停顿约半秒，再开始本镜的主要动
+// 作。」再出本拍内容与对白；每拍结尾确保有停得住的结束姿态
+// （原文有「末帧」走既有末帧句、末帧片段本身带停住类词视为
+// 已有，都没有时才补一句通用停住句，不新增动作 / 道具 / 位
+// 置）；多人全身 / 中景类拍（全景 / 中全景 / 中景）原文未指定
+// 仰拍 / 俯拍时加「镜头为平视机位。」一句、已指定的机位句一
+// 字不动，近景 / 特写不加任何身高要求句。跨切标记：本拼装此
+// 前没有 <scenetrans> / <cutoff> 的既有规范，本版不自创新格
+// 式（见 v6.12 回执说明）；不写「首帧等于上一镜末帧」类承诺、
+// 不新增参考图编号。
 // 重分组只影响这一节的 H3 输出，不动已确认的分镜结构、不写回
 // 任何数据。旧 20–30 秒分组（h3DurationGroups）H3 不再使用，
 // 只剩 Seedance 每镜 20–30 秒版继续用同一函数。
@@ -5742,6 +5776,42 @@ const H3_SCALE_WORDS = [
   "中景",
 ] as const;
 
+/** v6.12 尺度锁句（固定全文）：多人同框且非特写 / 近景的拍在机
+ * 位句后原样带这一句，全片每个符合条件的镜头一字不改地复用。 */
+const H3_SCALE_LOCK =
+  "参考图只用于锁定脸型、发型与服装，不用于决定身高与身材比例；各人相对身高与体型全片保持不变；同框站立时双脚站在同一地面上，不垫高、不错位站立，不因机位变化改变相对身高。";
+
+/** v6.12 近景家族（特写 / 近景类）：这些景别的拍不加尺度锁句、
+ * 不加任何身高要求句（中近景含「近景」、按近景家族处理）。 */
+const H3_CLOSE_SCALES: ReadonlySet<string> = new Set([
+  "大特写",
+  "特写",
+  "近景",
+  "中近景",
+]);
+
+/** v6.12 停得住的结束状态词：本拍末帧片段里带任一词，视为结尾
+ * 已有可停住的结束姿态，不再补通用停住句。 */
+const H3_HOLD_WORDS = [
+  "停住",
+  "停在",
+  "停下",
+  "站定",
+  "站住",
+  "坐定",
+  "定格",
+  "落下",
+  "垂下",
+  "放下",
+  "看向",
+  "望向",
+  "盯着",
+  "静止",
+  "不动",
+  "收住",
+  "顿住",
+];
+
 /** 本拍机位句：景别 + 英文运镜枚举 + 中文运镜说明（一段一句）。 */
 function h3CameraSentence(beat: Beat): string {
   const v = beat.visual ?? "";
@@ -6034,7 +6104,52 @@ export function buildH3TextForGroup(
   g.beats.forEach((beat, bi) => {
     const beatCast = screenCasts[bi] ?? { confirmed: [], inclusive: [] };
     const sentences: string[] = [];
+    // v6.12 句序（全片统一）：承接句 → 停顿句 → 机位句 → 尺度锁
+    // 句 → 平视机位句 → 画面句 → 末帧 / 结束姿态句 → 音效句 →
+    // 台词句。
+    const visualText = beat.visual ?? "";
+    const scale =
+      H3_SCALE_WORDS.find((s) => visualText.includes(s)) ?? "中景";
+    const multiPerson = beatCast.inclusive.length >= 2;
+    // 承接句（第 2 拍起）：只复述上一拍的末帧状态（splitVisual-
+    // Final 的末帧文本经同一套标签提炼——站位 / 站坐 / 朝向 /
+    // 道具 / 动作落点都在这段原文里），上一拍没有可用文本就整
+    // 句不写、绝不编造；光向由开场场景句与 summary 的全片句承
+    // 担，不在承接句里另编。
+    if (bi >= 1) {
+      const prevBeat = g.beats[bi - 1];
+      const prevCast = screenCasts[bi - 1] ?? {
+        confirmed: [],
+        inclusive: [],
+      };
+      const prevFinal = prevBeat
+        ? splitVisualFinal(prevBeat.visual ?? "").finalFrame
+        : "";
+      const prevFinalFixed = prevFinal
+        ? h3FixVisualText(prevFinal, prevCast, descriptors, tagOf).replace(
+            /[。；;\s]+$/,
+            "",
+          )
+        : "";
+      if (prevFinalFixed) {
+        sentences.push(`承接上一镜结尾：${prevFinalFixed}。`);
+        sentences.push("先停顿约半秒，再开始本镜的主要动作。");
+      }
+    }
     sentences.push(h3CameraSentence(beat));
+    // 尺度锁句：多人同框且非特写 / 近景的拍才带，固定全文复用。
+    if (multiPerson && !H3_CLOSE_SCALES.has(scale)) {
+      sentences.push(H3_SCALE_LOCK);
+    }
+    // 平视机位：多人全身 / 中景类拍（全景 / 中全景 / 中景）且原
+    // 文未指定仰拍 / 俯拍时才加一句；已指定的机位句一字不动。
+    if (
+      multiPerson &&
+      (scale === "全景" || scale === "中全景" || scale === "中景") &&
+      !/仰拍|俯拍|仰视|俯视|仰角|俯角/.test(visualText)
+    ) {
+      sentences.push("镜头为平视机位。");
+    }
     const { content, finalFrame } = splitVisualFinal(beat.visual ?? "");
     const fixedContent = h3FixVisualText(
       content,
@@ -6043,14 +6158,32 @@ export function buildH3TextForGroup(
       tagOf,
     ).replace(/[。；;\s]+$/, "");
     if (fixedContent) sentences.push(`${fixedContent}。`);
-    if ((beat.visual ?? "").includes("末帧") && finalFrame && finalFrame !== content) {
-      const fixedFinal = h3FixVisualText(
-        finalFrame,
-        beatCast,
-        descriptors,
-        tagOf,
-      ).replace(/[。；;\s]+$/, "");
-      if (fixedFinal) sentences.push(`最后停在${fixedFinal}。`);
+    const fixedFinal =
+      finalFrame && finalFrame !== content
+        ? h3FixVisualText(finalFrame, beatCast, descriptors, tagOf).replace(
+            /[。；;\s]+$/,
+            "",
+          )
+        : "";
+    let endPoseWritten = false;
+    if ((beat.visual ?? "").includes("末帧") && fixedFinal) {
+      sentences.push(`最后停在${fixedFinal}。`);
+      endPoseWritten = true;
+    }
+    // 结束姿态兜底：没有末帧句、且末帧片段（无「末帧」标记时 =
+    // 画面最后一小段）里也没有停得住的状态词时，才补一句通用
+    // 停住句——只说停住、不新增动作 / 道具 / 位置；本拍完全没
+    // 有画面文本时不补（无从谈起结束姿态）。
+    if (!endPoseWritten) {
+      const tailText = fixedFinal || fixedContent;
+      const hasHold = H3_HOLD_WORDS.some((w) => tailText.includes(w));
+      if (!hasHold && tailText) {
+        sentences.push(
+          beatCast.inclusive.length > 0
+            ? "本镜动作在此停住，人物保持结束姿态。"
+            : "画面在此停住。",
+        );
+      }
     }
     const sfxParts = h3SfxParts(beat.sfx);
     if (sfxParts.length > 0) {
@@ -6145,15 +6278,22 @@ export function buildH3TextForGroup(
         : `<Subject ${i + 1}> 是${desc}。`;
     const voice = (info?.voice ?? "").trim();
     if (voice) lineText += `音色是${voice}。`;
+    // v6.12 身高锚点：人物行手填值有值才在定义句末尾原样追加
+    // （不加字、不改字、不补标点），空值时定义句与原来一字相同。
+    const anchor = (row?.heightAnchor ?? "").trim();
+    if (anchor) lineText += anchor;
     defLines.push(lineText);
   });
 
   // ---- summary ----------------------------------------------------------
   const tagsAll = cast.map((e) => tagOf.get(e.code)).filter(Boolean);
+  // v6.12：summary 末尾恒加全片身高 / 站位 / 光向不变一句（两
+  // 种镜头同口径）。
   const summary =
-    cast.length > 0
+    (cast.length > 0
       ? `[reference generation] 把本镜头「${g.title}」拍成一段约 ${g.duration.toFixed(1)} 秒的视频：${tagsAll.join("、")}在${sceneName || "本场景"}推进这一段剧情，人物外貌、发型与服装和参考图保持一致，台词逐字照原文说出，不烧录字幕。`
-      : `[reference generation] 把本镜头「${g.title}」拍成一段约 ${g.duration.toFixed(1)} 秒的视频：${sceneName || "本场景"}的空镜与环境，镜头语言和全片保持一致，不烧录字幕。`;
+      : `[reference generation] 把本镜头「${g.title}」拍成一段约 ${g.duration.toFixed(1)} 秒的视频：${sceneName || "本场景"}的空镜与环境，镜头语言和全片保持一致，不烧录字幕。`) +
+    "全片人物相对身高、左右站位与光线方向保持不变。";
 
   // ---- retention_analysis ----------------------------------------------
   const retLines: string[] = [];
@@ -6171,8 +6311,13 @@ export function buildH3TextForGroup(
       shots.length > 0
         ? ` (appears in ${shots.map((n) => `[Shot ${n}]`).join(", ")})`
         : "";
+    // v6.12：每人保留行加「相对身高与体型保持不变」（行里已有
+    // 这句时不重复加）。
+    const heightClause = `${lookHead}保持不变`.includes("相对身高与体型")
+      ? ""
+      : "，相对身高与体型保持不变";
     retLines.push(
-      `<Subject ${i + 1}>${appearsText}: fully_preserved - ${lookHead}保持不变，只有表情、动作与朝向随剧情改变。`,
+      `<Subject ${i + 1}>${appearsText}: fully_preserved - ${lookHead}保持不变${heightClause}，只有表情、动作与朝向随剧情改变。`,
     );
   });
   cast.forEach((e, i) => {
@@ -6182,6 +6327,19 @@ export function buildH3TextForGroup(
       `<Picture ${pic}> (人物 <Subject ${i + 1}> 的参考图): fully_preserved - <Subject ${i + 1}> 的外貌、发型与服装以这张参考图为准。`,
     );
   });
+  // v6.12 场景保留行：有场景名且已有人物 / 参考图保留行时补一行
+  // 场景保留（带「光线方向保持不变」）；已有任何一行写了这句就
+  // 不重复加。无人物镜头的兜底行本身已写「场景与光线保持一
+  // 致」（同义），不再叠加场景行。
+  if (
+    sceneName &&
+    retLines.length > 0 &&
+    !retLines.some((l) => l.includes("光线方向保持不变"))
+  ) {
+    retLines.push(
+      `${sceneName}（本镜头场景）: fully_preserved - 场景布置保持不变，光线方向保持不变。`,
+    );
+  }
   if (retLines.length === 0) {
     retLines.push("本镜头无人物主体需要保留，场景与光线保持一致。");
   }

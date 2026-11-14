@@ -34,7 +34,8 @@
 
 import { spawn, execFile } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -101,6 +102,11 @@ let mainWindow: BrowserWindow | null = null;
 let chatView: WebContentsView | null = null;
 let dividerView: WebContentsView | null = null;
 let workView: WebContentsView | null = null;
+// 管理员锁屏视图：启动后盖在窗口最上层的全窗口视图（/exe-admin-lock/），
+// 工作台/聊天/分界三个视图在解锁前不加载任何 URL；解锁后撤掉它再加载
+// 三个视图。shellUnlocked 防重复触发（设密码/输密码两个入口都走它）。
+let lockView: WebContentsView | null = null;
+let shellUnlocked = false;
 let chatExpanded = false;
 // 当前展开宽度：启动时从本机记忆文件读回（读不到就用默认 380px），
 // 拖拽时更新并立即写回文件；收起/展开切换不改它，窗口 resize 也不改它。
@@ -136,6 +142,7 @@ function resolvePreloadPath(fileName: string): string {
 }
 const PRELOAD_PATH = resolvePreloadPath("preload.cjs");
 const CHAT_PRELOAD_PATH = resolvePreloadPath("preload-chat.cjs");
+const LOCK_PRELOAD_PATH = resolvePreloadPath("preload-lock.cjs");
 
 // 左视图展开时加载的真正 Muse 网页（直接导航，不是 iframe）。
 const MUSE_WEB_URL = "https://muse.ai";
@@ -312,6 +319,114 @@ function saveChatExpandedWidth(width: number): void {
   }
 }
 
+// ── 本机管理员锁（只锁这台电脑上的这份软件；真正“全网只有你能用”要等
+// 服务器核验，见 p7 一期设计，本次不做服务器、不做邀请码、不做同步）──
+// 锁文件在 userData 目录下的 admin-lock.json（不放 DATA_DIR，别让它进
+// 项目备份），内容只有版本号、算法名、盐与哈希，没有密码明文；
+// 写文件尽量 0600 权限。密码与哈希永不进日志。
+const ADMIN_LOCK_MIN_PASSWORD_LENGTH = 6;
+const ADMIN_LOCK_UNLOCK_DELAY_MS = 600;
+
+interface AdminLockFile {
+  version: 1;
+  algo: "scrypt";
+  salt: string;
+  hash: string;
+  createdAt: string;
+}
+
+function adminLockFilePath(): string {
+  return join(app.getPath("userData"), "admin-lock.json");
+}
+
+function readAdminLock(): AdminLockFile | null {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(adminLockFilePath(), "utf-8"),
+    ) as Partial<AdminLockFile>;
+    if (
+      parsed.version !== 1 ||
+      parsed.algo !== "scrypt" ||
+      typeof parsed.salt !== "string" ||
+      typeof parsed.hash !== "string"
+    ) {
+      return null;
+    }
+    return parsed as AdminLockFile;
+  } catch {
+    return null;
+  }
+}
+
+function hashAdminPassword(password: string, saltHex: string): Buffer {
+  return scryptSync(password, Buffer.from(saltHex, "hex"), 64, {
+    N: 16384,
+    r: 8,
+    p: 1,
+  });
+}
+
+function verifyAdminPassword(password: string, lock: AdminLockFile): boolean {
+  try {
+    const expected = Buffer.from(lock.hash, "hex");
+    const actual = hashAdminPassword(password, lock.salt);
+    if (expected.length !== actual.length) return false;
+    return timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
+}
+
+type AdminLockResult = { ok: boolean; error?: string };
+
+/** 首次设密码：仅当未设锁时可设；密码至少 6 位。成功写锁文件。 */
+function setAdminPassword(password: string): AdminLockResult {
+  if (readAdminLock()) {
+    return { ok: false, error: "已经设过密码了，请直接登录。" };
+  }
+  if (typeof password !== "string" || password.length < ADMIN_LOCK_MIN_PASSWORD_LENGTH) {
+    return { ok: false, error: "密码至少 6 位，再想一个长一点的。" };
+  }
+  const salt = randomBytes(16).toString("hex");
+  const hash = hashAdminPassword(password, salt).toString("hex");
+  const file: AdminLockFile = {
+    version: 1,
+    algo: "scrypt",
+    salt,
+    hash,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    const path = adminLockFilePath();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(file), { encoding: "utf-8", mode: 0o600 });
+    try {
+      chmodSync(path, 0o600);
+    } catch {
+      // 已有文件时写模式不生效、chmod 在个别系统上也可能失败：不挡设密码，
+      // 锁文件本身不含明文，权限只是纵深。
+    }
+  } catch (err) {
+    log("failed to save admin lock:", err);
+    return { ok: false, error: "没能设好密码，再试一次。" };
+  }
+  log("admin lock set");
+  return { ok: true };
+}
+
+/** 输密码解锁：验对返回 ok；验错先等约 600ms 再回（防猜）。 */
+async function unlockAdmin(password: string): Promise<AdminLockResult> {
+  const lock = readAdminLock();
+  if (!lock) {
+    return { ok: false, error: "还没设密码，请先设定一个密码。" };
+  }
+  if (typeof password !== "string" || !verifyAdminPassword(password, lock)) {
+    await new Promise((r) => setTimeout(r, ADMIN_LOCK_UNLOCK_DELAY_MS));
+    return { ok: false, error: "密码不对，再试一次。" };
+  }
+  return { ok: true };
+}
+
 /** 按当前展开状态排三个视图：左聊天栏 + 8px 分界条 + 右工作台，窗口
  *  resize 时重排。展开时分界条贴在左视图右缘，工作台从分界条右侧
  *  开始；收起时分界条宽 0（不可见、点不中），工作台从 36px 窄边处开始。 */
@@ -333,6 +448,10 @@ function layoutViews(): void {
     width: Math.max(0, bounds.width - chatWidth - dividerWidth),
     height: bounds.height,
   });
+  // 锁屏视图在时盖满整个窗口（在最上层，窗口 resize 也重排它）。
+  if (lockView && !lockView.webContents.isDestroyed()) {
+    lockView.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
+  }
 }
 
 function setChatExpanded(expanded: boolean): { expanded: boolean } {
@@ -405,12 +524,58 @@ function createShellWindow(width: number, height: number): void {
     chatView = null;
     dividerView = null;
     workView = null;
+    lockView = null;
+    shellUnlocked = false;
   });
   layoutViews();
 }
 
-async function createWindow(): Promise<void> {
-  createShellWindow(1280, 860);
+/** 建锁屏视图并盖在窗口最上层：启动后先盖它，工作台/聊天/分界三个
+ *  视图在解锁前不加载任何 URL。锁屏页用最小 preload（preload-lock），
+ *  只拿本机锁四个接口。 */
+function createLockView(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  lockView = new WebContentsView({
+    webPreferences: {
+      preload: LOCK_PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  mainWindow.contentView.addChildView(lockView);
+  layoutViews();
+  lockView.webContents.loadURL(`http://127.0.0.1:${serverPort}/exe-admin-lock/`).catch((err: unknown) => {
+    log("lock view failed to load:", err instanceof Error ? err.message : err);
+  });
+}
+
+/** 解锁成功后由验过密码的 IPC 处理器调用（不另设 admin-lock-done 接口）：
+ *  撤掉锁屏视图、按原有顺序加载三个视图 URL。shellUnlocked 守卫防重复触发。 */
+async function unlockShell(): Promise<void> {
+  if (shellUnlocked) return;
+  shellUnlocked = true;
+  if (lockView) {
+    const view = lockView;
+    lockView = null;
+    try {
+      mainWindow?.contentView.removeChildView(view);
+    } catch {
+      // 窗口已关，无事可做。
+    }
+    // 不再持有引用，视图随 GC 回收（WebContentsView 没有 destroy 方法）。
+  }
+  try {
+    await loadMainViews();
+  } catch (err) {
+    // 三视图加载失败（如服务刚好掉了）：只记日志，锁已撤，不再挡住窗口；
+    // 服务掉了的兜底仍走原有的 showServerDownPage 路径。
+    log("failed to load main views after unlock:", err instanceof Error ? err.message : err);
+  }
+}
+
+/** 按原有顺序加载三个视图 URL（工作台 + 收起态聊天窄边页 + 分界条）。 */
+async function loadMainViews(): Promise<void> {
   if (!workView || !chatView || !dividerView) return;
   await workView.webContents.loadURL(`http://127.0.0.1:${serverPort}/`);
   await chatView.webContents.loadURL(chatTargetUrl(false));
@@ -703,7 +868,9 @@ async function boot(): Promise<void> {
     createErrorWindow();
     return;
   }
-  await createWindow();
+  // 服务健康后先建壳窗口、再盖全窗口锁屏；三个视图等解锁成功后再加载。
+  createShellWindow(1280, 860);
+  createLockView();
 }
 
 ipcMain.handle("restart-service", async () => {
@@ -723,6 +890,24 @@ ipcMain.handle("chat-get-width", () => ({
   expanded: chatExpanded,
   width: chatExpandedWidth,
 }));
+
+// 本机管理员锁（锁屏视图经最小 preload 调用；解锁过渡必须由验过密码的
+// 处理器直接驱动——设密码/输密码成功就在这里撤锁屏、加载三视图，
+// 页面只拿 {ok} 做界面反馈，不另设 admin-lock-done 接口）。
+ipcMain.handle("admin-lock-state", () => ({ set: readAdminLock() !== null }));
+ipcMain.handle("admin-set-password", async (_event, password: unknown) => {
+  const result = setAdminPassword(typeof password === "string" ? password : "");
+  // 先把 {ok} 回给锁屏页（让它显示“正在进入…”），再撤锁屏、加载三视图：
+  // 若先撤视图再回包，渲染进程已销毁、回包永远到不了页面。
+  if (result.ok) void unlockShell();
+  return result;
+});
+ipcMain.handle("admin-unlock", async (_event, password: unknown) => {
+  const result = await unlockAdmin(typeof password === "string" ? password : "");
+  if (result.ok) void unlockShell();
+  return result;
+});
+ipcMain.handle("admin-lock-file-path", () => ({ path: adminLockFilePath() }));
 
 // 自动更新（v1.1.0）：设置页手动检查；结果回设置页显示，下载完由
 // update-downloaded 事件弹原生提示（见 setupAutoUpdater）。

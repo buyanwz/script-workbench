@@ -1439,6 +1439,13 @@ tone: z.string().describe("语气基调"),
 // v5.30 性别单独字段（男 / 女；分镜页人物表下拉改它、同步时换
 // 造型 / 音色里的性别词）。可选：存量稿与旧调用方都没有这字段。
 gender: z.enum(["男", "女", ""]).optional().describe("性别：男 / 女，不确定留空"),
+// v6.12 身高锚点（用户在分镜页人物表手填的一句话，只进 H3 定
+// 义句）：可选，生成剧本时不要填写、留空；存量稿没有这字段。
+heightAnchor: z
+.string()
+.max(500)
+.optional()
+.describe("身高锚点：用户手填，生成时留空不填"),
 });
 
 const genOverlay = z.object({

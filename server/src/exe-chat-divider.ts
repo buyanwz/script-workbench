@@ -5,7 +5,7 @@
 // 调 setChatWidth（钳制 280–640px 与记忆都在主进程做，与原来一致）；
 // 双击分界条切换收起/展开（解决页内无收起按钮的问题）。
 // 样式沿用 1.1.6 手柄：8px 热区、ew-resize 光标、悬停/拖拽时金色
-// 高亮（#f7c948）、常显 2px 抓手竖条。
+// 高亮（黄铜 #C6A15B，与 #111313 窄边栏同色）、常显 2px 抓手竖条。
 // 拖拽用 screenX 差值算移动量：分界视图会跟着宽度一起移动，视图内
 // 的 clientX 在拖动中几乎不变，拿它算宽度会算错；screenX 是屏幕
 // 绝对坐标，窗口不动时差值即鼠标真实移动量。screenX 不变的极少数
@@ -24,7 +24,7 @@ export const EXE_CHAT_DIVIDER_HTML = `<!doctype html>
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
 #divider { position: fixed; inset: 0; cursor: ew-resize; background: transparent; border-left: 1px solid #e5dcc4; touch-action: none; }
-#divider:hover, #divider.dragging { background: #f7c948; border-left-color: #f7c948; }
+#divider:hover, #divider.dragging { background: #C6A15B; border-left-color: #C6A15B; }
 #divider::after { content: ""; position: absolute; top: 50%; left: 3px; width: 2px; height: 48px; margin-top: -24px; background: #c9bfa4; border-radius: 1px; }
 #divider:hover::after, #divider.dragging::after { background: #1f2a44; }
 </style>

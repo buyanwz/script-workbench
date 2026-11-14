@@ -5,6 +5,7 @@
 //   POST /api/actions/:name    178 个服务端动作（Actions 对象遍历 key 自动注册）
 //   GET  /exe-chat-collapsed/  exe 专属窄边页（左视图收起时加载，点一下展开到 muse.ai）
 //   GET  /exe-chat-divider/    exe 专属分界条页（8px 分界视图加载，拖拽调宽、双击收起/展开）
+//   GET  /exe-admin-lock/      exe 专属管理员锁屏页（启动后盖在最上层的全窗口视图加载）
 //   GET  /exe-chat/            exe 专属左侧聊天页（保留休眠，左视图不再默认加载）
 //   GET  /api/chat/health      聊天后端自述（模型名、视觉是否启用，不含 Key）
 //   POST /api/chat/message     聊天对话（dryRun 不调用模型、不计费）
@@ -36,6 +37,7 @@ import {
   handleExeChatMessage,
   handleExeChatWriteback,
 } from "./server/src/exe-chat";
+import { EXE_ADMIN_LOCK_HTML } from "./server/src/exe-admin-lock";
 import { EXE_CHAT_COLLAPSED_HTML } from "./server/src/exe-chat-collapsed";
 import { EXE_CHAT_DIVIDER_HTML } from "./server/src/exe-chat-divider";
 import {
@@ -208,7 +210,16 @@ const server = Bun.serve({
 
     // exe 专属左侧聊天路由（移植层，不计入 actions 数，不走动作注册表）。
     // 窄边页：左视图收起时的本地页面；分界条页：8px 分界视图的本地页面；
+    // 锁屏页：启动后盖在最上层的全窗口视图加载的本地页面；
     // 其余聊天/解剖路由保留休眠不断链。
+    if (
+      req.method === "GET" &&
+      (pathname === "/exe-admin-lock" || pathname === "/exe-admin-lock/")
+    ) {
+      return new Response(EXE_ADMIN_LOCK_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
     if (
       req.method === "GET" &&
       (pathname === "/exe-chat-collapsed" || pathname === "/exe-chat-collapsed/")

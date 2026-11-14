@@ -1,6 +1,6 @@
 {
   "name": "hatch-ts-space-space-4",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "main": "electron/dist/main.cjs",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "build:client": "bun ./client/build.mjs",
     "start": "bun server.ts",
     "electron": "bun run electron:build && bun x electron electron/dist/main.cjs",
-    "electron:build": "bun build electron/main.ts --format=cjs --target=node --external electron --outfile=electron/dist/main.cjs && bun build electron/preload.ts --format=cjs --target=node --external electron --outfile=electron/dist/preload.cjs && bun build electron/preload-chat.ts --format=cjs --target=node --external electron --outfile=electron/dist/preload-chat.cjs",
+    "electron:build": "bun build electron/main.ts --format=cjs --target=node --external electron --outfile=electron/dist/main.cjs && bun build electron/preload.ts --format=cjs --target=node --external electron --outfile=electron/dist/preload.cjs && bun build electron/preload-chat.ts --format=cjs --target=node --external electron --outfile=electron/dist/preload-chat.cjs && bun build electron/preload-lock.ts --format=cjs --target=node --external electron --outfile=electron/dist/preload-lock.cjs",
     "build:server-exe": "bun build --compile ./server.ts --outfile=./resources/script-workbench-server.exe"
   },
   "dependencies": {

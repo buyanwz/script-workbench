@@ -9328,6 +9328,8 @@ function StepThree({
       voice: string;
       gender: string;
       tone: string;
+      // v6.12 身高锚点（只进 H3 定义句），随同步一起写回人物行。
+      heightAnchor: string;
     }[],
     // v5.49：ScriptDocument 递进来的待确认草稿全量快照（深存的页
     // 面权威副本）。确认（转正）时随整份稿一起落盘：被确认的人记
@@ -9360,10 +9362,18 @@ function StepThree({
         look !== r.look ||
         voice !== r.voice ||
         target !== baseline ||
-        e.tone !== r.tone
+        e.tone !== r.tone ||
+        e.heightAnchor !== (r.heightAnchor ?? "")
       )
         changedNames.push(r.name);
-      return { ...r, look, voice, tone: e.tone, gender: target };
+      return {
+        ...r,
+        look,
+        voice,
+        tone: e.tone,
+        gender: target,
+        heightAnchor: e.heightAnchor,
+      };
     });
     const voiceMap = { ...(scriptDraft.voiceMap ?? {}) };
     for (const e of edits) {
@@ -9422,7 +9432,7 @@ function StepThree({
     setScriptDraft(next);
     return {
       ok: true,
-      message: `已同步：${(changedNames.length > 0 ? changedNames : edits.map((e) => e.name)).join("、")} 的造型 / 性别 / 音色 / 语气基调已存回人物表，全部提示词版本已按新数据重新生成（四档 Seedance、通用版、导出，以及本页下方「MiniMax H3 提示词（两版）」的按剧情版与每镜 10–15 秒版）——到下方 Seedance 区或 H3 区里点「复制」粘出来就是新版。`,
+      message: `已同步：${(changedNames.length > 0 ? changedNames : edits.map((e) => e.name)).join("、")} 的造型 / 性别 / 音色 / 语气基调 / 身高锚点已存回人物表，全部提示词版本已按新数据重新生成（四档 Seedance、通用版、导出，以及本页下方「MiniMax H3 提示词（两版）」的按剧情版与每镜 10–15 秒版；身高锚点只进 H3 两版的定义句）——到下方 Seedance 区或 H3 区里点「复制」粘出来就是新版。`,
     };
   };
 
@@ -12533,7 +12543,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v6.11";
+const WORKSPACE_VERSION = "v6.12";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12545,9 +12555,15 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
-    version: "v6.11",
+    version: "v6.12",
     date: "2026-11-13",
     current: true,
+    text: "这一版只改 MiniMax H3 提示词的拼装文字，不动任何图片、不动剧本和台词，专治两个老毛病：生成的视频里人物身高一会儿高一会儿矮、镜头之间接不上。第一，分镜页的人物面板里多了一个「身高锚点」栏（在语气基调下面），一句话，你自己填，比如「站立同框时头顶约到 B 的肩膀」；填了点「确认并同步到分镜提示词」之后，这句话会原样出现在 H3 两版里这个人的定义句末尾，帮模型记住谁高谁矮；不填就什么都不加，和以前一字一样。Seedance 三版、通用版和导出都不带这一栏，只有 H3 用。第二，H3 两版的每段提示词自动多带了几句固定话：开头总结末尾加一句全片身高、站位、光线不变；保留说明里每人多写相对身高与体型不变、场景多写光线方向不变；正文里多人同框的镜头（不是特写、近景的）会带一段固定的身高锁定说明，全片每一镜都一模一样；从第二个镜头起，每镜开头先复述上一镜结尾时人物的状态、停顿半秒再开始本镜动作，每镜结尾也都会留一个停得住的姿势，方便下一镜接上；多人全身或中景的镜头、原分镜没写仰拍俯拍的，会写明平视机位。有一处要如实说：台词跨镜头接着说时的专门跨切标记，工作台原来的拼装里没有现成规矩，这次没有自创，等你定了格式再加。项目 46 里各人的身高锚点我没有替你填，你打开人物面板自己填、点同步就能在 H3 区看到。",
+    features: "H3 身高与衔接纯文字拼装（v6.12，问题 #111312 用户点选「改工作台的 H3 拼装」——人物资产图已生成好、图不能改，只改提示词文字；定版图 / 首帧图 / 末帧图路线本版不做；客户端 scriptlib.ts（H3 拼装节 + CharacterRow + parseScript）+ App.tsx（人物面板新栏 + 同步链路 + 版本 / 日志）+ 服务端 actions.ts 仅 genCharacterRow 加可选字段 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【1·身高锚点栏】CharacterRow 新增可选 heightAnchor（scriptJson 内、旧数据缺省空值，parseScript 归一为字符串，服务端 genCharacterRow 加同名可选字段——生成剧本时不许填、只承接手填落库）；分镜页人物详情面板语气基调下方新增「身高锚点」input（id sb-char-height-anchor-N、带大白话说明与示例 placeholder），走既有 charEdits 编辑态（charBaseOf / charRowDirty / doCharSync stillDirty 均带此字段，改了亮「已改」），点「确认并同步到分镜提示词」经 StepThree syncCharBasics 写回 characterRows（changedNames 与同步成功回执字段清单同步带上）；不进 charPending 待确认深存（字段形状不动，刷新未同步会丢、与本版范围一致如实写明）；只读态面板有值时多一行展示。拼装落点只有一处：buildH3TextForGroup 的 subject_definitions——该人物行 heightAnchor trim 后有值才在定义句（造型句 + 音色句之后）末尾原样追加（不加字、不改字、不补标点），空值定义句与改前一字相同、绝不编造；grep 全出口确认 Seedance 三版 / 通用版 / Markdown / AI 清单 / 导出均不读 heightAnchor。【2·summary】两版每镜 summary 末尾恒加「全片人物相对身高、左右站位与光线方向保持不变。」（有人物与空镜两种文案同口径）。【3·retention】每人保留行改「{造型头}保持不变，相对身高与体型保持不变，只有表情、动作与朝向随剧情改变。」（行内已有同句不重复加的守卫在位）；有人物 / 参考图行且有场景名时补一行场景保留行「{场景名}（本镜头场景）: fully_preserved - 场景布置保持不变，光线方向保持不变。」（任一行已有该句不重复加；无人镜头兜底行本身已写「场景与光线保持一致」同义、不叠加）。【4·detailed_description 逐拍（两版同口径，句序全片统一：承接句 → 停顿句 → 机位句 → 尺度锁句 → 平视机位句 → 画面句 → 末帧 / 结束姿态句 → 音效句 → 台词句）】(a) 尺度锁：本拍在场（lensScreenCasts inclusive）≥2 人且景别非特写家族（大特写 / 特写 / 近景 / 中近景，景别判定与 h3CameraSentence 同源 H3_SCALE_WORDS）时，机位句后带固定全文 H3_SCALE_LOCK「参考图只用于锁定脸型、发型与服装，不用于决定身高与身材比例；各人相对身高与体型全片保持不变；同框站立时双脚站在同一地面上，不垫高、不错位站立，不因机位变化改变相对身高。」全片逐字复用；单人拍与特写 / 近景拍不带。(b) 承接句：第 2 拍起，取上一拍 splitVisualFinal 的末帧文本经 h3FixVisualText 同套提炼（站位 / 站坐 / 朝向 / 手持道具 / 动作落点都在这段原文里、光向由开场场景句与 summary 全片句承担不另编），拼「承接上一镜结尾：{末帧文本}。」+「先停顿约半秒，再开始本镜的主要动作。」置于本拍最前；上一拍无可用文本整组不写、绝不编造。(c) 结束姿态：原文有「末帧」走既有「最后停在…」句；没有末帧句且末帧片段（无标记时 = 画面最后一小段）不含停住类词（H3_HOLD_WORDS：停住 / 站定 / 坐定 / 定格 / 落下 / 看向 等）时才补一句通用停住句（有人物「本镜动作在此停住，人物保持结束姿态。」/ 无人物「画面在此停住。」），只说停住、不新增动作 / 道具 / 位置；本拍无画面文本不补。(d) 平视机位：多人且景别 ∈ 全景 / 中全景 / 中景、原文未指定仰拍 / 俯拍（仰拍 / 俯拍 / 仰视 / 俯视 / 仰角 / 俯角均算已指定）时在尺度锁句后加「镜头为平视机位。」；原机位句一字不动，近景 / 特写不加。(e) 台词跨切标记：全仓拼装代码里没有 <scenetrans> / <cutoff> 的既有规范（仅用户上传的 H3 规范资料里有此格式），且节拍数据里没有「一句台词跨切」的现成判定字段——按派工口径不自创新标记格式，本版未做、在回执中写明。(f) 红线：不写「首帧等于上一镜末帧」类无图承诺、不新增 <Picture N> 编号。【不动】任何图片与参考图、Seedance 三版、通用版、分镜结构、剧本、台词原文、镜数、时间码、运镜枚举、六段顺序与既有 H3 格式、其他页面；未替用户填任何人物数据（项目 46 锚点值留空待主代理后续处理）；封面记录 id 43 未动；不自动生图；存量数据零改写。【删除清单】零删除。基线升 v6.12（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 「MiniMax H3 两版拼装」规则补 ⑧段、DATA-PLAN 本条）。【沙箱证据】见本版回执（bun 函数级断言 + 沙箱探针）。真机待核：用户在正式工作台打开项目 46 分镜页，给某人填身高锚点、点确认同步后展开 H3 两版核对定义句末尾；再通读一镜 H3 核对尺度锁句、承接句与平视机位。",
+  },
+  {
+    version: "v6.11",
+    date: "2026-11-13",
     text: "这一版修的就是你报的「点了生图记录上那个蓝色按钮、绿字也显示已存到资产卡，可是在人物资产库里怎么都找不到这张图」。原因查清楚了：图其实真的存进去了，一张没丢——它存进了「B（男未成年）·服装3-蓝白校服」这张卡里；但这张卡之前被你加到了「B」下面当子文件，子文件卡在储存库列表里是不单独出现的，它在「B」里面只露一张代表图，你这次新存进去的图排在它自己卡的后面，界面上没有任何地方能点开看，所以看着就像没存上。以前定的规则（点按钮就存到人物记下来的来源卡）没有错，只是没跟上后来加的「子文件」这套，图存进了一个看不见的抽屉。这次的修法：第一，以后往这种挂在别人下面的子文件卡存图时，图照旧存进它自己卡里，同时自动往它挂靠的那张卡（宿主卡）的图片列表里同步一份、标明是子文件来源——打开宿主卡的展开详情就能看到。第二，你这次已经存进去、正找不到的这张图，已经顺手补同步到了「B」的图片列表里，你现在打开「B」的展开详情就能找到它，不用再重新操作。第三，存完之后记录下面的回执会写清这张卡是子文件、去哪张卡里找，不再只报一个卡名让你自己猜。顺带守好的两个口子：宿主卡上同一个子文件的图有多张时，删掉其中一张不会把那张卡提前放回列表（删到最后一张才恢复，跟你之前定的规矩一致）；把子文件拆回成独立人物之后，宿主卡上剩下的同步图会变回普通图、不再挂着假的子文件标记。这一版没有提交任何生图，也没删你任何一张图、一份数据。",
     features: "存进子文件卡的图在储存库里找得到（v6.11，用户 2026-11-13 实报生图记录 F 点「存到资产卡「B（男未成年）·服装3-蓝白校服」并设为人物图」、绿字已存但人物资产库里找不到图；服务端 actions.ts（新 helper mirrorPresetImageToHost + saveGeneratedImageToPreset 回 hostName + 新动作 getAssetPreset / backfillChildPresetHostCopies + deleteAssetPresetImage / promotePresetImage 两处守口）+ 客户端 imagegen.tsx / charbench.tsx + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image generation submitted）：【根因（沙箱副本回读实证）】项目 45 人物 F（characterId 199）的来源卡是卡 32「B（男未成年）·服装3-蓝白校服」，该卡 parentPresetId=4、正挂在卡「B」下面当子文件；记录 id 26 点合并按钮后，saveGeneratedImageToPreset 确实把图（imagegen/1794571225697-5sjvgsu2）追加进卡 32 的图片行（id 45）、savedPresetId=32 已落记录——保存本身没失败；但 listAssetPresets 只回主文件、子卡在宿主上只有挂靠时复制的一条主体图行（卡 B 图片行 id 43），卡 32 后来追加的图在储存库任何界面都无入口可见。【修法一·存时镜像】saveGeneratedImageToPreset 落卡后若目标卡 parentPresetId 非空，调 mirrorPresetImageToHost 往宿主卡图片列表末尾镜像一条行（sourcePresetId=子卡 id、共享 blob、fileName/look 随新图、同宿主同来源同 blob 已有则不重复加、同步宿主 updatedAt），回执新增 hostName（主文件卡为 null）；imagegen 三路回执（saveRecToPreset 单个存卡含改图分支、saveRecToPresetAndCharacter 合并成功与第二步失败分步报告）在 hostName 非空时经 hostNoteFor 追加去向句（点名宿主卡、打开其展开详情可见）。【修法二·按 id 直读】新动作 getAssetPreset({id}) 回任意卡（含子文件卡、不存在回 null）；saveToPresetCore 存前快照由 listAssetPresets 改走它（旧路对子卡找不到卡、beforeImageIds 落空会把子卡全部旧图误判新图重复跑造型分析）。【修法三·历史补齐】新动作 backfillChildPresetHostCopies({}) 逐子卡逐图补镜像（幂等、只加行、回 childCount/mirroredCount/alreadyCount/details）；本版经 post_submit 对正式数据执行一次，预期把记录 id 26 的图补进卡「B」图片列表（子卡 26「服装2-红连帽卫衣」与卡 M 等其余子卡的图已有挂靠镜像、应计 already）。【修法四·守口】deleteAssetPresetImage 恢复分支加计数：被删行 sourcePresetId 的同来源行在本卡上还有剩余时不恢复来源卡（remaining 已在作用域内），删图确认框（charbench deleteImageTarget 加 sourceIsLastCopy）与之同步分两套文案；promotePresetImage 恢复分支在拆回来源卡后，把本卡上同来源其余行 sourcePresetId 清空变回普通图行（图与造型不动）。【不动】存卡目标解析 v5.63、合并按钮与造型直写 v5.62、挂靠/拆回本体语义 v6.01、发布到剧本、封面记录 id 43、生图禁令。【删除清单】无删除（纯新增镜像行与守口）；数据零删除。基线升 v6.11。【沙箱证据】见本版回执（沙箱副本上：backfill 补齐 1 张、saveGeneratedImageToPreset 存子卡回 hostName 且宿主列表出现镜像行、删非最后一行不恢复 / 删最后一行恢复两案、getAssetPreset 读子卡）。真机待核：用户打开正式工作台储存库卡「B」的展开详情，确认图片列表里有这次 F 的图（子文件来源标「B（男未成年）·服装3-蓝白校服」）；再随便往一张子文件卡来源的记录点一次存卡，看回执是否写清去向。",
   },
@@ -16788,6 +16804,8 @@ look: string;
 voice: string;
 gender: string;
 tone: string;
+// v6.12 身高锚点（只进 H3 定义句），随同步一起写回人物行。
+heightAnchor: string;
 }[],
 /** v5.49：确认时一并递交的待确认草稿全量快照（深存的页面权威
  * 副本），实现方随整份稿落盘并为被确认的人存 rollback 回退点。 */
@@ -16855,7 +16873,15 @@ return found;
 const [charEdits, setCharEdits] = useState<
 Record<
 string,
-{ look: string; voice: string; gender: string; tone: string }
+{
+look: string;
+voice: string;
+gender: string;
+tone: string;
+// v6.12 身高锚点（只进 H3 定义句）：随编辑态走、点同步才落
+// 库；不进待确认深存（charPending 字段形状不动）。
+heightAnchor: string;
+}
 >
 >({});
 const [charSync, setCharSync] = useState<{
@@ -16868,17 +16894,38 @@ message: string;
 // 同步收尾）读到的永远是当前值，不靠 setState 的函数式更新在回
 // 调里现算待确认记录。
 const charEditsRef = useRef<
-Record<string, { look: string; voice: string; gender: string; tone: string }>
+Record<
+string,
+{
+look: string;
+voice: string;
+gender: string;
+tone: string;
+heightAnchor: string;
+}
+>
 >({});
 const updateCharEdits = (
 fn: (
 prev: Record<
 string,
-{ look: string; voice: string; gender: string; tone: string }
+{
+look: string;
+voice: string;
+gender: string;
+tone: string;
+heightAnchor: string;
+}
 >,
 ) => Record<
 string,
-{ look: string; voice: string; gender: string; tone: string }
+{
+look: string;
+voice: string;
+gender: string;
+tone: string;
+heightAnchor: string;
+}
 >,
 ) => {
 const next = fn(charEditsRef.current);
@@ -17008,6 +17055,7 @@ look: r.look,
 voice: r.voice,
 gender: inferCharacterGender(r),
 tone: r.tone,
+heightAnchor: r.heightAnchor ?? "",
 });
 const charValueOf = (r: CharacterRow) => charEdits[r.name] ?? charBaseOf(r);
 // v5.48：用户亲手在性别下拉里选过的人（按代号记）——这些人的
@@ -17179,13 +17227,14 @@ return (
 e.look !== b.look ||
 e.voice !== b.voice ||
 e.gender !== b.gender ||
-e.tone !== b.tone
+e.tone !== b.tone ||
+e.heightAnchor !== b.heightAnchor
 );
 };
 const charDirty = script.characterRows.some(charRowDirty);
 const setCharField = (
 r: CharacterRow,
-field: "look" | "voice" | "gender" | "tone",
+field: "look" | "voice" | "gender" | "tone" | "heightAnchor",
 value: string,
 ) => {
 if (field === "gender") charGenderTouchedRef.current.add(r.name);
@@ -17194,6 +17243,7 @@ look: string;
 voice: string;
 gender: string;
 tone: string;
+heightAnchor: string;
 } | null = null;
 updateCharEdits((prev) => {
 const next = {
@@ -17209,7 +17259,9 @@ return { ...prev, [r.name]: next };
 });
 // v5.49：手改与分析一样进待确认草稿（来源 manual、同 store），
 // 本地记录立刻更新、深存去抖 500ms 写一次（失焦 / 关面板 flush）。
-if (nextEntry) {
+// v6.12：身高锚点不进待确认深存（charPending 字段形状不动），
+// 只随编辑态走、点「确认并同步」时经 syncCharBasics 落库。
+if (nextEntry && field !== "heightAnchor") {
 const entry: { look: string; voice: string; gender: string; tone: string } =
 nextEntry;
 const rec = derivePendingRecord(r, entry, { [field]: "manual" });
@@ -17291,7 +17343,8 @@ return (
 e.look !== b.look ||
 e.voice !== b.voice ||
 e.gender !== b.gender ||
-e.tone !== b.tone
+e.tone !== b.tone ||
+e.heightAnchor !== b.heightAnchor
 );
 });
 if (!stillDirty) charGenderTouchedRef.current.clear();
@@ -17359,7 +17412,7 @@ source: { look: null, voice: null, tone: null, gender: null },
 setCharSync({ busy: true, ok: false, message: "" });
 try {
 const res = await onSyncCharBasics(
-[{ name: r.name, look: rb.look, voice: rb.voice, gender: rb.gender, tone: rb.tone }],
+[{ name: r.name, look: rb.look, voice: rb.voice, gender: rb.gender, tone: rb.tone, heightAnchor: r.heightAnchor ?? "" }],
 snapshot,
 );
 if (res.ok) {
@@ -18983,6 +19036,29 @@ onChange={(e) => setCharField(panelRow, "tone", e.target.value)}
 onBlur={() => flushPersistPending(panelRow.name)}
 />
 </div>
+<div className="flex items-start gap-2">
+<label
+className="w-16 shrink-0 pt-2 text-[var(--dim)]"
+htmlFor={`sb-char-height-anchor-${panelIdx}`}
+>
+身高锚点：
+</label>
+<div className="min-w-0 flex-1">
+<input
+id={`sb-char-height-anchor-${panelIdx}`}
+aria-label={`${panelRow.name}的身高锚点`}
+className="field"
+placeholder="可不填；例如：站立同框时头顶约到 B 的肩膀"
+value={panelVal.heightAnchor}
+onChange={(e) =>
+setCharField(panelRow, "heightAnchor", e.target.value)
+}
+/>
+<p className="mt-0.5 text-xs leading-5 text-[var(--dim)]">
+一句话写清这个人和其他人的相对身高，只进 H3 两版提示词的定义句（同步后生效），别的版本不带。
+</p>
+</div>
+</div>
 </div>
 ) : (
 <dl className="mt-1.5 space-y-0.5 text-sm leading-6">
@@ -19004,6 +19080,12 @@ onBlur={() => flushPersistPending(panelRow.name)}
 <dt className="inline text-[var(--dim)]">语气基调：</dt>
 <dd className="inline">{panelRow.tone}</dd>
 </div>
+{(panelRow.heightAnchor ?? "").trim() && (
+<div>
+<dt className="inline text-[var(--dim)]">身高锚点：</dt>
+<dd className="inline">{panelRow.heightAnchor}</dd>
+</div>
+)}
 </dl>
 )}
 {onSyncCharBasics && panelRec && charPendingHasFields(panelRec) && (
