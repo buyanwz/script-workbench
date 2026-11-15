@@ -676,6 +676,15 @@ export const monitorAccounts = sqliteTable("monitor_accounts", {
   note: text("note").notNull().default(""),
   // v4.43：所属作者自定义分组（monitor_groups.id），null = 未分组。
   groupId: integer("group_id").references(() => monitorGroups.id),
+  // v6.21：是否参与 24 小时自动更新（0/1）。只是页面上的参与
+  // 标记——网页本身调不通快手（要登录 + 页面签名），自动抓取
+  // 那条腿还没接进来，本列不触发任何抓取。
+  autoUpdate: integer("auto_update").notNull().default(0),
+  // v6.21：上次真实采集到货时间（有新卡片经粘贴 / 扩展上报 /
+  // Excel 导入真正建卡时才写；重复跳过不算到货）。
+  lastCollectedAt: integer("last_collected_at", { mode: "timestamp_ms" }),
+  // v6.21：上次到货的真实来源（手动粘贴 / 扩展上报 / Excel导入）。
+  lastCollectStatus: text("last_collect_status").notNull().default(""),
   sortOrder: integer("sort_order").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
@@ -707,6 +716,10 @@ export const monitorVideos = sqliteTable("monitor_videos", {
   totalLikeCount: integer("total_like_count").notNull().default(0),
   creatorBio: text("creator_bio").notNull().default(""),
   commentCount: integer("comment_count").notNull().default(0),
+  // v6.21：是否置顶。NULL = 未确认是否置顶，0 = 已确认非置顶，
+  // 1 = 置顶。现有行全部 NULL；「最新5条」视图排除 1、NULL 的
+  // 卡照常显示并带「未确认是否置顶」小标记。
+  isPinned: integer("is_pinned"),
   collectedAt: integer("collected_at", { mode: "timestamp_ms" }),
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()

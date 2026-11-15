@@ -1068,9 +1068,13 @@ const CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "
 // 【郑重声明】（v4.70）：三条硬规则做成一段声明、统一放在复制 / 导出
 // 文本的最顶部，每次复制自动带上，不再只散落在逐镜头映射行与逐节拍
 // 备注里（v4.29 的人物锁定句与无字幕句仍在原处保留，本声明是置顶
-// 汇总）。文案由用户逐字定稿，三处共用一份、不许漂移：分镜页逐镜头
+// 汇总）。文案由用户逐字定稿，共用一份、不许漂移：分镜页逐镜头
 // 一键复制（buildSingleGroupText）、分镜 Markdown 导出
 // （buildMarkdown）、AI 视频生成清单导出（buildGenChecklist）。
+// v6.19 起落点从「文档 / 复制文本顶部一份」升级为「每一个镜头块
+// 都有一份」：逐镜头复制每镜置顶、两处整份导出的每个镜头块内各
+// 带一份（文档顶部原有的一份保留），逐镜头提示词包
+// （buildLensPromptPack）每个镜头块同带。
 // ---------------------------------------------------------------------------
 
 export const VIDEO_DECLARATION_ITEMS = [
@@ -1141,10 +1145,13 @@ export function buildMarkdown(
   tl.groups.forEach((g, gi) => {
     head(`镜头${gi + 1}｜${g.title}（${fmtRange(g.start, g.end)} · 全片总时长 ${tl.totalSeconds.toFixed(1)} 秒）`);
     // Same order as the per-lens one-click copy: 风格锁定句（v4.93）
-    // first, then 【1】角色映射， then 【2】节拍. No separate scene
+    // first, then 【郑重声明】（v6.19 起每个镜头块都带一份——整份
+    // 文档拆开逐镜头用时每个镜头也自带规则；文档顶部那份保留），
+    // then 【1】角色映射， then 【2】节拍. No separate scene
     // mapping inside the lens block — the scene is described as text
     // inside each beat's 画面内容.
     out.push(...filmStyleLockLines(script), "");
+    out.push(...videoDeclarationLines(), "");
     out.push(...lensCharacterMappingLines(script, g, ctx, opts), "");
     out.push(...lensBeatLines(script, ctx, g, gi, dlgNums));
     // v4.83：每条分镜提示词（本镜头块）末尾固定带资产图优先规则行。
@@ -1338,10 +1345,13 @@ export function buildGenChecklist(
     out.push(`- 故事时间码：${fmtRange(g.start, g.end)}（故事时长 ${g.duration.toFixed(1)} 秒 · 全片总时长 ${tl.totalSeconds.toFixed(1)} 秒${g.duration > 30.05 ? `，⚠️ 超过 30 秒默认上限${(script.overlongOverride?.lenses ?? []).some((l) => l.lensIndex === gi + 1) ? "（已高权限确认保留）" : ""}，生成前请留意工具的单镜头时长上限` : ""}）`);
     out.push(`- 生成时长：${g.duration.toFixed(1)} 秒（与故事时长一致）`);
     // Same order as the per-lens copy: style lock (v4.93) and
+    // 【郑重声明】(v6.19: every lens block carries its own copy, so
+    // a lens lifted out of the checklist still has the rules) and
     // character mappings first, then the beats; the scene lives as
     // text inside each beat's 画面内容， not as a separate
     // scene-mapping section.
     out.push(...filmStyleLockLines(script), "");
+    out.push(...videoDeclarationLines(), "");
     out.push(...lensCharacterMappingLines(script, g, ctx), "");
     out.push(...lensBeatLines(script, ctx, g, gi, dlgNums));
     // v4.83：每条分镜提示词（本镜头块）末尾固定带资产图优先规则行。
@@ -1600,6 +1610,12 @@ export function buildLensPromptPack(
       `## 镜头 ${gi + 1}｜${g.title}（${fmtRange(g.start, g.end)} · ${g.duration.toFixed(1)} 秒）`,
       "",
     );
+    // v6.19：每个镜头块都带全片风格锁定句 + 【郑重声明】（与逐镜
+    // 头复制同口径）——提示词包也是逐镜头单独拿去用的，规则只写
+    // 第一个镜头等于其余镜头没规则；此前本包只有每镜可粘贴提示
+    // 词行尾的一句锁定，没有声明本体。
+    for (const l of filmStyleLockLines(script)) out.push(`- ${l}`);
+    out.push(...videoDeclarationLines().map((l) => `- ${l}`));
     out.push(`- 画幅：16:9，超写实真人短剧质感`);
     out.push(`- 场景：${sceneText}`);
     // v5.94：charText 为空（过滤后一人不剩）时整行不出现。
@@ -3718,6 +3734,17 @@ export const ACTION_CUT_RULE_LINE =
 // 复，上文 v4.93 的「每镜头自带」口径对这两条路径作废；
 // buildMarkdown / buildGenChecklist 本档未动，仍按原口径每镜头
 // 块带锁定句（导出整份文档时文档级声明另置顶一份）。
+//
+// v6.19 口径更新（用户实报「郑重声明镜头 1 有、镜头 5 就不存
+// 在」，要求每一个分镜都进行有规则添加）：v5.24 的「只写镜头
+// 1」收敛整体作废——全局头（风格锁定句 + 郑重声明）恢复为每
+// 一个镜头都带，两条逐镜头复制路径、镜头包正文、Seedance 三
+// 版、buildMarkdown / buildGenChecklist 的每个镜头块、
+// buildLensPromptPack 的每个镜头块全部同口径；buildMarkdown /
+// buildGenChecklist 文档顶部的声明保留（整份读时先见声明，拆
+// 开逐镜头用时每块也自带）。理由与 v4.93 立规时相同：每个镜头
+// 单独发给视频模型、模型之间没有记忆，规则只写一处等于其余
+// 镜头没有规则。
 // ---------------------------------------------------------------------------
 
 /** 默认全片风格锁定句（用户逐字定稿，中文在前、英文在后）。 */
@@ -4752,6 +4779,9 @@ export function coverageLines(script: ScriptData): string[] {
 //        由项目级 filmStyle 设置生成，默认逐字定稿两行，全片每镜
 //        一致；v4.93 的末尾短版后缀已删)
 //   【2】【郑重声明】 (v4.70 三条硬规则，v4.94 压缩成一段一行)
+//   【1】【2】合称全局头：v5.24 曾收敛为只写镜头 1，v6.19 按用户
+//        实报（镜头 1 有、镜头 5 没有）改回每一个镜头都带——本
+//        函数一次只拼一个镜头，拼哪个镜头哪个镜头就自带全套。
 //   【3】映射 (v4.94: 场景一行「场景：名——描述一句话」在前；其后
 //        角色映射——只列本镜头出场人物、条目只剩条目头、带人物
 //        称呼对照表；道具映射只留描述行；无生图提示词、无资产
@@ -4779,13 +4809,13 @@ export function buildSingleGroupText(
   if (!g) return "";
   const lines: string[] = [];
   // v4.94：风格锁定句排最前（只留顶部一次），郑重声明紧随其后。
-  // v5.24 第 1 档【0】：全局头（风格锁定句 + 郑重声明）只在镜头 1
-  // 写一次——八段骨架的全局头收敛口径（用户 2026-11-07 派工拍
-  // 板，取代 v4.93/v4.94 的每镜头自带口径）；镜头 2 起不再重复。
-  if (groupIndex === 0) {
-    lines.push(...filmStyleLockLines(script), "");
-    lines.push(...videoDeclarationLines(), "");
-  }
+  // v6.19（用户实报「郑重声明镜头 1 有、镜头 5 就不存在」后定案）：
+  // 全局头（风格锁定句 + 郑重声明）改为每一个镜头都带——每个镜头
+  // 都是单独复制、单独发给视频模型的，模型之间没有记忆，规则只
+  // 写在镜头 1 等于其余镜头没有规则。v5.24 第 1 档【0】的「只写
+  // 镜头 1」收敛口径自此作废，回到 v4.93/v4.94 的每镜头自带。
+  lines.push(...filmStyleLockLines(script), "");
+  lines.push(...videoDeclarationLines(), "");
   lines.push(...lensCharacterMappingLines(script, g, ctx, opts));
   // v5.24 第 1 档：角色映射块之后加 @Image N 绑定行。
   const bindingLine = lensImageBindingLine(script, g, ctx);
@@ -4810,9 +4840,9 @@ export function buildSingleGroupText(
 // Mini 改为开头只写一次，见下）。v5.24（第 1 档）起四档与通用版
 // 同步在角色映射块之后加「参考图绑定」行
 // （lensImageBindingLine：出场顺序 @Image N、无图不占号）。
-// v5.24 第 1 档【0】再收敛一处：全局头（风格锁定句 + 郑重声明）
-// 只在镜头 1 写一次、镜头 2 起两处拼装（本函数与通用版）都不再
-// 重复。只在下面列出的点上分叉：
+// v5.24 第 1 档【0】曾收敛：全局头（风格锁定句 + 郑重声明）只在
+// 镜头 1 写一次；v6.19 按用户实报改回每一个镜头都带（本函数与
+// 通用版两处拼装同口径）。只在下面列出的点上分叉：
 //   · Seedance 2.5（时间戳版）：每拍标题行改为本镜头内相对时间戳
 //     「0.0s-1.3s：…」（从本镜头第一拍起算 0 秒、保留一位小数）；
 //     台词写成「说话人台词（语气）：台词内容」（说话人用称呼对照
@@ -5161,19 +5191,19 @@ export function buildSingleGroupTextForModel(
   if (!g) return "";
   const dlgNums = dialogueNumbers(script);
   const lines: string[] = [];
-  // v5.24 第 1 档【0】：全局头（风格锁定句 + 郑重声明）只在镜头 1
-  // 写一次，四档一致；镜头 2 起直接从本镜内容起（2.5 的一句话概
-  // 述是本镜数据拼的、不是全局头，逐镜头保留）。
-  if (groupIndex === 0) {
-    lines.push(...styleLinesForModel(script, model));
-  }
+  // v6.19（用户实报「郑重声明镜头 1 有、镜头 5 就不存在」后定案）：
+  // 全局头（风格锁定句 + 郑重声明）改为每一个镜头都带，四档一致
+  // ——每个镜头单独发给视频模型、模型之间没有记忆，规则只写镜头
+  // 1 等于其余镜头没规则；v5.24 第 1 档【0】的「只写镜头 1」收敛
+  // 口径自此作废。2.5 的一句话概述是本镜数据拼的、非全局头，仍
+  // 逐镜头保留，位置在风格锁定句之后、郑重声明之前（与改前镜头
+  // 1 的顺序逐字一致）。
+  lines.push(...styleLinesForModel(script, model));
   if (model === "seedance25") {
     lines.push(overviewLineFor25(script, ctx, g, dlgNums, groupIndex));
   }
   lines.push("");
-  if (groupIndex === 0) {
-    lines.push(...videoDeclarationLines(), "");
-  }
+  lines.push(...videoDeclarationLines(), "");
   lines.push(...mappingLinesForModel(script, g, ctx, opts, model));
   // v5.24 第 1 档：四档共用——角色映射块之后加 @Image N 绑定行
   // （与通用版 buildSingleGroupText 同一位置口径）。

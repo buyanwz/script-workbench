@@ -878,7 +878,20 @@ function mapIntakeRow(row: IntakeRow, platformRaw: unknown) {
         "report_time",
       ]),
     ),
+    // v6.21：置顶标记——payload 带 is_pinned（1/0，也认布尔 / 字
+    // 符串写法）才传，带不出来就不传（服务端存 NULL = 未确认）。
+    isPinned: intakePinned(
+      pickIntakeField(row, ["is_pinned", "isPinned", "pinned"]),
+    ),
   };
+}
+
+// v6.21：intake 行里的置顶标记归一化——1 / true / "1" → 1，
+// 0 / false / "0" → 0，其余（缺失 / 看不懂）→ undefined（不传）。
+function intakePinned(raw: unknown): number | undefined {
+  if (raw === 1 || raw === true || raw === "1") return 1;
+  if (raw === 0 || raw === false || raw === "0") return 0;
+  return undefined;
 }
 
 function formatPublished(iso: string | null): string {
@@ -1288,12 +1301,15 @@ function VideoDetailModal({
   creatorUrl,
   onClose,
   onPrefillAnalysis,
+  onPinnedChanged,
 }: {
   video: FeedVideo;
   creatorName: string;
   creatorId: string;
   creatorUrl: string;
   onClose: () => void;
+  // v6.21：置顶标记改完后通知父组件刷新 feed（卡片标记跟着变）。
+  onPinnedChanged?: () => void;
   // v4.88：旧「卡片分析 → 预填到分析模仿页」入口搬家到这里——
   // 封面按钮已按用户定案改走「发送到聊天解剖」，想手动在分析
   // 模仿页建一条预填记录时从详情窗进，功能不减。
@@ -1308,6 +1324,28 @@ function VideoDetailModal({
     video.videoId ||
     "未命名视频";
   const detailText = buildDetailText(video, creatorName, creatorId, creatorUrl);
+  // v6.21：置顶标记三态（1 置顶 / 0 已确认非置顶 / null 未确认），
+  // 本窗内本地状态即时反映，改完通知父组件刷新 feed。
+  const [pinned, setPinned] = useState<number | null>(video.isPinned);
+  const [pinnedError, setPinnedError] = useState<string | null>(null);
+  useEffect(() => {
+    setPinned(video.isPinned);
+    setPinnedError(null);
+  }, [video.id, video.isPinned]);
+  const pinnedMut = useMutation({
+    mutationFn: (value: number | null) =>
+      api.setMonitorVideoPinned({ id: video.id, isPinned: value }),
+    onSuccess: (res, value) => {
+      if (!res.ok) {
+        setPinnedError(res.error ?? "置顶标记没改成，再试一次。");
+        return;
+      }
+      setPinned(value);
+      setPinnedError(null);
+      onPinnedChanged?.();
+    },
+    onError: (e) => setPinnedError(`置顶标记没改成：${describeThrownError(e)}`),
+  });
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -1439,6 +1477,52 @@ function VideoDetailModal({
               ))}
             </div>
           )}
+          {/* 置顶标记（v6.21）：三种状态都能手动定——置顶的卡在
+              「最新5条」里不显示；未确认的照常显示但带小标记。 */}
+          <section aria-label="置顶标记" className="mt-2.5">
+            <h3 className="mb-1 text-xs font-bold text-[var(--dim)]">置顶标记</h3>
+            <p className="text-[13px]">
+              {pinned === 1
+                ? "当前：已标为置顶（「最新5条」里不显示这张卡）"
+                : pinned === 0
+                  ? "当前：已确认不是置顶"
+                  : "当前：还没确认是否置顶（「最新5条」里会带一个小标记）"}
+            </p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                className={pinned === 1 ? "btn btn-primary btn-sm" : "btn btn-sm"}
+                disabled={pinnedMut.isPending}
+                aria-label="标为置顶（这张卡在最新5条里不显示）"
+                onClick={() => pinnedMut.mutate(1)}
+              >
+                标为置顶
+              </button>
+              <button
+                type="button"
+                className={pinned === 0 ? "btn btn-primary btn-sm" : "btn btn-sm"}
+                disabled={pinnedMut.isPending}
+                aria-label="取消置顶（确认这张卡不是置顶）"
+                onClick={() => pinnedMut.mutate(0)}
+              >
+                取消置顶
+              </button>
+              <button
+                type="button"
+                className={pinned === null ? "btn btn-primary btn-sm" : "btn btn-sm"}
+                disabled={pinnedMut.isPending}
+                aria-label="改回未确认是否置顶"
+                onClick={() => pinnedMut.mutate(null)}
+              >
+                改回未确认
+              </button>
+            </div>
+            {pinnedError && (
+              <p className="mt-1 text-xs" style={{ color: "var(--bad)" }} role="alert">
+                {pinnedError}
+              </p>
+            )}
+          </section>
           {/* 视频信息 */}
           {hasVideoInfo && (
             <section aria-label="视频信息" className="mt-2.5">
@@ -1964,6 +2048,7 @@ function MonitorCardCore({
   refreshFailed = false,
   cloudBadge = false,
   showCollected = false,
+  pinnedUnknown = false,
 }: {
   video: FeedVideo;
   creatorName: string;
@@ -1993,6 +2078,9 @@ function MonitorCardCore({
   // 入参（改顶部批量入口），这里只剩角标一个云端相关入参。
   cloudBadge?: boolean;
   showCollected?: boolean;
+  // v6.21：「最新5条」视图专用——这张卡还没确认是否置顶
+  // （isPinned=null）时，封面右上角打一个小标记提醒。
+  pinnedUnknown?: boolean;
 }) {
   const [coverFailed, setCoverFailed] = useState(false);
   const coverSrc =
@@ -2058,6 +2146,24 @@ function MonitorCardCore({
           aria-label="这条视频已存云端"
         >
           云端
+        </span>
+      )}
+      {pinnedUnknown && (
+        <span
+          className="absolute font-bold text-white"
+          style={{
+            right: sz(6, s),
+            top: sz(6, s),
+            fontSize: sz(10, s),
+            lineHeight: 1.25,
+            padding: `${sz(2, s)}px ${sz(6, s)}px`,
+            borderRadius: sz(4, s),
+            background: "rgba(217, 119, 6, 0.92)",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
+          }}
+          aria-label="这条视频还没确认是否置顶"
+        >
+          未确认是否置顶
         </span>
       )}
       {dissected && (
@@ -2419,7 +2525,9 @@ function VideoCard({
 // v6.05（问题 #111304）：视图只剩四个——按播放量排列（plays）/
 // 按达人分组（creator）/ 按最新排列（collected）/ 云端上传
 // （cloud）；最新对比、按日期分组、按作者分组已下线。
-type MonitorViewMode = "plays" | "creator" | "collected" | "cloud";
+// v6.21：新增第五个视图「最新5条」（latest5）——按达人分组，
+// 每位达人只取按发布时间倒序的前 5 张、排除置顶卡。
+type MonitorViewMode = "plays" | "creator" | "collected" | "cloud" | "latest5";
 
 type MonitorGroup = { id: number; name: string };
 
@@ -2555,6 +2663,98 @@ function CreatorGroupControl({
   );
 }
 
+// v6.21：达人「24 小时自动更新」状态文案——上次更新取服务端记
+// 的真实到货时间（lastCollectedAt），没到过货显示「待采集」；
+// 下次应更新 = 上次更新 + 间隔（固定 24 小时），只是提示、不
+// 触发任何抓取。来源（lastCollectStatus）有值时一并带出。
+function autoUpdateStatusText(account: FeedAccount, intervalHours: number): string {
+  const lastMs = account.lastCollectedAt
+    ? new Date(account.lastCollectedAt).getTime()
+    : NaN;
+  if (!Number.isFinite(lastMs)) {
+    return "上次更新：待采集 · 下次应更新：待采集";
+  }
+  const lastText = formatPublished(account.lastCollectedAt);
+  const nextText = formatPublished(
+    new Date(lastMs + intervalHours * 3600 * 1000).toISOString(),
+  );
+  const source = account.lastCollectStatus
+    ? `（${account.lastCollectStatus}）`
+    : "";
+  return `上次更新：${lastText}${source} · 下次应更新：${nextText}`;
+}
+
+// v6.21：达人行上的「参与24小时自动更新」开关 + 状态文字。开
+// 关只写服务端 auto_update 标记；旁边一行小字显示上次更新 /
+// 下次应更新（只做提示）与上次到货来源。
+function AutoUpdateControl({
+  account,
+  intervalHours,
+  invalidate,
+}: {
+  account: FeedAccount;
+  intervalHours: number;
+  invalidate: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const mut = useMutation({
+    mutationFn: (autoUpdate: boolean) =>
+      api.setMonitorAccountAutoUpdate({ accountId: account.id, autoUpdate }),
+    onSuccess: (res) => {
+      if (!res.ok) {
+        setError(res.error ?? "开关没设置成，再试一次。");
+        return;
+      }
+      setError(null);
+      invalidate();
+    },
+    onError: (e) => setError(`开关没设置成：${describeThrownError(e)}`),
+  });
+  const creatorLabel = account.name || "这位达人";
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={account.autoUpdate}
+        aria-label={`${creatorLabel}：参与24小时自动更新（当前${account.autoUpdate ? "已参与" : "未参与"}）`}
+        disabled={mut.isPending}
+        className={account.autoUpdate ? "btn btn-primary btn-sm" : "btn btn-sm"}
+        onClick={() => mut.mutate(!account.autoUpdate)}
+      >
+        参与24小时自动更新：{account.autoUpdate ? "开" : "关"}
+      </button>
+      <span className="text-xs text-[var(--dim)]">
+        {autoUpdateStatusText(account, intervalHours)}
+      </span>
+      {error && (
+        <span className="text-xs" style={{ color: "var(--bad)" }} role="alert">
+          {error}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// v6.21「最新5条」口径：排除置顶（isPinned=1），其余按作品发
+// 布日期（publishedAt）倒序取前 5 张；发布日期缺失的排最后、
+// 不回退入库时间（与「按最新排列」现行口径一致）。未确认是否
+// 置顶（isPinned=null）的卡照常入选，渲染时带小标记。
+function latestFiveVideos(account: FeedAccount): FeedVideo[] {
+  const publishedTime = (v: FeedVideo) => {
+    const t = v.publishedAt ? new Date(v.publishedAt).getTime() : NaN;
+    return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+  };
+  return account.videos
+    .filter((v) => v.isPinned !== 1)
+    .slice()
+    .sort((x, y) => {
+      const d = publishedTime(y) - publishedTime(x);
+      return Number.isNaN(d) ? 0 : d;
+    })
+    .slice(0, 5);
+}
+
 const MONITOR_VIEW_STORAGE_KEY = "monitor-view-mode-v1";
 const MONITOR_GUIDE_STORAGE_KEY = "monitor-guide-open-v1";
 
@@ -2664,6 +2864,7 @@ function CompactVideoCard({
   refreshFailed = false,
   cloudBadge = false,
   showCollected = false,
+  pinnedUnknown = false,
   cardStyle = "minimal",
   cardScale = 1,
 }: {
@@ -2679,6 +2880,8 @@ function CompactVideoCard({
   refreshFailed?: boolean;
   // v4.66：卡片级「存云端」已下线，不再向渲染核透传云端入参。
   cloudBadge?: boolean;
+  // v6.21：「最新5条」视图透传给渲染核的「未确认是否置顶」标记。
+  pinnedUnknown?: boolean;
   // v4.51 版式：三款卡片设计之一 + 等比缩小档位，与按达人分组
   // 卡共用同一渲染核、同一基准宽，封面恒 3:4。
   cardStyle?: MonitorCardStyle;
@@ -2707,6 +2910,7 @@ function CompactVideoCard({
       refreshFailed={refreshFailed}
       cloudBadge={cloudBadge}
       showCollected={showCollected}
+      pinnedUnknown={pinnedUnknown}
     />
   );
 }
@@ -3298,6 +3502,19 @@ export function MonitorBench({
   });
   const accounts = feedQuery.data?.accounts ?? [];
   const groups = feedQuery.data?.groups ?? [];
+  // v6.21：24 小时自动更新总开关与固定间隔（服务端 monitor_meta）。
+  const autoUpdateEnabled = feedQuery.data?.autoUpdateEnabled ?? false;
+  const autoUpdateIntervalHours = feedQuery.data?.autoUpdateIntervalHours ?? 24;
+  const [autoUpdateToggleError, setAutoUpdateToggleError] = useState<string | null>(null);
+  const autoUpdateEnabledMut = useMutation({
+    mutationFn: (enabled: boolean) => api.setMonitorAutoUpdateEnabled({ enabled }),
+    onSuccess: () => {
+      setAutoUpdateToggleError(null);
+      queryClient.invalidateQueries({ queryKey: ["monitor-feed"] });
+    },
+    onError: (e) =>
+      setAutoUpdateToggleError(`总开关没设置成：${describeThrownError(e)}`),
+  });
   const totalVideos = accounts.reduce((s, a) => s + a.videos.length, 0);
   // 数据来源诊断（v4.49）：视频卡片只存服务端数据库，客户端没
   // 有 localStorage / IndexedDB 副本（已全仓排查）——页面加载
@@ -3729,7 +3946,7 @@ export function MonitorBench({
   const [viewMode, setViewMode] = useState<MonitorViewMode>(() => {
     try {
       const saved = window.localStorage.getItem(MONITOR_VIEW_STORAGE_KEY);
-      if (saved === "plays" || saved === "creator" || saved === "collected" || saved === "cloud") return saved;
+      if (saved === "plays" || saved === "creator" || saved === "collected" || saved === "cloud" || saved === "latest5") return saved;
     } catch {
       // localStorage 不可用时用默认视图
     }
@@ -4327,6 +4544,8 @@ export function MonitorBench({
         collectedAt: f.collectedAt.trim(),
         // 手动粘贴建卡：不带自动投递标记，命中删除墓碑先解除。
         fromIntake: false,
+        // v6.21：到货来源写进达人状态（仅新建卡时服务端才写）。
+        collectSource: "手动粘贴",
       });
       if (!res.ok) {
         setIntakeToast(
@@ -4419,6 +4638,8 @@ export function MonitorBench({
             collectedAt: f.collectedAt.trim(),
             // Excel 导入同属手动入口：命中删除墓碑先解除再建卡。
             fromIntake: false,
+            // v6.21：到货来源写进达人状态（仅新建卡时服务端才写）。
+            collectSource: "Excel导入",
           });
           if (!res.ok) {
             failed++;
@@ -4639,6 +4860,14 @@ export function MonitorBench({
       items.sort((x, y) => y.atMs - x.atMs);
       return items.map(({ account, video }) => ({ account, video }));
     }
+    if (viewMode === "latest5") {
+      // v6.21：与「最新5条」视图渲染同一口径（见 latestFiveVideos）。
+      const out: { account: FeedAccount; video: FeedVideo }[] = [];
+      for (const a of accounts) {
+        for (const v of latestFiveVideos(a)) out.push({ account: a, video: v });
+      }
+      return out;
+    }
     // creator（按达人分组）：有视频的达人依次拉平。
     const out: { account: FeedAccount; video: FeedVideo }[] = [];
     for (const a of accounts) {
@@ -4828,6 +5057,34 @@ export function MonitorBench({
         </div>
       )}
 
+      {/* 24 小时自动更新总开关（v6.21）：只是页面设置——间隔固定
+          24 小时；每位达人还要在达人行上单独打开「参与」才算数。
+          下次应更新时间只做提示：网页自己抓不了快手（要登录 +
+          页面签名），到点不会自动抓取，新作品仍靠粘贴 / 扩展上
+          报 / Excel 导入到货，到货后上次更新时间自动刷新。 */}
+      <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1" aria-label="24小时自动更新设置">
+        <span className="text-sm font-bold">24 小时自动更新</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={autoUpdateEnabled}
+          aria-label={`24小时自动更新总开关（当前${autoUpdateEnabled ? "已开" : "已关"}）`}
+          disabled={autoUpdateEnabledMut.isPending}
+          className={autoUpdateEnabled ? "btn btn-primary btn-sm" : "btn btn-sm"}
+          onClick={() => autoUpdateEnabledMut.mutate(!autoUpdateEnabled)}
+        >
+          {autoUpdateEnabled ? "已开" : "已关"}
+        </button>
+        <span className="text-xs leading-5 text-[var(--dim)]">
+          间隔固定 24 小时；下次应更新时间只做提示、不触发任何抓取（自动抓取还没接进来，新作品到货后上次更新时间会自动刷新）。
+        </span>
+        {autoUpdateToggleError && (
+          <span className="text-xs" style={{ color: "var(--bad)" }} role="alert">
+            {autoUpdateToggleError}
+          </span>
+        )}
+      </div>
+
       {/* 填写区（精简版）：通栏单行输入框，粘贴整段「字段名：值」
           即自动解析建卡。textarea 只为能完整接住多行粘贴文本：
           视觉高度固定一行（42px）、resize:none 不可拉伸；底色用
@@ -4864,7 +5121,7 @@ export function MonitorBench({
         )}
       </div>
 
-      {/* 视图切换（v6.05 起只剩四个）：按播放量排列 / 按达人分组 / 按最新排列 / 云端上传（选择存 localStorage） */}
+      {/* 视图切换：按播放量排列 / 按达人分组 / 按最新排列 / 云端上传 / 最新5条（v6.21 新增，选择存 localStorage） */}
       <div className="mt-5 flex flex-wrap items-center gap-2" role="tablist" aria-label="监控视图切换">
         <span className="text-sm font-bold">视图</span>
         {(
@@ -4873,6 +5130,7 @@ export function MonitorBench({
             { key: "creator", label: "按达人分组" },
             { key: "collected", label: "按最新排列" },
             { key: "cloud", label: "云端上传" },
+            { key: "latest5", label: "最新5条" },
           ] as { key: MonitorViewMode; label: string }[]
         ).map((opt) => (
           <button
@@ -4915,6 +5173,7 @@ export function MonitorBench({
           {viewMode === "creator" && "按达人分组显示"}
           {viewMode === "collected" && "按作品发布日期排序，离现在越近排越前面"}
           {viewMode === "cloud" && "只显示云端已存的视频"}
+          {viewMode === "latest5" && "按达人分组，每位达人只看最新发布的 5 条，置顶的除外"}
         </span>
       </div>
 
@@ -4946,6 +5205,7 @@ export function MonitorBench({
           totalLikeCount: 0,
           creatorBio: "",
           commentCount: 0,
+          isPinned: null,
           collectedAt: null,
           createdAt: new Date().toISOString(),
         };
@@ -5202,6 +5462,91 @@ export function MonitorBench({
               );
             })()}
           </section>
+        ) : viewMode === "latest5" ? (
+          <section aria-label="最新5条">
+            {(() => {
+              // v6.21：按达人分组，显示全部有卡的达人（参与开关
+              // 只影响状态行文案、不影响显示）；每位达人只取
+              // latestFiveVideos 口径的前 5 张（排除置顶、发布
+              // 日期倒序、缺失排最后）。
+              const visibleAccounts = accounts.filter((a) => a.videos.length > 0);
+              if (visibleAccounts.length === 0) {
+                return (
+                  <p className="text-sm leading-5 text-[var(--dim)]">
+                    暂时没有带视频卡片的达人——采到作品后会自动出现在这里。
+                  </p>
+                );
+              }
+              return visibleAccounts.map((a) => {
+                const picked = latestFiveVideos(a);
+                return (
+                  <div key={a.id} className="mb-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className="flex h-7 w-7 items-center justify-center rounded-full text-[13px] font-bold text-white"
+                        style={{ background: "var(--accent)" }}
+                        aria-hidden="true"
+                      >
+                        {(a.name || "达").slice(0, 1)}
+                      </span>
+                      {a.url ? (
+                        <a
+                          href={a.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-display text-base font-bold underline-offset-2 hover:underline"
+                          aria-label={`打开达人主页：${a.name || a.url}`}
+                        >
+                          {a.name || "未命名达人"}
+                        </a>
+                      ) : (
+                        <span className="font-display text-base font-bold">{a.name || "未命名达人"}</span>
+                      )}
+                      <span
+                        className="rounded-full px-2 py-0.5 text-xs font-bold"
+                        style={{ background: "var(--accent-soft)", color: "var(--accent)" }}
+                      >
+                        {a.platform}
+                      </span>
+                      <span className="text-xs text-[var(--dim)]">
+                        {a.autoUpdate ? "已参与24小时自动更新" : "未参与24小时自动更新"}
+                      </span>
+                      <span className="text-xs text-[var(--dim)]">
+                        {autoUpdateStatusText(a, autoUpdateIntervalHours)}
+                      </span>
+                    </div>
+                    {picked.length === 0 ? (
+                      <p className="mt-1.5 text-[13px] text-[var(--dim)]">
+                        这位达人的卡片都标了置顶，最新 5 条里暂时没有可显示的。
+                      </p>
+                    ) : (
+                      <div className="mt-2 flex flex-wrap" style={{ gap: cardGap }}>
+                        {picked.map((v) => (
+                          <CompactVideoCard
+                            cardStyle={cardStyle} cardScale={cardScale}
+                            key={v.id}
+                            video={v}
+                            creatorName={a.name}
+                            pinnedUnknown={v.isPinned === null}
+                            onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
+                            onDetail={(vid) =>
+                              setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
+                            }
+                            onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
+                            onOpenDissected={handleOpenDissected}
+                            dissected={dissectedByVideoId.get(v.videoId) ?? null}
+                            onRefresh={handleRefreshVideo}
+                            refreshing={pendingRefresh.has(v.id)}
+                            refreshFailed={refreshFailedIds.has(v.id)}
+                          />
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              });
+            })()}
+          </section>
         ) : (
           (() => {
             // 展示规则（v4.43）：没采到作品（0 条视频）的达人不
@@ -5259,6 +5604,13 @@ export function MonitorBench({
                   删除达人
                 </button>
                 </span>
+              </div>
+              <div className="mt-1.5">
+                <AutoUpdateControl
+                  account={a}
+                  intervalHours={autoUpdateIntervalHours}
+                  invalidate={invalidate}
+                />
               </div>
               {a.videos.length === 0 ? (
                 <p className="mt-1.5 text-[13px] text-[var(--dim)]">
@@ -5458,6 +5810,7 @@ export function MonitorBench({
           creatorId={detail.creatorId}
           creatorUrl={detail.creatorUrl}
           onClose={() => setDetail(null)}
+          onPinnedChanged={() => invalidate()}
           onPrefillAnalysis={
             onAnalyzeVideo
               ? () => {

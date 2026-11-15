@@ -17,7 +17,6 @@ import { CharacterBench, type CharWindow } from "./charbench";
 import { MonitorBench } from "./monitorbench";
 import { ArchiveBench } from "./archivebench";
 import { PromptCheckBench } from "./promptcheck";
-import { OptionBench } from "./optionbench";
 import { AnalysisBench, type AnalysisPrefill } from "./analysisbench";
 import { ModeSection } from "./modebench";
 import { ConfirmDialog } from "./confirm";
@@ -222,7 +221,7 @@ export const tiltCardHandlers = {
   onMouseLeave: (_e: ReactMouseEvent<HTMLElement>) => {},
 };
 
-type Bench = "script" | "character" | "monitor" | "archive" | "promptcheck" | "options";
+type Bench = "script" | "character" | "monitor" | "archive" | "promptcheck";
 type ScriptWindow =
   | "mode"
   | "characters"
@@ -1325,34 +1324,6 @@ export function App() {
             >
               提示词检查
             </button>
-            <button
-              type="button"
-              aria-pressed={bench === "options"}
-              onClick={() => switchBench("options")}
-            >
-              选配台
-            </button>
-          </div>
-          <div className="flex min-w-0 items-center">
-            <label className="sr-only" htmlFor="topbar-project-select">
-              当前剧本项目（全站唯一项目选择器；发布到剧本时在储存库里另选目标项目）
-            </label>
-            <select
-              id="topbar-project-select"
-              className="field min-w-0 max-w-[38vw] py-1.5 text-sm sm:max-w-[220px]"
-              style={{ textOverflow: "ellipsis" }}
-              title={activeProject ? `当前项目：${activeProject.name}` : undefined}
-              value={activeId ?? ""}
-              disabled={projects.length === 0}
-              onChange={(e) => selectProject(Number(e.target.value))}
-            >
-              {projects.length === 0 && <option value="">暂无项目</option>}
-              {projects.map((p) => (
-                <option key={p.id} value={p.id} title={p.name}>
-                  {p.id} · {p.name}
-                </option>
-              ))}
-            </select>
           </div>
           <nav
             className="shell-nav order-3 flex w-full min-w-0 gap-0.5 overflow-x-auto lg:order-none lg:w-auto lg:flex-1 lg:justify-center"
@@ -1365,9 +1336,7 @@ export function App() {
                     ? "储存箱窗口列表"
                     : bench === "promptcheck"
                       ? "提示词检查窗口列表"
-                      : bench === "options"
-                        ? "选配台窗口列表"
-                        : "监控账号窗口列表"
+                      : "监控账号窗口列表"
             }
           >
             {bench === "script"
@@ -1406,15 +1375,7 @@ export function App() {
                         () => {},
                         "当前窗口：提示词检查",
                       )
-                    : bench === "options"
-                      ? navBtn(
-                          true,
-                          "选配台",
-                          "工作台 / 小程序 / exe 三个独立选配页",
-                          () => {},
-                          "当前窗口：选配台",
-                        )
-                      : MONITOR_WINDOWS.map((w) =>
+                    : MONITOR_WINDOWS.map((w) =>
                       navBtn(
                         monitorWindow === w.id,
                         w.label,
@@ -1734,17 +1695,6 @@ export function App() {
           {mountedBenches.has("promptcheck") && (
           <div hidden={bench !== "promptcheck"}>
             <PromptCheckBench />
-          </div>
-          )}
-
-          {/* 选配台（v6.14）：与项目无关的独立选配页——把三批 GitHub
-              调研（26 个仓库）学到的排版布局做法做成可真选的选项，
-              工作台 / 小程序 / exe 三个独立页面各自选配 + 实时预览，
-              配置只存本机。首次切到才挂载（打开提速），挂载后 hidden
-              常驻保住三页选择状态。 */}
-          {mountedBenches.has("options") && (
-          <div hidden={bench !== "options"}>
-            <OptionBench />
           </div>
           )}
 
@@ -12616,7 +12566,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v6.16";
+const WORKSPACE_VERSION = "v6.21";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12628,9 +12578,39 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
+    version: "v6.21",
+    date: "2026-11-15",
+    current: true,
+    text: "这一版给「监控账号」页加上了「24 小时自动更新最新 5 条」里页面能做的部分，先把丑话说在前面：自动去快手抓新作品那条腿还没接进来——网页自己调不通快手（要登录、还要快手页面现算的签名），所以这一版不会真的自动抓取，谁也不会拿假数据冒充更新；页面上能看到的「下次应更新」时间只是个提示，到点不会自己动。新作品还是靠老路子进来：粘贴建卡、扩展上报、Excel 导入，哪条路真进来新卡片，那位达人的「上次更新」时间就会自动记成当时的时间、并写明是哪条路来的。具体新东西有四样：①视图多了一个「最新5条」——按达人分组，每位达人只看按发布时间排的最新 5 条，标了置顶的排除在外；还没确认是不是置顶的卡照常显示，卡上会带一个橙色小标记写着「未确认是否置顶」，发布时间没填的排在最后。②每张卡的详情窗里多了「置顶标记」：三个按钮「标为置顶 / 取消置顶 / 改回未确认」，哪条是置顶你自己说了算，随时能改。③达人行上多了「参与24小时自动更新」开关，旁边写着上次更新时间和下次应更新时间；页面上方还有一个总开关，间隔固定 24 小时改不了——这两个开关现在只是先把名单和状态记下来，等以后自动抓取那条腿接进来，就按这份名单干活。④扩展上报的视频如果带了是否置顶的信息，会直接存下来（带 1 是置顶、带 0 不是），没带就先记「未确认」。原来的四个视图、排序、3 天清理、云端和下载全都没动，现有达人和卡片数据一条没改（只加了新字段，老卡片都先记成「未确认是否置顶」）。真机等你亲验：打开监控账号页切到「最新5条」，看每位达人是不是最多 5 条、发布时间最新的在前；随便点开一张卡的详情，用三个按钮把置顶标记来回改一次，看「最新5条」里这张卡跟着出现或消失；再给一位达人打开「参与」开关，看上次更新那行字对不对。",
+    features: "监控账号页新增「24 小时自动更新最新 5 条（置顶除外）」的页面部分（v6.21；采集腿缺口如实声明：网页调不通快手——需登录 + 页面签名，自动抓取不在本单内，不造假数据、不加假定时器、不模拟更新；migration 0046 只加列 + monitor_meta 两键默认值，现有数据一律不动）：【改动1·数据】monitor_accounts 加 auto_update（0/1 默认 0）/ last_collected_at（可空毫秒）/ last_collect_status（文本默认空）；monitor_videos 加 is_pinned（可空，NULL 未确认 / 0 非置顶 / 1 置顶，现有行全 NULL）；monitor_meta 加 monitor_auto_update_enabled（默认 0）/ monitor_auto_update_interval_hours（默认 24）。【改动2·达人行】达人分组视图每位达人行下加 AutoUpdateControl：开关「参与24小时自动更新」（新动作 setMonitorAccountAutoUpdate 写 auto_update）+ 状态行「上次更新：<时间或待采集>（来源）· 下次应更新：<上次+24h 或待采集>」；fetchMonitorVideo 真正新建卡片时（重复跳过不算）把该达人 last_collected_at 写当前时间、last_collect_status 按真实路径写 手动粘贴 / 扩展上报 / Excel导入（collectSource 入参，粘贴与 Excel 客户端显式传、intake 走 fromIntake 推导）；本动作不写「自动采集」来源。【改动3·新视图】MonitorViewMode 加 latest5，视图按钮行加「最新5条」（localStorage 键 monitor-view-mode-v1 口径不变，默认仍 collected）；latestFiveVideos 口径：排除 is_pinned=1、按 publishedAt 倒序（缺失排最后、不回退 createdAt）取前 5；按达人分组显示全部有卡达人，头行带达人名 / 参与状态 / 上次更新；is_pinned=NULL 的卡经 pinnedUnknown 透传在 MonitorCardCore 封面右上角打橙色「未确认是否置顶」小标；版式沿用 monitor-card-display-v1；批量存云端清单同步 latest5 口径。【改动4·置顶标记】详情窗 VideoDetailModal 加「置顶标记」区：标为置顶 / 取消置顶 / 改回未确认三按钮走新动作 setMonitorVideoPinned 写 1/0/NULL；fetchMonitorVideo 加可选 isPinned 入参，intake 映射 mapIntakeRow 从 payload is_pinned/isPinned/pinned 归一化（1/true/'1'→1、0/false/'0'→0、其余不传），粘贴 / Excel 不新增置顶列。【改动5·总开关】监控页顶部（填写区上方）加「24 小时自动更新」总开关（新动作 setMonitorAutoUpdateEnabled 写 monitor_meta）+ 说明行（间隔固定 24 小时、下次应更新只做提示、不触发任何抓取）；listMonitorFeed 出参带 autoUpdateEnabled / autoUpdateIntervalHours，listMonitorAccounts / listMonitorFeed 的达人与卡片出参带新字段。【不动】现有 4 个视图与排序口径、3 天清理、云端与下载、解剖链路、去重与墓碑、清除下限、一键清除、链接备忘录、扩展上报与中转通道本身；不自动生图；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.21（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。【沙箱验证】五项证据见 DATA-PLAN v6.21 节（迁移副本核对 / 最新5条夹具 / 置顶三态 + intake is_pinned / 到货写状态 / 无 kuaishou 网络请求与假定时代码核对）；探针数据已清。真机待核：监控页切「最新5条」核对每达人 ≤5 条与置顶排除；详情窗三按钮来回改一次；达人行开关与状态行。",
+  },
+  {
+    version: "v6.20",
+    date: "2026-11-15",
+    text: "这一版给「提示词检查」页加了五类新的检查——就是项目 45 那个镜头在豆包被拒（回你一句「无法针对该请求进行创作」）查出来的五类内容安全问题，以前检查页只查版权侵权、查不出这五类，现在粘进去就能查出来。五类是：①写实皮肤细节配上未成年人物——风格句里写了「真实皮肤纹理、毛孔、汗毛」这类皮肤细节，画面里又有小学生、小孩，两个凑一起就会被拦，改法是只删掉皮肤细节那半句，「超写实真人实拍」这个风格本身留着；②生图排版脏数据——人物造型句里混进了当初生成人物图时的工作话，像「三视图排版、无头全身、裁到脖子、8K 超高清」这些不是造型、是排版和渲染指令，检查出来会整段清掉，只留真正的发型、服装这些造型；③未成年身体强调词——给未成年角色写的「面容稚嫩、身形纤细、高腰短裤」这类词会被盯上，查出来删掉或换成中性说法（高腰短裤就写短裤），发型服装一字不动，成年人的同样写法不触发；④「换脸」两个字——哪怕写的是「严禁换脸」也会被拦，查出来只删掉这两个字，后面的「严禁互换、串演」原样留着；⑤针对未成年人的欺凌内容——大人羞辱、威胁小孩，或者同龄人嘲笑小孩的穷、胖、长相，包括台词、情绪标签（威胁、嘲笑、宣战这类）、动作描述和标题，查出来把措辞软化、意思和情节不变（比如「敌人」改「对手」、「闭嘴」改「别说了」、「家里穷」改「没准备」）。两条硬性规则也跟着把口径说清了：台词还是意思不许改，但版权词只许谐音换字、欺凌措辞可以换成意思相近的温和说法；造型本身还是一字不动，只多两个例外——清排版指令、清未成年风险词。另外你打字时左框的本机预扫也加了九个词（换脸、无头全身、裁到脖子、三视图排版、真实皮肤纹理、毛孔、汗毛、皮脂光泽、次表面散射），打出来就会标出来提醒你；欺凌类的词要看上下文、没进预扫表，只走 AI 检查，免得误报。原来的版权检查（漫威 IP 词那类）照旧能查。项目、剧本、分镜数据全都没动，也没有提交任何生图。真机等你亲验：把项目 45 那个被拒的镜头提示词粘进检查页，应该能把这五类逐处报出来、改好的版本里皮肤细节半句没了、排版段没了、换脸没了、欺凌台词变温和了；再粘一段普通的温和对话，应该不会乱报欺凌。",
+    features: "提示词检查新增五类安全审核规则（v6.20，项目 45「强制30秒版」镜头 1 豆包被拒案反推底层逻辑，用户亲口定「把规则反推成底层逻辑写进提示词检查页」；服务端 checkPromptCopyright 指令扩写 + copyrightguard 本机预扫表加词 + promptcheck 页文案 + 版本/日志 + replication 基线；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【改动1·服务端指令】checkPromptCopyright 的 prompt 在原 5 类版权风险后新增 5 类内容安全规则（写成通用规则 + 本案实例作示例，新说法也能命中）：(1) 写实皮肤细节+未成年（真实皮肤纹理/毛孔/汗毛/皮脂光泽/次表面散射/细腻毛孔/real skin texture 等 + 人物含未成年或小学/教室/校园+孩子身份）→ 只删皮肤细节半句、风格本身保留，中英行同理，kind「未成年安全审核」；(2) 生图排版脏数据（三视图排版/无头全身/裁到脖子/五格同一个人/左70%右30%分格/头部特写排版/纯色浅色背景/无文字/无水印/8K超高清/电影级CG渲染等）→ 整段删排版/渲染指令、只留真造型，kind「排版脏数据」；(3) 未成年身体强调词（面容稚嫩/身形纤细/高腰短裤等）→ 删或换中性（高腰短裤→短裤），只未成年触发，kind「未成年安全审核」；(4) 换脸（含「严禁换脸」禁止句）→ 只删「换脸」二字、其余保留，kind「敏感词」；(5) 针对未成年人的欺凌内容（台词+情绪标签+动作描述+标题全覆盖，本案台词/标签/描述/标题实例逐条写进指令）→ 台词措辞软化意思情节保留（敌人→对手/闭嘴→别说了/家里穷→没准备/猪狗→小猪/肥→壮）、标签描述换中性（威胁→严肃/嘲笑→打趣/宣战→放话/训斥→说话/嗤笑→笑/羞辱→批评），kind「欺凌内容」，并明示正常批评教育与日常对话不误报。system 与动作 description 同步扩为「版权与内容安全」口径。【改动2·硬规则口径】指令硬规则 1 补台词两分法（版权/IP 词只许谐音、欺凌/威胁措辞可换意思相近的温和说法不限谐音），dialogueIntact 自检改「意思一致（含措辞软化）即 true」；硬规则 2 补造型两例外（排版/渲染指令整段删、未成年身体强调词只删换风险形容词），lookIntact 自检同步；changes note 类别新增 排版指令清理/未成年措辞软化/皮肤细节删除/换脸删词/欺凌措辞软化；issues kind 候选集扩入四个新 kind。其余硬规则（除风险点外逐字保留、不加原文没有的句子）一字未动。【改动3·本机预扫表】copyrightguard.tsx COPYRIGHT_GUARD_BUILTIN 末尾加 9 条（换脸/无头全身/裁到脖子/三视图排版/真实皮肤纹理/毛孔/汗毛/皮脂光泽/次表面散射），to 全为空字符串，与「灭霸」同口径只作打字高亮与服务端 knownHits 提示，兜底二「删词只列问题、不自动删」语义未动；欺凌类词不进表（上下文相关防误报）、只走 AI 指令。【改动4·页面文案】promptcheck.tsx 页头介绍句加安全审核范围（欺凌/未成年安全/排版脏数据/敏感词），两枚硬规则 pill 改新口径（台词：意思不改、版权词只谐音、欺凌措辞可软化；造型：本身不改、只清排版指令与未成年风险词）；分段/并发/重试/合并/自检徽标/改好全文+清单+复制/版权声明开关等流程一字未动。【不动】数据库与全部项目/剧本/分镜数据、其他页面、生图、原 5 类版权检查能力、封面记录 id 43；不碰 flor/选配页/GitHub/exe。基线升 v6.20（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。【沙箱验证】夹具 A（本案全特征合成提示词）/ B（漫威 IP 词回归）/ C（温和家庭对话防误报）三段经沙箱 checkPromptCopyright 实调，结果见 DATA-PLAN v6.20 节；数据回读核对未动。真机待核：正式工作台粘项目 45 被拒镜头原文检查一遍，核对五类报全、改好版方向对；再粘一段温和对话核对不误报。",
+  },
+  {
+    version: "v6.19",
+    date: "2026-11-15",
+    text: "这一版修的就是你问的这个问题：为什么郑重声明只有镜头 1 有、镜头 5 就没有了。原因在拼装规矩上：之前有一版把「全片风格锁定句」和「郑重声明」这两段全片规则收成了一个「全局头」，只写进镜头 1 的复制文本里，镜头 2 往后复制出来就直接从映射和画面开始、不再带这两段——当时想的是整份连着看不重复，可你是一个镜头一个镜头单独复制去生成的，镜头 5 单独拿出去时，那段声明就真的不在里面，模型也就不知道有这三条规矩。现在改回来了：每一个镜头的复制文本开头都自带这两段，镜头几都一样。具体覆盖到的出口都一起改了：分镜页逐镜头复制（四个模型档 Seedance 2.5 / 2.0 / Fast / Mini 和通用版都算）、镜头包正文、Seedance 三版（按剧情版 / 每镜 20–30 秒版 / 强制 30 秒版）、Markdown 导出和 AI 视频清单导出（整份文档顶部的那份声明保留，另外每个镜头块里面再各带一份，你把文档拆开逐镜头用也不会丢）、逐镜头提示词包（每个镜头块新带上风格锁定句和郑重声明，以前这个包里只有提示词行尾的一句锁定）。其他规则本来就是每个镜头都带的（资产图优先规则在每镜末尾、固定站位每拍都带、参考图绑定每镜都有），这次一并核对过、没动。声明和风格句的文字一个字没改，台词、画面、映射也都没动，也没有提交任何生图。真机等你亲验：打开任意一个多镜头的项目，复制镜头 5（或任意一个不是镜头 1 的镜头）粘出来看——开头应该先是全片风格锁定句、紧接着就是【郑重声明】那一段，然后才是角色映射和节拍；再导出一份 Markdown，翻到中间任意一个镜头块，开头同样应该有这两段。",
+    features: "每镜头都带全局头（v6.19，用户实报「比如郑重声明，镜头1有，镜头5就不存在」，期望「每一个分镜都进行有规则添加，不仅仅是添加到镜头1当中」；纯客户端 scriptlib.ts 拼装口径 + App.tsx 分镜页「全片风格」节标题/说明 + 版本/日志 + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【根因】v5.24 第 1 档【0】把全局头（filmStyleLockLines 风格锁定句 + videoDeclarationLines 郑重声明）收敛为只在 groupIndex===0 时拼入 buildSingleGroupText 与 buildSingleGroupTextForModel 两条逐镜头复制路径，镜头 2 起复制文本不再带这两段；buildMarkdown / buildGenChecklist 当时只在文档顶部置顶一份声明、镜头块内只有风格锁没有声明；buildLensPromptPack 每镜只有可粘贴提示词行尾的锁定句、无声明本体。【改法】①buildSingleGroupText 删 groupIndex===0 守卫，每镜置顶风格锁定句 + 郑重声明（顺序与改前镜头 1 逐字一致）；②buildSingleGroupTextForModel 删两处守卫，四档每镜都带 styleLinesForModel（Fast/Mini 仍只留中文行）+ 郑重声明，2.5 一句话概述仍逐镜保留、位置在风格锁之后声明之前与改前镜头 1 一致；镜头包正文与 Seedance 三版经同一函数自动同口径；③buildMarkdown / buildGenChecklist 每镜头块在风格锁定句后补一份郑重声明，文档顶部原有的一份保留；④buildLensPromptPack 每镜头块在标题后补风格锁定句两行 + 郑重声明一行（列表项形态、正文逐字）。【连带文案】分镜页 DocSection 标题「全片风格（全局头，只写在镜头 1）」改「全片风格（每个镜头都带）」，节内强标签与注释同步改每镜口径。【不动】声明三条与风格锁定句文案逐字不变；H3 两版不动（六段格式自带风格开场句与 summary 的不烧录字幕/台词逐字句、按其规范不另加声明段）；资产图优先规则（每镜末尾）、固定站位（每拍）、参考图绑定行、说话人锁定行、台词与画面原文、全部数据、封面记录 id 43；不自动生图。【删除清单】零删除（只删两处 groupIndex===0 守卫判断，文本内容只增不减）。基线升 v6.19（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 锁人规则尾补 v6.19 口径更新段）。真机待核：正式工作台复制任一非镜头 1 的镜头粘出核对开头两段；Markdown 导出翻中间镜头块核对。",
+  },
+  {
+    version: "v6.18",
+    date: "2026-11-15",
+    text: "这一版按你截图红框标出来的，把顶栏里那个项目下拉框删掉了——就是顶栏中间、显示着「45 · 解剖复刻：当你老…」带个下拉箭头、点开能换项目的那个框，它占着顶栏的位置，现在整个拿掉了，顶栏只剩下左边的工作台切换按钮和下面的窗口页签，清爽了。选项目不受影响：剧本工作台页面里本来就有的项目选择入口（项目区那个下拉框和「全部项目」列表）一个没动，照样在那里换项目；顶栏下面的项目总览条也还在，当前是哪个项目一眼能看到。项目、剧本、人物、监控数据全都没动，也没有提交任何生图。真机等你亲验：打开工作台看顶栏——那个带箭头的项目下拉框应该不见了；再到剧本工作台的项目区用原来的下拉框换一次项目，看能不能正常切换。",
+    features: "删除顶栏项目下拉框（v6.18，用户附图红框圈住顶栏项目下拉框「45 · 解剖复刻：当你老…」亲口定「这个下拉框选择也占位置，进行删除」；纯客户端 App.tsx 删除一处渲染 + 版本/日志 + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删除清单】顶栏 topbar-project-select <select> 整段删除（连同其外层 div 与 sr-only label，共约 22 行）：该 select 是顶栏的项目切换入口，value=activeId、onChange=selectProject，与项目区 ProjectBar 的 projectbar-project-select 是同一选择的两个同步实例。【不动】项目区 ProjectBar 的项目下拉框与「全部项目」列表（页面里本来就有的项目选择入口）一字未动、照常切换项目；selectProject / activeId / activeProject 逻辑保留（项目总览条与各台仍在用）；顶栏其余内容（工作台切换 seg、窗口页签 nav、项目总览条、版本号）一字未动；全部项目与剧本数据、其他五台、封面记录 id 43 均未动；不自动生图；历史更新日志里提及 topbar-project-select 的旧条目按惯例保留不改。基线升 v6.18（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE）。真机待核：顶栏下拉框已消失且无空壳留白；项目区下拉框切换项目正常、顶栏项目总览条随之更新。",
+  },
+  {
+    version: "v6.17",
+    date: "2026-11-15",
+    text: "这一版按你说的，把顶栏里的「选配台」整个删掉了：顶栏的工作台切换里不再有「选配台」这一颗按钮，点进去的那个页面（工作台 / 小程序 / exe 三个选配页、左边选项右边预览那一整套）也一并拿掉了，打开工作台直接就是原来那五台——剧本工作台、人物资产储存库、监控账号、储存箱、提示词检查，一个没少、顺序没变。选配台里以前选过的那些配置本来就只存在你这台设备的浏览器里、从来没有改过工作台现在的样子，所以删掉它不影响任何现有的排版和功能；项目、剧本、人物、监控数据也全都没动，也没有提交任何生图。另外这一版顺带做了一个安全修正：以前生图 / 封面带参考图时，参考图先传到 Geeknow 自家空间换链接，万一自家上传走不通，会自动改把图的副本传到一个公开图床（uguu.se）换链接——拿到那个链接的人就能打开图。现在这条公开图床的后路整个删掉了：参考图只走 Geeknow 自家上传这一条路，自家上传走不通时这次生成就停下、写清原因、不提交不计费，你直接重试就行，图不会再被发到公开图床上。生图面板和封面页里关于路线的说明文字也同步改成了这个新口径。真机等你亲验：打开工作台看顶栏——切换按钮应该只剩五颗、没有「选配台」了；五台逐个点一遍看是不是都正常打开；带参考图生成时留意路线行，应该只会写 Geeknow 自家上传。",
+    features: "删除选配台（v6.17，用户亲口定「选配台进行删除」，附图红箭头指着顶栏「选配台」页签、要求整个删掉；纯客户端删除 + App 版本/日志 + replication 基线；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删除清单】①顶栏工作台切换里的「选配台」按钮（App.tsx seg 组第六颗）；②Bench 类型摘除 \"options\"，顶栏窗口标签的「选配台窗口列表」aria 与「选配台」单项标签分支一并删除（其余五台的标签逻辑不变）；③主内容区的选配台渲染块（mountedBenches 的 options 挂载块）整段删除；④optionbench.tsx 整个文件删除（约 1190 行：三页签选配页、实时预览、配置摘要与本机存值逻辑全套）；⑤replication.ts 的 workbenches 第六台条目删除、REPLICATION_BASELINE 升 v6.17。【说明】选配台的配置只存本机 localStorage（scriptbench.options.*.v1 三键），从未落库、从未改过全站样式，删除后这些本机残留键不再被任何代码读取、无需清理也不影响其他功能。【同版安全修正（审计高危项，沿 v4.05 先例）】特权层 host_reference_images 的 uguu.se 公开图床回退整段删除：参考图只走 Geeknow 自家上传（presign + PUT），走不通（或无可用鉴权）整单失败并写清真实原因、不提交不计费；route 恒为 geeknow；客户端生图面板 / 封面页的路线行与说明文案同步改单一路口径（uguu / mixed 分支删除），服务端动作与特权契约注释、replication 参考图通道规则同步改写；历史日志里对旧链路的记载按惯例保留。【不动】其余五台（剧本 / 储存库 / 监控 / 储存箱 / 提示词检查）及其全部数据与功能、项目与剧本数据、主题 token、封面记录 id 43；不自动生图；历史更新日志（含 v6.14 选配台上线条目）按惯例保留不改。基线升 v6.17（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：顶栏切换只剩五颗按钮、无「选配台」；五台逐个切换打开正常。",
+  },
+  {
     version: "v6.16",
     date: "2026-11-14",
-    current: true,
     text: "这一版按你截图里红框标出来的，把「监控账号」页顶部那四块显示删掉了，页面打开直接就是视图和视频卡片，清爽了。删掉的是这四块：①最上面那条「云端存储」用量条（已用多少 GB、云端共多少条视频、下面那根进度条）；②「后台存入完成」那条状态（成功几条、失败几条、点开看清单的那个窗也一起没了）；③「3 天留存清理」那一块（上次/下次清理时间、已删多少条、规则说明、查看记录按钮和展开的删除记录）；④「待解剖」那一块（排队等解剖的摘要、已解剖几条、展开列表）。要说清的是：这次只删了页面上的显示，背后的东西一样没动——监控的视频卡片和数据都在，云端里存好的文件没删，3 天自动清理照旧每天检查（打开这一页时触发，该删的还是会删，只是页面上不再摆那块记录了；清理完的提示也还在，就是不再写「去下面记录里查」），「立即清理」按钮照样能先看清单再删；点卡片上「发送到聊天解剖」照样会把视频排进待解剖队列，只是页面顶部不再显示那块队列了；「存云端」的后台存入也照旧在后台跑，只是不再显示进度和完成状态。页面上其他东西全保留：顶部的下载模板、导入 Excel、刷新、存云端、立即清理、一键清除按钮都在，使用说明、粘贴建卡的框、下面的视图按钮和视频卡片列表都没动，其他页面更没动，也没有提交任何生图。真机等你亲验：打开「监控账号」页看顶部——那四块应该都不见了，标题行按钮下面直接就是使用说明和粘贴框；再往下翻看视图切换和视频卡片是不是都正常；点一次「立即清理」看清单确认窗还弹不弹（只看清单、别真删）。",
     features: "监控页顶部删四块显示（v6.16，用户截图红框亲口定「把监控账号页红框里的内容删掉，只保留视图区」；纯客户端 monitorbench.tsx 删除渲染/显示代码 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作删除；NO real image/video generation submitted）：【删除清单】①CloudStorageBar 组件（v4.64 云端存储用量条：已用 XGB/8GB＋云端共 N 条视频＋进度条，每 60 秒调 getCloudStorage）连同 MonitorBench 内的渲染调用整段删除；②CloudQueueStatus 组件（v4.67 后台存入状态条：运行中「后台存入中 x/y」/完成「后台存入完成：成功 N 条，失败 M 条」+ 完成 toast + v5.69 本页会话内自动弹结果窗）连同其专属 CloudQueueResultModal 结果清单窗、CloudQueueItemView 类型、CLOUD_QUEUE_TOASTED_KEY 常量与渲染调用整段删除；③「3 天留存清理」记录区 JSX 整段删除（上次/下次清理时间、已删记录条数、规则文字、「查看记录」按钮与展开的删除日志/无数据未判定两栏）；④DissectQueueBar 组件（v4.88 待解剖队列条：待解剖（N）标题行、已解剖 N 条、展开逐条列表/复制指令/移除）连同渲染调用整段删除。四处共删约 820 行。【连带摘除（仅供已删块使用的本地物）】formatCleanupTimeMs（只被清理记录区调用）、MonitorBench 内 cleanupStatus 别名与 cleanupLogOpen 状态（只被清理记录区读写）；cleanupStatusQuery 本体保留——它是服务端自动清理的触发点（打开本页调 getMonitorCleanupStatus、距上次满 24 小时服务端跑一轮），自动清理 toast 与「立即清理」runCleanupMut 的完成 toast 只去掉指向已下线记录区的尾巴（「见下方『清理记录』」删除、结尾改「删除记录已存档。」），删除事实与条数文案不变；CloudBatchSaveModal 上方注释补 v6.16 口径一句、文件头 v5.55 注释补下线说明一句。【不动】服务端全部动作（getCloudStorage / getCloudQueueStatus / retryCloudQueueFailed / getMonitorCleanupStatus / previewMonitorCleanup / runMonitorCleanup / getDissectQueue / addDissectQueueItem / removeDissectQueueItem 等一个未删）、监控数据与云端文件、清理规则与触发、待解剖队列数据与卡片「发送到聊天解剖」入队及回执文案、后台存入队列与下载进程、中转设置、顶部按钮组（下载模板/导入 Excel/刷新/存云端/立即清理/一键清除）、使用说明（内文仍提清理记录，按 v6.05 既定边界一字未动）、粘贴建卡框、视图按钮行、视频卡片列表、四窗口回归点验清单、整站备份、更新日志、设置按钮、其他页面、封面记录 id 43；不自动生图。基线升 v6.16（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + 监控台条目尾补 v6.16 段、DATA-PLAN 本条）。真机待核：正式工作台打开监控页核对四块已消失且无空壳留白、视图与卡片完好；点「立即清理」只看清单不真删；点一张卡「发送到聊天解剖」看回执仍写已加入队列。",
   },
@@ -18832,16 +18812,17 @@ onUpdateVoice(c.name, e.target.value);
 </div>
 </DocSection>
 
-<DocSection title="全片风格（全局头，只写在镜头 1）">
+<DocSection title="全片风格（每个镜头都带）">
 {/* v4.93：项目级画面风格设置。风格锁定句由这里生成：改这一
     处，全片锁定句一起变（v4.94 起只留顶部一次，v4.93 的末尾短
-    版后缀已删、这里不再展示）。v5.24 第 1 档起逐镜头复制口径改
-    为全局头收敛：锁定句与郑重声明只写进镜头 1 的复制文本、镜
-    头 2 起不再重复（Markdown / AI 清单导出本档未动、仍每镜头
-    块带）。与「风格」那一行（剧本风格 styleLabel）和语气设置
+    版后缀已删、这里不再展示）。v5.24 第 1 档曾把逐镜头复制口
+    径收敛为只写镜头 1；v6.19 按用户实报（郑重声明镜头 1 有、
+    镜头 5 没有）改回每一个镜头都带：锁定句与郑重声明进每镜
+    复制文本、Markdown / AI 清单导出的每镜头块、提示词包的每
+    镜头块。与「风格」那一行（剧本风格 styleLabel）和语气设置
     无关，互不覆盖。 */}
 <p className="text-sm leading-6">
-<strong>风格锁定句（全局头，全片逐字一致、只写在镜头 1）：</strong>
+<strong>风格锁定句（全片逐字一致、每个镜头的复制文本都带）：</strong>
 </p>
 {filmStyleLockText(script)
 .split("\n")

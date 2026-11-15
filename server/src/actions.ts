@@ -4557,6 +4557,13 @@ const monitorAccountOut = z.object({
   note: z.string(),
   // v4.43：所属作者自定义分组 id，null = 未分组。
   groupId: z.number().nullable(),
+  // v6.21：是否参与 24 小时自动更新（页面标记，不触发抓取）。
+  autoUpdate: z.boolean(),
+  // v6.21：上次真实采集到货时间（ISO 串），null = 还没到过货。
+  lastCollectedAt: z.string().nullable(),
+  // v6.21：上次到货的真实来源（手动粘贴 / 扩展上报 / Excel导入），
+  // 空串 = 还没到过货。
+  lastCollectStatus: z.string(),
   createdAt: z.string(),
 });
 
@@ -4584,6 +4591,8 @@ const monitorVideoOut = z.object({
   totalLikeCount: z.number(),
   creatorBio: z.string(),
   commentCount: z.number(),
+  // v6.21：是否置顶。null = 未确认，0 = 已确认非置顶，1 = 置顶。
+  isPinned: z.number().nullable(),
   collectedAt: z.string().nullable(),
   createdAt: z.string(),
 });
@@ -6202,9 +6211,14 @@ function parseStoredImageLook(json: string): ImageLookData | null {
 // 「提示词检查」页粘贴任意一段视频生成提示词，AI 通读全文找版权 /
 // 商标 / 真实人物等会被平台拦截的风险点，逐处给问题与解决办法，并
 // 产出一份改好的完整提示词。两条硬性规则写死在检查指令里：①台词
-// 意思不许改（台词里的风险词只许谐音替换）；②人物造型不许改（造
-// 型描写逐字保留，只许把造型句里夹带的 IP 名称换成描述同一外观的
-// 通用词）。服务端再做确定性兜底：AI 报的问题片段必须在原文里逐字
+// 意思不许改（版权词只许谐音替换、欺凌措辞可软化）；②人物造型本
+// 身不许改（造型描写逐字保留，只许把造型句里夹带的 IP 名称换成描
+// 述同一外观的通用词）。
+// v6.20 起指令在原 5 类版权风险后新增 5 类内容安全审核规则（项目
+// 45 镜头 1 在豆包被拒案反推）：写实皮肤细节 + 未成年（kind 未成年
+// 安全审核）、生图排版脏数据（kind 排版脏数据）、未成年身体强调词
+// （kind 未成年安全审核）、换脸（kind 敏感词）、针对未成年人的欺
+// 凌内容（kind 欺凌内容，含台词 / 情绪标签 / 动作描述 / 标题）。服务端再做确定性兜底：AI 报的问题片段必须在原文里逐字
 // 找得到才保留；用户本机替换表命中的词（knownHits）AI 漏了也强制
 // 并入问题清单，AI 完全没碰过的非删词类命中由服务端按表补改（删
 // 词类只点名不自动删，防误删台词信息）；命中清单不发给模型（表
@@ -12702,6 +12716,9 @@ listMonitorAccounts: defineAction({
         url: r.url,
         note: r.note,
         groupId: r.groupId ?? null,
+        autoUpdate: r.autoUpdate === 1,
+        lastCollectedAt: r.lastCollectedAt ? r.lastCollectedAt.toISOString() : null,
+        lastCollectStatus: r.lastCollectStatus,
         createdAt: r.createdAt.toISOString(),
       })),
     };
@@ -12852,6 +12869,10 @@ listMonitorFeed: defineAction({
     accounts: z.array(monitorFeedAccountOut),
     groups: z.array(monitorGroupOut),
     clearedAtMs: z.number(),
+    // v6.21：24 小时自动更新总开关（monitor_meta）与固定间隔
+    // （小时）。总开关只是页面设置，不触发任何抓取。
+    autoUpdateEnabled: z.boolean(),
+    autoUpdateIntervalHours: z.number(),
   }),
   async handler(ctx) {
     const db = ctx.db<typeof schema>();
@@ -12870,8 +12891,22 @@ listMonitorFeed: defineAction({
       list.push(v);
       byAccount.set(v.accountId, list);
     }
+    const autoUpdateEnabledRaw = await readMonitorMetaValue(
+      ctx,
+      "monitor_auto_update_enabled",
+    );
+    const autoUpdateIntervalRaw = await readMonitorMetaValue(
+      ctx,
+      "monitor_auto_update_interval_hours",
+    );
+    const autoUpdateIntervalParsed = Number.parseInt(autoUpdateIntervalRaw, 10);
     return {
       groups: groupRows.map((g) => ({ id: g.id, name: g.name })),
+      autoUpdateEnabled: autoUpdateEnabledRaw === "1",
+      autoUpdateIntervalHours:
+        Number.isFinite(autoUpdateIntervalParsed) && autoUpdateIntervalParsed > 0
+          ? autoUpdateIntervalParsed
+          : 24,
       accounts: accRows.map((r) => ({
         id: r.id,
         platform: r.platform,
@@ -12880,6 +12915,9 @@ listMonitorFeed: defineAction({
         url: r.url,
         note: r.note,
         groupId: r.groupId ?? null,
+        autoUpdate: r.autoUpdate === 1,
+        lastCollectedAt: r.lastCollectedAt ? r.lastCollectedAt.toISOString() : null,
+        lastCollectStatus: r.lastCollectStatus,
         createdAt: r.createdAt.toISOString(),
         videos: (byAccount.get(r.id) ?? [])
           .slice()
@@ -12905,6 +12943,7 @@ listMonitorFeed: defineAction({
             totalLikeCount: v.totalLikeCount,
             creatorBio: v.creatorBio,
             commentCount: v.commentCount,
+            isPinned: v.isPinned ?? null,
             collectedAt: v.collectedAt ? v.collectedAt.toISOString() : null,
             createdAt: v.createdAt.toISOString(),
           })),
@@ -12946,6 +12985,16 @@ fetchMonitorVideo: defineAction({
     // Excel 导入）——命中墓碑先解除再正常建卡，用户亲手粘回来
     // 的永远算数。
     fromIntake: z.boolean().optional().default(false),
+    // v6.21：置顶标记（intake payload 带 is_pinned 时才有）——
+    // 1 = 置顶、0 = 已确认非置顶；不带就留空（NULL = 未确认）。
+    // 粘贴建卡 / Excel 导入没有这项数据，不传。
+    isPinned: z.number().int().min(0).max(1).optional(),
+    // v6.21：到货来源（新建卡成功时写进达人的 last_collect_status）。
+    // 调用方按真实路径传：手动粘贴 / Excel导入；扩展上报走
+    // fromIntake=true 时可不传，服务端按「扩展上报」记。
+    collectSource: z
+      .enum(["手动粘贴", "扩展上报", "Excel导入"])
+      .optional(),
   }),
   response: z.object({
     ok: z.boolean(),
@@ -13136,9 +13185,22 @@ fetchMonitorVideo: defineAction({
         totalLikeCount: args.totalLikeCount,
         creatorBio: args.creatorBio,
         commentCount: args.commentCount,
+        isPinned: args.isPinned ?? null,
         collectedAt,
       })
       .returning({ id: schema.monitorVideos.id });
+    // v6.21：真实到货写状态——只有真正新建了卡片才算到货（重复
+    // 跳过不算）：把该达人的上次到货时间写成现在、来源写真实
+    // 路径。未来自动采集腿接进来时由它自己写「自动采集」，本
+    // 动作不写那个来源。
+    await db
+      .update(schema.monitorAccounts)
+      .set({
+        lastCollectedAt: new Date(),
+        lastCollectStatus:
+          args.collectSource ?? (args.fromIntake ? "扩展上报" : "手动粘贴"),
+      })
+      .where(eq(schema.monitorAccounts.id, accountId));
     ctx.invalidateQueries();
     return { ok: true as const, accountId, videoDbId: insertedVid[0]?.id, duplicated: false as const };
   },
@@ -13332,6 +13394,75 @@ setMonitorAccountGroup: defineAction({
       .update(schema.monitorAccounts)
       .set({ groupId: args.groupId })
       .where(eq(schema.monitorAccounts.id, args.accountId));
+    ctx.invalidateQueries();
+    return { ok: true as const };
+  },
+}),
+
+// v6.21：24 小时自动更新的页面侧设置——达人参与开关、总开关、
+// 卡片置顶标记。网页本身调不通快手（要登录 + 页面签名），这些
+// 开关只是页面上的设置与状态记录，不触发任何抓取；「下次应更
+// 新」时间只做提示。
+setMonitorAccountAutoUpdate: defineAction({
+  description: "设置某个监控达人是否参与 24 小时自动更新（只写页面标记，不触发任何抓取）。",
+  request: z.object({
+    accountId: z.number().int().positive(),
+    autoUpdate: z.boolean(),
+  }),
+  response: z.object({ ok: z.boolean(), error: z.string().optional() }),
+  async handler(ctx, args) {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select({ id: schema.monitorAccounts.id })
+      .from(schema.monitorAccounts)
+      .where(eq(schema.monitorAccounts.id, args.accountId));
+    if (rows.length === 0) {
+      return { ok: false as const, error: "这位达人不在名单里了，刷新一下再试。" };
+    }
+    await db
+      .update(schema.monitorAccounts)
+      .set({ autoUpdate: args.autoUpdate ? 1 : 0 })
+      .where(eq(schema.monitorAccounts.id, args.accountId));
+    ctx.invalidateQueries();
+    return { ok: true as const };
+  },
+}),
+
+setMonitorAutoUpdateEnabled: defineAction({
+  description: "设置监控页「24 小时自动更新」总开关（存 monitor_meta，只是页面设置，不触发任何抓取；间隔固定 24 小时）。",
+  request: z.object({ enabled: z.boolean() }),
+  response: z.object({ ok: z.literal(true) }),
+  async handler(ctx, args): Promise<{ ok: true }> {
+    await writeMonitorMetaValue(
+      ctx,
+      "monitor_auto_update_enabled",
+      args.enabled ? "1" : "0",
+    );
+    ctx.invalidateQueries();
+    return { ok: true as const };
+  },
+}),
+
+setMonitorVideoPinned: defineAction({
+  description: "手动设置一张监控视频卡片的置顶状态：1 = 置顶、0 = 已确认非置顶、null = 改回未确认。",
+  request: z.object({
+    id: z.number().int().positive(),
+    isPinned: z.number().int().min(0).max(1).nullable(),
+  }),
+  response: z.object({ ok: z.boolean(), error: z.string().optional() }),
+  async handler(ctx, args) {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select({ id: schema.monitorVideos.id })
+      .from(schema.monitorVideos)
+      .where(eq(schema.monitorVideos.id, args.id));
+    if (rows.length === 0) {
+      return { ok: false as const, error: "这张卡片已经不在了，刷新一下再试。" };
+    }
+    await db
+      .update(schema.monitorVideos)
+      .set({ isPinned: args.isPinned })
+      .where(eq(schema.monitorVideos.id, args.id));
     ctx.invalidateQueries();
     return { ok: true as const };
   },
@@ -16179,9 +16310,9 @@ description: "同步提交 Geeknow 生图并等待出图，只在用户点生成
 // 个别模型可能同步直接回图——那种情况直接暂存并带回 stagedKey。
 // v4.22 参考图通道恢复（用户明确要求、推翻 v4.05 停用）：异步端
 // 点只收 http(s) 图片链接；带 referenceImages 的提交由特权层把
-// 降采样副本换成链接再提交（v5.97 起主路线 Geeknow 自家上传、
-// 回退 uguu.se 公开图床，与 hostGeeknowReferenceImages 同一套双
-// 路线）；未带链接进来时客户端一般已先调托管动作。特权层托管
+// 降采样副本换成链接再提交（只走 Geeknow 自家上传，与
+// hostGeeknowReferenceImages 同一路线；v6.17 起 uguu.se 公开
+// 图床回退已删除）；未带链接进来时客户端一般已先调托管动作。特权层托管
 // 失败回真实原因、整单失败。
 submitGeeknowImageTask: defineAction({
 description: "提交一个 Geeknow 异步生图任务并返回任务号，只在用户点生成时调用。",
@@ -16374,15 +16505,14 @@ description: "提交一个 Geeknow 异步生图任务并返回任务号，只在
 // 过守护进程 30 秒预算，带 1 张图也必被掐断。拆开后托管单独一个
 // 动作、独占自己的 30 秒预算（特权层整步共用 24 秒截止），提交
 // 动作只带链接、只剩一次 Geeknow 调用。
-// v5.97 托管换主路线：先走 Geeknow 自家上传（presign + PUT 到自
-// 家空间，鉴权与提交同口径、经 apiKey / apiBase 透传），自家上
-// 传走不通才自动改走 uguu.se 公开图床再试一次——用户只点一次，
-// 内部自动换线；两条都失败才报错，报错写清两条各败在哪。本动
-// 作只换链接：不建任务、不计费；明说还没提交、不会计费、可以
-// 直接重试。回执带 route（geeknow / uguu / mixed）写明这次实际
-// 走的路线。链接只随回执返回、不落库（记录只存哈希）。
+// 托管只走 Geeknow 自家上传（presign + PUT 到自家空间，鉴权
+// 与提交同口径、经 apiKey / apiBase 透传）；v6.17 安全修正：
+// uguu.se 公开图床回退已删除，自家上传走不通就报错、写清败在
+// 哪一步，不再改走公开图床。本动作只换链接：不建任务、不计
+// 费；明说还没提交、不会计费、可以直接重试。回执带 route
+// （恒 geeknow）。链接只随回执返回、不落库（记录只存哈希）。
 hostGeeknowReferenceImages: defineAction({
-description: "把生图参考图换成 https 链接（先走 Geeknow 自家上传、走不通自动改走公开图床），只换链接不提交任务，用户点生成时在提交前调用。",
+description: "把生图参考图换成 https 链接（只走 Geeknow 自家上传，不走公开图床），只换链接不提交任务，用户点生成时在提交前调用。",
   request: z.object({
     // 与提交动作同一套参考图形态（内联副本 | 中转分片引用），
     // handler 里先拼回归一再透传特权层。
@@ -16398,11 +16528,11 @@ description: "把生图参考图换成 https 链接（先走 Geeknow 自家上�
     ok: z.boolean(),
     error: z.string().nullable(),
     urls: z.array(z.string()),
-    // host_timeout（两条路线都太慢）/ host_error（其他失败），
+    // host_timeout（自家上传太慢）/ host_error（其他失败），
     // 成功时为 null。
     stage: z.string().nullable(),
-    // v5.97：这次实际走的路线——geeknow（Geeknow 自家上传）/
-    // uguu（公开图床回退）/ mixed（两种都有）；失败时为 null。
+    // 这次实际走的路线——恒 geeknow（Geeknow 自家上传）；
+    // 失败时为 null。
     route: z.string().nullable(),
   }),
   privileged: [privileged.geeknowHostReferenceImages],
@@ -20047,7 +20177,7 @@ purgeIssueData: defineAction({
 }),
 
 checkPromptCopyright: defineAction({
-description: "提示词检查（v5.92 立、v5.93 改为一段一调）：检查用户粘贴的视频生成提示词中的一段（客户端按约 1200 字切段、逐段串行调用本动作，一次调用只查这一段、只按这一段产出），逐处指出版权/商标/真实人物等会被平台拦截的风险点（原文片段、位置、类型、为什么会被拦、怎么改），并产出这一段改好的文本与逐处改动清单。硬性规则：台词意思不许改（台词里的风险词只许谐音替换）、人物造型不许改（造型描写逐字保留，只许换掉造型句里夹带的 IP 名称）。不存任何数据。",
+description: "提示词检查（v5.92 立、v5.93 改为一段一调、v6.20 加五类安全审核）：检查用户粘贴的视频生成提示词中的一段（客户端按约 1200 字切段、逐段串行调用本动作，一次调用只查这一段、只按这一段产出），逐处指出版权/商标/真实人物等版权风险点，以及写实皮肤细节+未成年、生图排版脏数据、未成年身体强调词、换脸、针对未成年人的欺凌内容这五类内容安全风险点（原文片段、位置、类型、为什么会被拦、怎么改），并产出这一段改好的文本与逐处改动清单。硬性规则：台词意思不许改（版权词只许谐音替换、欺凌措辞可软化）、人物造型本身不许改（只许换掉造型句里夹带的 IP 名称、清掉排版指令与未成年风险词）。不存任何数据。",
 request: z.object({
 text: z.string().trim().min(1).max(20000),
 knownHits: z
@@ -20089,7 +20219,7 @@ if (text.includes(h.from)) knownHits.push(h);
 // 回。覆盖由确定性兜底保证：模型通读这一段找风险，表命中词模
 // 型漏掉的由服务端强制补进问题清单并按保守口径补改（见兜底二）。
 const system =
-"你是一名 AI 视频生成提示词的版权风险审查员，熟悉豆包、即梦等平台的版权拦截口径：提示词里出现受版权或商标保护的名称、真实人物姓名等内容时，整段提示词会被平台拦截。你只做审查与最小改动的修复，不创作新内容、不改写原文风格。";
+"你是一名 AI 视频生成提示词的版权与内容安全风险审查员，熟悉豆包、即梦等平台的拦截口径：提示词里出现受版权或商标保护的名称、真实人物姓名等内容时会被版权拦截；出现写实皮肤细节配未成年人物、生图排版脏数据、未成年身体强调词、「换脸」、针对未成年人的欺凌内容时会被内容安全审核拦截。你只做审查与最小改动的修复，不创作新内容、不改写原文风格。";
 const prompt = [
 "请检查下面这份视频生成提示词，找出所有可能触发版权拦截的内容，并给出每一处该怎么改。",
 ...(args.segmented
@@ -20103,18 +20233,26 @@ const prompt = [
 "4. 直接照搬的知名作品台词、歌词、广告语原文；",
 "5. 其他明确指向某个受保护作品或人物的说法。",
 "",
+"另外，以下 5 类是平台内容安全审核会拦的风险（与版权无关，是内容安全口径；真实案例：一段校园喜剧提示词就是栽在这 5 类上被整段拒绝的），也要一并查出、按每类的改法修好：",
 "",
-"1. 台词的意思不许改：台词（引号里的、或明确标明是台词的句子）的语义、信息、语气必须与原文完全一致。台词里若有风险词，只允许换成同音或近音字（谐音替换），替换后读出来的意思必须和原意一致；不许删台词、不许换一种说法、不许增减信息。",
-"2. 人物的造型不许改：人物外貌、发型、发色、服装、配饰、体型等造型描写的具体内容必须原样保留（颜色、款式、材质一律不动）。造型句里若夹带 IP 名称，只许把 IP 名称本身换成描述同一外观的通用词（例：「钢铁侠铠甲」换成「红金色机甲铠甲」——外观还是同一个样子，只是没了 IP 名字），造型描写的其余部分逐字保留，并要在 changes 里注明这属于「造型句里的 IP 名称替换、外观未动」。",
+"6. 写实皮肤细节 + 未成年：提示词要求超写实 / 真人实拍，并且写了皮肤细节类说法（真实皮肤纹理、毛孔、汗毛、皮脂光泽、次表面散射、细腻毛孔、real skin texture 等同类写法，英文行同理），同时画面人物里有未成年（小学生、小孩、男孩、女孩、儿童、少年、少女、未成年，或小学 / 教室 / 校园场景配孩子身份）——这类组合会被安全审核整段拦截。改法：只删掉皮肤细节那半句，风格本身（超写实真人实拍、电影质感、自然光等）原样留着。kind 标「未成年安全审核」。",
+"7. 生图排版脏数据：人物造型句里混进了生图 / 作图的排版指令或渲染参数——三视图排版、无头全身、裁到脖子、五格同一个人、左 70% / 右 30% 分格、头部特写排版、纯色 / 浅色背景、无文字、无水印这类作图指令，以及 8K 超高清、电影级 CG 渲染等渲染参数。这些不是造型内容，是当初生成人物图时的工作指令，混进视频提示词会让画面生成跑偏、也可能触发审核。改法：整段删掉排版 / 渲染指令，只留真正的造型（发型、五官、服装、配饰、身份）。kind 标「排版脏数据」。",
+"8. 未成年身体强调词：针对未成年角色的身体 / 外貌强调措辞（如面容稚嫩、身形纤细、高腰短裤等同类说法）会被安全审核盯上。改法：删掉这类形容词，或换成中性说法（面容稚嫩→删、身形纤细→删、高腰短裤→短裤）；该人物的发型、服装、配饰、身份一字不动。只在角色是未成年时触发，成年人物的同样措辞不触发、不报。kind 标「未成年安全审核」。",
+"9. 换脸：凡出现「换脸」二字（包括「严禁换脸」这类禁止句）都会被安全审核盯上。改法：只删掉「换脸」二字，其余内容原样保留（如「严禁换脸、互换、串演」改成「严禁互换、串演」）。kind 标「敏感词」。",
+"10. 针对未成年人的欺凌内容：成年人羞辱、威胁、排挤未成年人，或同龄人嘲笑未成年人的贫穷、体型、外貌、敌意宣战——台词、情绪标签、动作描述、标题里出现都算。实例（台词）：「有你这种学生我真嫌丢人」「你闭嘴」「你以后就不要来学校了」「一看就是家里穷，没钱买」「从现在开始，你就是我的敌人」「长得跟你一样肥」「你这是传说中的猪狗吗」；实例（情绪标签）：（威胁）（嘲笑）（宣战）（嫌弃训斥）（刻薄调侃）（阴阳怪气）（粗暴打断）；实例（动作描述）：「放狠话」「冷脸宣战」「嗤笑」「嘲讽」；实例（标题）：「羞辱与维护」。上面只是例子，同类的其他说法（换了词但还是羞辱 / 威胁 / 嘲笑未成年人的）同样要查出来。改法：台词措辞软化、意思与情节保留（如 敌人→对手、闭嘴→别说了、威胁改成生气、家里穷→没准备、猪狗→小猪、肥→壮）；情绪标签与动作描述、标题同步换成中性说法（威胁→严肃、嘲笑→打趣、宣战→放话、训斥→说话、嗤笑→笑、羞辱→批评）。正常的批评教育、没有羞辱威胁意味的日常对话不算欺凌，不要误报。kind 标「欺凌内容」。",
+"",
+"",
+"1. 台词的意思不许改：台词（引号里的、或明确标明是台词的句子）的语义、信息、情节必须与原文一致。台词里的风险词分两类处理：(a) 版权 / IP 词——只允许换成同音或近音字（谐音替换），替换后读出来的意思必须和原意一致；(b) 欺凌 / 威胁类措辞（第 10 类）——在意思与情节保留的前提下，可以换成意思相近的温和说法（不限于谐音，如「闭嘴」换成「别说了」）。不许删台词、不许增减信息、不许改变情节走向。",
+"2. 人物的造型不许改：人物外貌、发型、发色、服装、配饰、体型概述、身份等造型描写本身必须原样保留（颜色、款式、材质一律不动）。造型句里若夹带 IP 名称，只许把 IP 名称本身换成描述同一外观的通用词（例：「钢铁侠铠甲」换成「红金色机甲铠甲」——外观还是同一个样子，只是没了 IP 名字），造型描写的其余部分逐字保留，并要在 changes 里注明这属于「造型句里的 IP 名称替换、外观未动」。只有两个例外不算改造型：(a) 造型句里夹带的生图排版 / 渲染指令（第 7 类）整段删掉；(b) 未成年角色的身体强调词（第 8 类）只删掉或换掉风险形容词本身。",
 "3. 除风险点外，原文其他内容（场景、动作、镜头、时长、站位、语气标注等）逐字保留：不许改写、不许增删、不许调整顺序；不要往改好的提示词里添加原文没有的任何句子（包括声明、说明、标题）。",
 "4. 非台词、非造型部分的风险词，换成意思最接近的通用说法；实在没有通用说法的 IP 专有名词可以删掉该词，但要保证删完句子通顺。",
 "",
 "",
 "- summary：一句话结论（有没有风险、大概几处、主要是什么类型）。",
-"- issues：逐处列出。quote 必须是原文中逐字出现的片段（一字不差、含标点，不要改写、不要拼接不相邻的文字）；location 写它在原文中的位置（如「第 2 段的台词里」「人物造型描写里」，数不准就写「正文里」）；kind 从「影视动漫游戏IP」「品牌商标」「真实人物」「知名台词歌词」「其他」里选最贴切的一个；reason 用大白话说清这是什么版权或商标、为什么会被平台拦（一句话、别超过 60 字）；solution 说清这处具体怎么改、改成什么，必须与 changes 里的改法一致（一句话、别超过 40 字）。",
-"- changes：需要改的每一处（from = 原文片段，to = 改成什么，删掉就给空字符串；note 说明这处属于哪一类：台词谐音 / 造型句IP名称 / 普通替换 / 删除）。服务端会按 changes 把原文逐处替换、拼出改好的提示词，所以 changes 必须覆盖全部要改的地方、一处不漏；同一处在原文出现多次的只列一条（会统一替换）。没有任何风险时给空数组。",
-"- dialogueIntact：自检——按 changes 改完后，台词与原文台词意思完全一致（只许谐音差异）时给 true，否则 false。",
-"- lookIntact：自检——按 changes 改完后，人物造型描写与原文一致（只许造型句中的 IP 名称按硬性规则 2 替换）时给 true，否则 false。",
+"- issues：逐处列出。quote 必须是原文中逐字出现的片段（一字不差、含标点，不要改写、不要拼接不相邻的文字）；location 写它在原文中的位置（如「第 2 段的台词里」「人物造型描写里」，数不准就写「正文里」）；kind 从「影视动漫游戏IP」「品牌商标」「真实人物」「知名台词歌词」「未成年安全审核」「排版脏数据」「敏感词」「欺凌内容」「其他」里选最贴切的一个（第 6、8 类用「未成年安全审核」，第 7 类用「排版脏数据」，第 9 类用「敏感词」，第 10 类用「欺凌内容」）；reason 用大白话说清这是什么版权或商标、为什么会被平台拦（一句话、别超过 60 字）；solution 说清这处具体怎么改、改成什么，必须与 changes 里的改法一致（一句话、别超过 40 字）。",
+"- changes：需要改的每一处（from = 原文片段，to = 改成什么，删掉就给空字符串；note 说明这处属于哪一类：台词谐音 / 造型句IP名称 / 普通替换 / 删除 / 排版指令清理 / 未成年措辞软化 / 皮肤细节删除 / 换脸删词 / 欺凌措辞软化）。服务端会按 changes 把原文逐处替换、拼出改好的提示词，所以 changes 必须覆盖全部要改的地方、一处不漏；同一处在原文出现多次的只列一条（会统一替换）。没有任何风险时给空数组。",
+"- dialogueIntact：自检——按 changes 改完后，台词与原文台词意思一致（版权词只许谐音差异；欺凌 / 威胁措辞按第 10 类软化、意思与情节保留也算一致）时给 true，否则 false。",
+"- lookIntact：自检——按 changes 改完后，人物造型描写本身与原文一致（只许造型句中的 IP 名称按硬性规则 2 替换、排版 / 渲染指令按第 7 类整段删、未成年身体强调词按第 8 类删换）时给 true，否则 false。",
 "",
 "",
 text,

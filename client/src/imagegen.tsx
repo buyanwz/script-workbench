@@ -1723,7 +1723,7 @@ function ImageGenPanel({
       } catch (e) {
         setSubmitError(
           isGatewayTimeoutText(describeThrownError(e))
-            ? "参考图换链接超时了：先走 Geeknow 自家上传、再自动改走公开图床，两条都没在时间里走完。这一步在提交之前，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。"
+            ? "参考图换链接超时了：Geeknow 自家上传没在时间里走完。这一步在提交之前，这次没有提交、任务没有建、不会计费，可以直接再点一次生成重试。"
             : `参考图换链接没走完，这次没有提交、不会计费：${describeThrownError(e)}。可以直接再点一次生成重试。`,
         );
         return false;
@@ -1736,11 +1736,7 @@ function ImageGenPanel({
       setHostRouteNote(
         hostRes.route === "geeknow"
           ? "这次参考图走的是 Geeknow 自家上传（图传到了 Geeknow 自家空间，没走公开图床）。"
-          : hostRes.route === "uguu"
-            ? "这次 Geeknow 自家上传没走通，已自动改走公开图床换链接（拿到链接的人能打开这张图、短期后自动删除）。"
-            : hostRes.route === "mixed"
-              ? "这次参考图一部分走 Geeknow 自家上传、一部分走了公开图床回退（走公开图床的那几张，拿到链接的人能打开、短期后自动删除）。"
-              : null,
+          : null,
       );
     }
     // v5.70：提交带生图接口总设置的解析结果（填了用总设置、没填
@@ -2898,7 +2894,7 @@ function ImageGenPanel({
           )}
           {refs.length > 0 && (
             <p className="mt-2 text-[11px] leading-4 text-[var(--dim)]" role="note">
-              点「生成图片」时，已选参考图会自动上传换链接再交给 Geeknow：先走 Geeknow 自家上传（图传到 Geeknow 自家空间），自家上传走不通时才自动改走公开图床换链接（只有走公开图床那条路时，才是拿到链接的人能打开这张图、短期后自动删除），不用再勾选。
+              点「生成图片」时，已选参考图会自动上传换链接再交给 Geeknow：只走 Geeknow 自家上传（图传到 Geeknow 自家空间），不会把图发到公开图床；自家上传走不通时这次就停下报错、不提交不计费，可以直接重试，不用再勾选。
             </p>
           )}
           {refs.length > 0 && (
