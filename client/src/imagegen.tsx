@@ -80,6 +80,69 @@
 //     「造型已按生图提示词写进这张图」；改图记录（【改图】开头）
 //     与剥完为空时沿用 v5.56 旧路（AI 分析进待确认）。点完只在
 //     记录提示区报结果，不跳转、不自动打开卡详情（用户选 2.b）。
+//   - v6.34 图片生成工作台（问题 #111613）：纯 UI 重组，业务逻辑
+//     一字未动。面板改名「图片生成工作台」，宽度默认按屏宽给
+//     （500/480/440）、左边缘可拖拽 420–560 并存本机；顶部加
+//     「创作 / 生成记录」两标签，记录整块移出创作页；创作页顺序
+//     为提示词（中英标签切换、高 190px、复制/清空当前份、AI 优
+//     化随附）→ 参考素材（三列网格、点图大图、更换/删除、上限
+//     16 不变）→ 人物参考关联卡（缩略图/已关联/参考说明、绑定
+//     详情折叠、解除关联只清自动带入图）→ 生成设置（关键项直
+//     出、模型/超时/重试/节点进高级设置折叠）；生成按钮与字数、
+//     报错、路线说明移入底部固定条，滚动不离场。新增 UI 状态只
+//     有 panelTab / promptLang / advancedOpen / assocDetailOpen /
+//     panelWidth / refLightbox / replaceIdx，均为显示状态，不进
+//     草稿、不进记录、不改任何提交与轮询逻辑。
+//   - v6.35 居中悬浮工作台（用户主聊亲发八节规格）：右侧抽屉布局
+//     彻底取消，改为屏幕居中大型悬浮窗口（Modal Workspace）——
+//     半透明深色遮罩 + 背景模糊、z-[95] 压过工作台与普通弹窗；
+//     桌面宽 min(1160px, 100vw-64px)、高 min(820px, 100dvh-48px)、
+//     圆角 16px，小屏（<640px）全屏无圆角。v6.34 的左缘拖拽调宽
+//     与 panelWidth 状态整体下线（固定尺寸不再需要）。创作页改
+//     双栏：左约 60% = 改图区 / 提示词 / 生成设置，右约 40% =
+//     参考素材 / 人物参考关联，窄屏自动单栏（grid 单列堆叠）；
+//     状态行（连接 / 公告 / 来源）仍在双栏上方整行。顶部标题与
+//     「创作 / 生成记录」导航、底部固定条保持固定，中间独立滚
+//     动；底部固定条新增一行「当前模型 · 质量 · 比例 · 任务状
+//     态」。打开期间锁 body 滚动防穿透（最小化时释放）；Esc 与
+//     点遮罩走同一关闭口径。关闭保护：草稿实时回存本机、关窗
+//     不丢、已提交任务在服务端与记录里续跑，平时点关闭直接关
+//     不打扰；只有「正在提交」那几秒点关闭才弹确认（防提交请
+//     求被卸载打断误判失败）。最小化保留原小浮条（标题「图片
+//     生成工作台」+ 展开 / 关闭），状态全保留；手机打开不再自
+//     动最小化（小屏直接全屏窗口）。业务逻辑、草稿结构、记录
+//     与轮询一字未动。
+//   - v6.39 人物特征融合（用户主聊亲发十节规格）：提示词区「中文构
+//     思 / 英文提示词」那一排加「人物特征融合」按钮，点开在同一悬
+//     浮窗内切到融合界面（顶部「返回」回创作页、Esc 同口径，不另
+//     开窗不跳页）。界面五部分：融合模式（双参考图 / 单参考图＋文
+//     字）、素材上传（双图左右 A/B、单图＋文字要求框）、融合设置
+//     （超写实 / 3D 动漫两种风格、双图另加均衡 / 以 A 为主 / 以 B
+//     为主、补充要求）、「开始融合」主按钮（只调服务端
+//     fuseCharacterFeatures 做特征分析与提示词生成，绝不提交生
+//     图）、结果预览（融合说明 / 中文正向 / 英文正向 / 负向四块，
+//     均可编辑、各有复制，另有一键复制完整 / 只复制正向 / 只复制
+//     负向 / 重新融合 / 使用此提示词）。「使用此提示词」把中英文
+//     正向填回提示词框：框空直接填、框里已有内容先 ConfirmDialog
+//     确认才覆盖；负向提示词因工作台没有负向输入框，只展示 + 复
+//     制、不自动带上（结果区有明示）。融合的模式 / 风格 / 主次 /
+//     图片 / 文字 / 结果与编辑跟面板草稿同一份本机存档（关窗、最小
+//     化不丢；切换模式保留另一模式输入；失败只报错可重试、绝不
+//     清空已传图片与文字）。上传图在本机压成 1024px JPEG 副本给
+//     视觉模型（与现有图片分析同一走法），原图文件不动。生图提
+//     交、参考素材、人物关联、记录与轮询一字未动。
+//   - v6.41 融合结果使用时带图（用户原话「生成图片的时候要以图生
+//     图方式，并标注哪个是图A图B」）：点「使用此提示词」除填提示
+//     词（规则不变）外，把本次融合用的参考图带进创作页参考素材
+//     区——双图带 A、B 两张（A 前 B 后、缩略图角标「图A」「图B」）、
+//     单图带一张（角标「参考图」），RefImage 新增 fusionBadge 字
+//     段承载角标（只显示、不改图片本身，提示词正文不加标注行）。
+//     带入的图与手动上传同一待遇（origin=manual、同一份 refs、上
+//     限 16 同一校验），点「生成图片」按现有链路一起上传走图生
+//     图，不用再勾选；同角标 + 同图字节已在素材区不重复带；满额
+//     放不下时提示词照常填入并在回执与素材区双处明示先删再补带，
+//     不静默丢图；删掉带入图与普通参考图一致（删了就不提交）。
+//     提交链路、融合分析、预览区、结果四块、复制、状态保持不动。
 // ---------------------------------------------------------------------------
 
 import { useEffect, useRef, useState } from "react";
@@ -95,6 +158,7 @@ retryReadQuery,
 withReadTimeout,
 } from "./gateway";
 import { PreviewImg } from "./previewimg";
+import { ConfirmDialog } from "./confirm";
 import {
 loadImageApiSettings,
 resolveImageApiConfig,
@@ -108,6 +172,7 @@ dataRefToSubmitReference,
 downloadOriginalImage,
 formatByteSize,
 urlToBase64,
+urlToThumbnail,
 } from "./scriptlib";
 import {
 GEEKNOW_PROMPT_HARD_LIMIT,
@@ -484,6 +549,11 @@ type RefImage = {
   // 卡打开面板时自动带入的主图；manual = 用户在面板里手动上传或
   // 「从储存库选图」加入。旧草稿里没有这个字段，按 manual 算。
   origin?: "auto" | "manual";
+  // v6.41 融合带入角标：从人物特征融合点「使用此提示词」带进来的参
+  // 考图带这个标记（双图模式「图A」/「图B」、单图模式「参考图」），
+  // 参考素材区缩略图左上角显示同名角标；手动上传 / 储存库选图 /
+  // 更换后的图没有这个字段。带入去重按「同角标 + 同图字节」判定。
+  fusionBadge?: "图A" | "图B" | "参考图";
 };
 
 // ---------------------------------------------------------------------------
@@ -559,6 +629,122 @@ function lookFromPromptZh(promptZh: string): string {
 // 参考图仍留在当前打开的面板内存里，不因存草稿失败丢图。
 const DRAFT_KEY = "imagegen.panelDraft.v1";
 
+// ---------------------------------------------------------------------------
+// v6.39 人物特征融合（用户主聊亲发十节规格）：在图片生成工作台悬浮窗
+// 内、提示词区那一排进入的融合界面——上传两张人物参考图（双图融合）
+// 或一张参考图 + 文字要求（单图融合），选融合风格（超写实 / 3D 动
+// 漫）与主次，点「开始融合」只调服务端 fuseCharacterFeatures 做特征
+// 分析与提示词生成（不提交生图、不改现有生图链路），一次回四块：
+// 融合结果说明 / 中文正向 / 英文正向 / 负向，四块都可编辑可复制，
+// 「使用此提示词」把中英文正向填回创作页提示词框（框里已有内容先弹
+// 确认、不静默覆盖；工作台没有负向提示词输入框，负向只展示 + 复
+// 制）；v6.41 起同时把融合参考图带进创作页参考素材区（双图角标
+// 「图A」「图B」、单图角标「参考图」），生成时按图生图一起提交。
+// 融合的全部输入与结果跟面板草稿同一份本机存档走（关窗 / 最
+// 小化不丢、切换模式保留另一模式的输入、失败不清空）。图片存的是给视觉模型看的 1024px JPEG 副本（与现有图片分
+// 析同一走法），用户本机的原图文件一字不动。
+// v6.43 起分析改走服务端后台任务（fusion_jobs）：点开始只建任
+// 务，分析在后台跑、页面轮询取结果；任务号（fusion.jobId）跟草
+// 稿一起存本机，重开面板接着同一任务取结果。任务行只是分析的
+// 临时通道，融合的输入与最终结果仍以本机草稿为准。
+// ---------------------------------------------------------------------------
+
+type FusionImage = {
+  dataBase64: string;
+  mimeType: string;
+  preview: string;
+  label: string;
+};
+
+type FusionResult = {
+  summary: string;
+  promptZh: string;
+  promptEn: string;
+  negative: string;
+};
+
+type FusionDraft = {
+  mode: "dual" | "single";
+  style: "hyperreal" | "anime3d";
+  balance: "balanced" | "a" | "b";
+  imgA: FusionImage | null;
+  imgB: FusionImage | null;
+  imgSingle: FusionImage | null;
+  textRequirement: string;
+  extraRequirement: string;
+  result: FusionResult | null;
+  // v6.43 融合改后台任务＋轮询：进行中的融合任务号跟草稿一起存
+  // 本机——关窗 / 最小化 / 刷新后重开面板，凭这个号接着同一个任
+  // 务取结果，不从头重跑；任务完成或失败后清回 null。
+  jobId: number | null;
+};
+
+const EMPTY_FUSION: FusionDraft = {
+  mode: "dual",
+  style: "hyperreal",
+  balance: "balanced",
+  imgA: null,
+  imgB: null,
+  imgSingle: null,
+  textRequirement: "",
+  extraRequirement: "",
+  result: null,
+  jobId: null,
+};
+
+function parseFusionImage(v: unknown): FusionImage | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Partial<FusionImage>;
+  if (
+    typeof o.dataBase64 !== "string" ||
+    !o.dataBase64 ||
+    typeof o.mimeType !== "string" ||
+    !o.mimeType
+  ) {
+    return null;
+  }
+  return {
+    dataBase64: o.dataBase64,
+    mimeType: o.mimeType,
+    preview:
+      typeof o.preview === "string" && o.preview
+        ? o.preview
+        : `data:${o.mimeType};base64,${o.dataBase64}`,
+    label: typeof o.label === "string" ? o.label : "",
+  };
+}
+
+function parseFusionDraft(v: unknown): FusionDraft {
+  if (!v || typeof v !== "object") return { ...EMPTY_FUSION };
+  const o = v as Partial<FusionDraft>;
+  const r =
+    o.result && typeof o.result === "object"
+      ? (o.result as Partial<FusionResult>)
+      : null;
+  return {
+    mode: o.mode === "single" ? "single" : "dual",
+    style: o.style === "anime3d" ? "anime3d" : "hyperreal",
+    balance: o.balance === "a" || o.balance === "b" ? o.balance : "balanced",
+    imgA: parseFusionImage(o.imgA),
+    imgB: parseFusionImage(o.imgB),
+    imgSingle: parseFusionImage(o.imgSingle),
+    textRequirement:
+      typeof o.textRequirement === "string" ? o.textRequirement : "",
+    extraRequirement:
+      typeof o.extraRequirement === "string" ? o.extraRequirement : "",
+    result: r
+      ? {
+          summary: typeof r.summary === "string" ? r.summary : "",
+          promptZh: typeof r.promptZh === "string" ? r.promptZh : "",
+          promptEn: typeof r.promptEn === "string" ? r.promptEn : "",
+          negative: typeof r.negative === "string" ? r.negative : "",
+        }
+      : null,
+    jobId:
+      typeof o.jobId === "number" && o.jobId > 0 ? o.jobId : null,
+  };
+}
+
 type PanelDraft = {
   modelFamily: string;
   model: string;
@@ -576,6 +762,8 @@ type PanelDraft = {
   refs: RefImage[];
   taskId: string | null;
   result: { stagedKey: string; imageUrl: string; mimeType: string } | null;
+  // v6.39 人物特征融合的输入与结果（旧草稿没有这一段，按空融合算）。
+  fusion?: FusionDraft;
 };
 
 function loadDraft(): PanelDraft | null {
@@ -608,6 +796,7 @@ function loadDraft(): PanelDraft | null {
         d.result && typeof d.result.stagedKey === "string"
           ? d.result
           : null,
+      fusion: parseFusionDraft(d.fusion),
     };
   } catch {
     return null;
@@ -624,7 +813,22 @@ function saveDraft(d: PanelDraft) {
         JSON.stringify({ ...d, refs: [] }),
       );
     } catch {
-      // 本机存不下就放弃持久化，面板内存里的状态不受影响。
+      try {
+        // 再退一步：融合图也先放下，模式 / 风格 / 文字 / 结果先存住，
+        // 图片仍留在当前打开的面板内存里，不因存草稿失败丢图。
+        window.localStorage.setItem(
+          DRAFT_KEY,
+          JSON.stringify({
+            ...d,
+            refs: [],
+            fusion: d.fusion
+              ? { ...d.fusion, imgA: null, imgB: null, imgSingle: null }
+              : d.fusion,
+          }),
+        );
+      } catch {
+        // 本机存不下就放弃持久化，面板内存里的状态不受影响。
+      }
     }
   }
 }
@@ -646,10 +850,8 @@ export function ImageGenPanelHost({
     openListener = (t) => {
       setTarget(t);
       setOpen(true);
-      // 手机端自动收起：先出最小化小条，点「展开」才铺开面板。
-      setMinimized(
-        typeof window !== "undefined" ? window.innerWidth < 640 : false,
-      );
+      // v6.35：小屏打开直接是全屏居中窗口，不再自动收成最小化小条。
+      setMinimized(false);
       setOpenNonce((n) => n + 1);
     };
     return () => {
@@ -661,7 +863,7 @@ export function ImageGenPanelHost({
     <>
       {minimized && (
         <div
-          className="fixed bottom-4 right-3 z-[60] flex items-center gap-2 rounded-full border px-3 py-2 text-sm font-bold"
+          className="fixed bottom-4 right-3 z-[95] flex items-center gap-2 rounded-full border px-3 py-2 text-sm font-bold"
           style={{
             background: "var(--surface)",
             borderColor: "var(--border)",
@@ -671,11 +873,11 @@ export function ImageGenPanelHost({
           role="status"
           aria-label="生图面板已最小化"
         >
-          <span>生图 · 图片模型管理</span>
+          <span>图片生成工作台</span>
           <button
             type="button"
             className="btn btn-sm btn-primary"
-            aria-label="展开生图面板"
+            aria-label="展开图片生成工作台面板"
             onClick={() => setMinimized(false)}
           >
             展开
@@ -683,7 +885,7 @@ export function ImageGenPanelHost({
           <button
             type="button"
             className="btn btn-sm"
-            aria-label="关闭生图面板"
+            aria-label="关闭图片生成工作台面板"
             onClick={() => setOpen(false)}
           >
             关闭
@@ -695,6 +897,7 @@ export function ImageGenPanelHost({
           target={target}
           openNonce={openNonce}
           activeProjectId={activeProjectId}
+          hidden={minimized}
           onClose={() => setOpen(false)}
           onMinimize={() => setMinimized(true)}
         />
@@ -707,12 +910,16 @@ function ImageGenPanel({
   target,
   openNonce,
   activeProjectId,
+  hidden,
   onClose,
   onMinimize,
 }: {
   target: ImageGenTarget | null;
   openNonce: number;
   activeProjectId: number | null;
+  /** v6.35：最小化时面板只是 display:none 隐藏（状态全保留），
+   * 居中窗口的 body 滚动锁随之释放，底层工作台可正常操作。 */
+  hidden: boolean;
   onClose: () => void;
   onMinimize: () => void;
 }) {
@@ -904,6 +1111,107 @@ function ImageGenPanel({
   // 正在看的那条记录（null = 没打开）。
   const [downloadingIds, setDownloadingIds] = useState<Record<number, boolean>>({});
   const [lightboxRec, setLightboxRec] = useState<GenRecord | null>(null);
+  // v6.34 图片生成工作台 UI 状态（纯 UI，不进草稿、不进记录）：
+  // panelTab 创作 / 生成记录两页切换；promptLang 提示词中英文标签；
+  // advancedOpen 高级设置折叠；assocDetailOpen 人物绑定详情展开；
+  // refLightbox 参考素材大图查看；replaceIdx 更换中的参考素材下标。
+  // 切换标签 / 折叠都只改这里的显示状态，提示词、参考素材、正在
+  // 生成的任务状态全在原有状态里，不受影响。
+  const [panelTab, setPanelTab] = useState<"create" | "records">("create");
+  const [promptLang, setPromptLang] = useState<"zh" | "en">("zh");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [assocDetailOpen, setAssocDetailOpen] = useState(false);
+  const [promptCopyMsg, setPromptCopyMsg] = useState<string | null>(null);
+  const [refLightbox, setRefLightbox] = useState<RefImage | null>(null);
+  const replaceRef = useRef<HTMLInputElement>(null);
+  const [replaceIdx, setReplaceIdx] = useState<number | null>(null);
+  // v6.39 人物特征融合（纯本机状态，跟草稿一起存本机 localStorage）：
+  // fusionView = 当前显示融合界面还是创作页（不进草稿，关窗重开回创
+  // 作页，融合内容本身在 fusion 草稿里）；fusion 是模式 / 风格 / 主
+  // 次 / 三个图片位 / 两份文字 / 结果四块的整份状态，切换模式只改
+  // mode、另一模式的输入原样保留；fusing / fusionError / fusionMsg
+  // 是当次调用的临时状态，失败只写 fusionError、绝不清空 fusion。
+  const [fusionView, setFusionView] = useState(false);
+  const [fusion, setFusion] = useState<FusionDraft>(
+    () => draft0?.fusion ?? { ...EMPTY_FUSION },
+  );
+  const [fusing, setFusing] = useState(false);
+  const [fusionError, setFusionError] = useState<string | null>(null);
+  const [fusionMsg, setFusionMsg] = useState<string | null>(null);
+  const [fusionUseConfirmOpen, setFusionUseConfirmOpen] = useState(false);
+  // v6.40 融合参考图大图查看（纯 UI 临时状态）：点预览图打开、整张
+  // 完整显示；点空白处 / 关闭按钮 / Esc 关，与全站大图层同一口径。
+  const [fusionLightbox, setFusionLightbox] = useState<{
+    src: string;
+    title: string;
+  } | null>(null);
+  const fusionFileA = useRef<HTMLInputElement>(null);
+  const fusionFileB = useRef<HTMLInputElement>(null);
+  const fusionFileSingle = useRef<HTMLInputElement>(null);
+  // v6.43 融合任务驱动代号：每次开始 / 恢复驱动都 +1，旧循环发现
+  // 代号对不上就自己停下（关窗卸载、重复点、恢复与新任务撞车时
+  // 不让两条轮询同时写结果）。
+  const fusionRunRef = useRef(0);
+  // v6.35 居中悬浮窗口行为（取代 v6.34 的面板宽度状态与拖拽调宽：
+  // 窗口尺寸改由 CSS 定死——桌面 min(1160px, 100vw-64px) ×
+  // min(820px, 100dvh-48px)、小屏全屏，不再有可拖宽度）：
+  // · closeConfirmOpen / requestClose 是唯一的关闭口径（关闭按钮、
+  //   点遮罩、Esc 都走它）：草稿实时回存本机、关闭不清空提示词、
+  //   已提交的任务在服务端与生图记录里继续跑，所以平时直接关、
+  //   不弹确认；只有 submitting（提交请求正在飞的那几秒）关窗会
+  //   卸载面板、可能把这次提交误判成失败，这一种情况才先弹确认。
+  // · 窗口打开期间锁住 body 滚动防滚动穿透；最小化（hidden）时
+  //   释放，底层工作台照常可用。
+  // · Esc 先关大图层、再关窗口，与其它弹窗口径一致。
+  const [closeConfirmOpen, setCloseConfirmOpen] = useState(false);
+  const requestClose = () => {
+    if (submitting) {
+      setCloseConfirmOpen(true);
+      return;
+    }
+    onClose();
+  };
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
+  useEffect(() => {
+    if (hidden) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [hidden]);
+  useEffect(() => {
+    if (hidden) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (fusionLightbox) {
+        setFusionLightbox(null);
+        return;
+      }
+      if (refLightbox) {
+        setRefLightbox(null);
+        return;
+      }
+      if (lightboxRec) {
+        setLightboxRec(null);
+        return;
+      }
+      // v6.39：融合界面里按 Esc 先回创作页，不直接关窗（融合内容
+      // 都在草稿里，回创作页什么都不丢）。
+      if (fusionView) {
+        setFusionView(false);
+        return;
+      }
+      requestCloseRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hidden, fusionLightbox, refLightbox, lightboxRec, fusionView]);
+  // 底部固定条的生成状态：有几条任务还在生成中（已提交未出结果）。
+  const activeGenCount = records.filter(
+    (r) => r.status === "submitted" || r.status === "generating",
+  ).length;
   const pollingRef = useRef<Map<number, number>>(new Map());
   const pollGenRef = useRef(0);
 
@@ -928,6 +1236,7 @@ function ImageGenPanel({
       refs,
       taskId: null,
       result: null,
+      fusion,
     });
   }, [
     modelFamily,
@@ -944,6 +1253,7 @@ function ImageGenPanel({
     artStyle,
     threeView,
     refs,
+    fusion,
   ]);
 
   // 面板卸载时让本机的轮询循环收手（任务号与状态都在记录里，
@@ -2285,11 +2595,858 @@ function ImageGenPanel({
   const connected = modelsQuery.data?.connected ?? null;
   const labelCls = "mb-1 block text-xs font-bold text-[var(--dim)]";
 
+  // v6.34 提示词区辅助操作（编辑区下方）：复制 / 清空只作用于当前
+  // 语言标签的那一份，另一份不动；内容与保存仍走原有 promptZh /
+  // promptEn 状态，模型调用的英文优先口径不变。
+  const copyActivePrompt = async () => {
+    const text = promptLang === "zh" ? promptZh : promptEn;
+    if (!text.trim()) {
+      setPromptCopyMsg("当前这份提示词是空的，没什么可复制。");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setPromptCopyMsg(
+        `已复制${promptLang === "zh" ? "中文构思" : "英文提示词"}（${text.length} 字符）。`,
+      );
+    } catch {
+      setPromptCopyMsg(
+        "复制没成功：浏览器没让网页写剪贴板，请手动选中文本复制。",
+      );
+    }
+  };
+  const clearActivePrompt = () => {
+    if (promptLang === "zh") setPromptZh("");
+    else setPromptEn("");
+    setPromptCopyMsg(
+      `已清空${promptLang === "zh" ? "中文构思" : "英文提示词"}，另一份没动。`,
+    );
+  };
+
+  // v6.39 人物特征融合的操作（只动 fusion 本机状态与提示词框，不碰
+  // 人物关联与任何生图提交逻辑；v6.41 起「使用此提示词」还会把融合
+  // 参考图带进参考素材区，见 applyFusionResult）：
+  const updateFusion = (patch: Partial<FusionDraft>) =>
+    setFusion((prev) => ({ ...prev, ...patch }));
+  const updateFusionResult = (patch: Partial<FusionResult>) =>
+    setFusion((prev) =>
+      prev.result ? { ...prev, result: { ...prev.result, ...patch } } : prev,
+    );
+
+  // 上传一张融合参考图：先在本机压成最长边 1024 的 JPEG 副本给视觉
+  // 模型看（与现有图片分析同一走法），压不动才回落原图字节；用户本
+  // 机上的原图文件不经这里改动。失败只报 fusionError，不动已传的图。
+  const pickFusionImage = async (
+    slot: "a" | "b" | "single",
+    file: File,
+  ) => {
+    if (!file.type.startsWith("image/")) {
+      setFusionError("只接受图片文件，请重新选一张人物参考图。");
+      return;
+    }
+    const caption =
+      slot === "a" ? "参考图 A" : slot === "b" ? "参考图 B" : "参考图";
+    try {
+      const objUrl = URL.createObjectURL(file);
+      let img: FusionImage | null = null;
+      try {
+        const thumb = await urlToThumbnail(objUrl, caption, 1024, 0.85);
+        if (thumb) {
+          img = {
+            dataBase64: thumb.dataBase64,
+            mimeType: thumb.mimeType,
+            preview: `data:${thumb.mimeType};base64,${thumb.dataBase64}`,
+            label: file.name,
+          };
+        }
+      } finally {
+        URL.revokeObjectURL(objUrl);
+      }
+      if (!img) {
+        const raw = await fileToBase64(file);
+        img = {
+          dataBase64: raw.dataBase64,
+          mimeType: raw.mimeType,
+          preview: `data:${raw.mimeType};base64,${raw.dataBase64}`,
+          label: file.name,
+        };
+      }
+      setFusionError(null);
+      if (slot === "a") updateFusion({ imgA: img });
+      else if (slot === "b") updateFusion({ imgB: img });
+      else updateFusion({ imgSingle: img });
+    } catch {
+      setFusionError(
+        "这张图没读进来，请换一张再试（已上传的其他图和文字都没动）。",
+      );
+    }
+  };
+
+  const fusionReady =
+    fusion.mode === "dual"
+      ? !!fusion.imgA && !!fusion.imgB
+      : !!fusion.imgSingle && fusion.textRequirement.trim().length > 0;
+
+  // v6.43 融合改后台任务＋轮询（修同步调用一直网关超时）：点
+  // 「开始融合」只调 startFusionJob 建任务、立刻拿到任务号，分析
+  // 在服务端后台跑；本页 driveFusionJob 每 3 秒推进＋轮询取结
+  // 果。单次轮询只读任务行、必然很快返回，不再有哪个请求要等分
+  // 析跑完。任务号存进 fusion 草稿（jobId），关窗 / 最小化 / 刷
+  // 新后重开面板会接着同一个任务取结果（见下方恢复 effect）。
+  const driveFusionJob = async (jobId: number, runToken: number) => {
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => setTimeout(resolve, ms));
+    // 最多驱动约 10 分钟：真实分析的服务端时限是 240 秒，再留足
+    // 「首轮被掐断、认领过期后重跑一轮」的余量。到顶不停任务、
+    // 不清任务号，只停本页驱动并说明下次打开接着取。
+    const DRIVE_CAP_MS = 10 * 60 * 1000;
+    const startedAt = Date.now();
+    for (;;) {
+      if (fusionRunRef.current !== runToken) return;
+      let out: ApiResponse<typeof api, "pollFusionJob"> | null = null;
+      try {
+        // 先推进一次：服务端认领窗口挡着不会重复跑分析；这次调
+        // 用本身可能被网关掐断（分析还在服务端跑），抛错不算失
+        // 败——紧接着用只读轮询取状态即可。
+        await api.runFusionJobStep({ jobId });
+      } catch {
+        // 推进调用被掐断 / 临时失败都靠下面的轮询定状态。
+      }
+      if (fusionRunRef.current !== runToken) return;
+      try {
+        out = await api.pollFusionJob({ jobId });
+      } catch {
+        out = null;
+      }
+      if (fusionRunRef.current !== runToken) return;
+      if (out) {
+        if (out.status === "done" && out.result) {
+          updateFusion({ result: out.result, jobId: null });
+          setFusing(false);
+          setFusionMsg(
+            "融合完成：下面四块都可以直接改；点「使用此提示词」把中英文正向填回创作页的提示词框，融合用的参考图也会一起带进参考素材区，确认无误后在创作页点「生成图片」出图。",
+          );
+          return;
+        }
+        if (out.status === "failed") {
+          updateFusion({ jobId: null });
+          setFusing(false);
+          setFusionError(
+            out.error ??
+              "融合失败，参考图和你填的要求都没动，请再点一次「开始融合」。",
+          );
+          return;
+        }
+      }
+      if (Date.now() - startedAt > DRIVE_CAP_MS) {
+        setFusing(false);
+        setFusionMsg(
+          "这次分析跑得比平时久，页面先停在这里——任务还在服务端后台跑，任务号已经存好，下次打开这个面板会接着同一个任务取结果，不会从头重跑、也不会重复分析。",
+        );
+        return;
+      }
+      await sleep(3000);
+    }
+  };
+
+  const runFusion = async () => {
+    if (fusing) return;
+    const imgA = fusion.imgA;
+    const imgB = fusion.imgB;
+    const imgSingle = fusion.imgSingle;
+    if (fusion.mode === "dual" && (!imgA || !imgB)) {
+      setFusionError("先把参考图 A 和参考图 B 都上传好，再点开始融合。");
+      return;
+    }
+    if (
+      fusion.mode === "single" &&
+      (!imgSingle || !fusion.textRequirement.trim())
+    ) {
+      setFusionError("先上传参考图、再把文字要求写清，再点开始融合。");
+      return;
+    }
+    setFusing(true);
+    setFusionError(null);
+    setFusionMsg(null);
+    try {
+      const visionImages =
+        fusion.mode === "dual" && imgA && imgB
+          ? [
+              {
+                dataBase64: imgA.dataBase64,
+                mimeType: imgA.mimeType,
+                caption: "参考图 A",
+              },
+              {
+                dataBase64: imgB.dataBase64,
+                mimeType: imgB.mimeType,
+                caption: "参考图 B",
+              },
+            ]
+          : imgSingle
+            ? [
+                {
+                  dataBase64: imgSingle.dataBase64,
+                  mimeType: imgSingle.mimeType,
+                  caption: "参考图",
+                },
+              ]
+            : [];
+      // 建任务这一步只写一行任务数据、立刻返回，不等分析——以前
+      // 卡死的「点完一直等到网关超时」就是没有这一步、直接在同
+      // 一次请求里等分析跑完。
+      const started = await callWithGatewayRetry(() =>
+        api.startFusionJob({
+          mode: fusion.mode,
+          style: fusion.style,
+          balance: fusion.balance,
+          textRequirement: fusion.textRequirement,
+          extraRequirement: fusion.extraRequirement,
+          visionImages,
+        }),
+      );
+      if (!started.ok || !started.jobId) {
+        setFusing(false);
+        setFusionError(
+          started.error ??
+            "融合任务没建起来，参考图和你填的要求都没动，请再点一次「开始融合」。",
+        );
+        return;
+      }
+      updateFusion({ jobId: started.jobId });
+      setFusionMsg(
+        "正在分析…分析在后台跑，通常要几十秒到一两分钟；这个窗口可以先关掉或最小化，回来打开会接着取结果，不用守着等。",
+      );
+      const runToken = ++fusionRunRef.current;
+      await driveFusionJob(started.jobId, runToken);
+    } catch (e) {
+      setFusing(false);
+      setFusionError(
+        `融合任务没建起来：${describeThrownError(e)}，参考图和你填的要求都没动，请再点一次「开始融合」。`,
+      );
+    }
+  };
+
+  // v6.43 恢复驱动：面板挂载时草稿里若留着未完成的融合任务号，
+  // 先只读轮询看它跑到哪了——已完成的直接把结果摆出来、已失败
+  // 的把任务行里的真实报错摆出来（输入都没动）、还在跑的接着驱
+  // 动同一个任务。只在挂载时认领一次（jobResumedRef 守着）。
+  const fusionJobResumedRef = useRef(false);
+  useEffect(() => {
+    if (fusionJobResumedRef.current) return;
+    fusionJobResumedRef.current = true;
+    const jobId = fusion.jobId;
+    if (!jobId) return;
+    void (async () => {
+      let st: ApiResponse<typeof api, "pollFusionJob"> | null = null;
+      try {
+        st = await api.pollFusionJob({ jobId });
+      } catch {
+        st = null;
+      }
+      if (!st) return;
+      if (st.status === "done" && st.result) {
+        updateFusion({ result: st.result, jobId: null });
+        setFusionMsg(
+          "上次融合已经分析完了，结果就在下面四块里；点「使用此提示词」把中英文正向填回创作页的提示词框，融合用的参考图也会一起带进参考素材区。",
+        );
+        return;
+      }
+      if (st.status === "failed") {
+        updateFusion({ jobId: null });
+        setFusionError(
+          st.error ??
+            "上次融合没分析成功，参考图和你填的要求都没动，请再点一次「开始融合」。",
+        );
+        return;
+      }
+      setFusing(true);
+      setFusionMsg(
+        "发现一个没跑完的融合任务，正在接着取结果（分析在后台跑，关窗和刷新都不会让它丢）……",
+      );
+      const runToken = ++fusionRunRef.current;
+      await driveFusionJob(jobId, runToken);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const copyFusionText = async (label: string, text: string) => {
+    if (!text.trim()) {
+      setFusionMsg(`${label}是空的，没什么可复制。`);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      setFusionMsg(`已复制${label}（${text.length} 字符）。`);
+    } catch {
+      setFusionMsg(
+        "复制没成功：浏览器没让网页写剪贴板，请手动选中文本复制。",
+      );
+    }
+  };
+
+  // 「使用此提示词」：中英文正向分别填回创作页的中文构思 / 英文提示
+  // 词框；任一框已有内容先弹确认（覆盖 / 取消），不静默覆盖。负向
+  // 提示词工作台没有输入框，不在这里填（结果区有说明）。
+  // v6.41：同时把本次融合用的参考图带进创作页参考素材区——双图模式
+  // 带 A、B 两张（顺序 A 前 B 后、角标「图A」「图B」），单图模式带
+  // 一张（角标「参考图」）；带入的图就是融合时已压好的 1024px JPEG
+  // 副本，与手动上传的参考图同一待遇（origin=manual、同一份 refs），
+  // 直接处于「点生成图片就一起提交」的状态、不用再勾选。去重：同
+  // 角标 + 同图字节已在素材区就不重复带；上限：素材区满 16 张放不
+  // 下时明确提示先删、提示词照常填入，不静默丢图。
+  const applyFusionResult = () => {
+    const r = fusion.result;
+    if (!r) return;
+    setPromptZh(r.promptZh);
+    setPromptEn(r.promptEn);
+    setFusionUseConfirmOpen(false);
+    const want: { img: FusionImage; badge: "图A" | "图B" | "参考图" }[] =
+      fusion.mode === "dual"
+        ? [
+            ...(fusion.imgA
+              ? [{ img: fusion.imgA, badge: "图A" as const }]
+              : []),
+            ...(fusion.imgB
+              ? [{ img: fusion.imgB, badge: "图B" as const }]
+              : []),
+          ]
+        : fusion.imgSingle
+          ? [{ img: fusion.imgSingle, badge: "参考图" as const }]
+          : [];
+    const fresh = want.filter(
+      (w) =>
+        !refs.some(
+          (x) =>
+            x.fusionBadge === w.badge && x.dataBase64 === w.img.dataBase64,
+        ),
+    );
+    const room = Math.max(0, 16 - refs.length);
+    const toAdd = fresh.slice(0, room);
+    const blockedNames = fresh.slice(room).map((w) => w.badge);
+    const alreadyNames = want
+      .filter((w) => !fresh.includes(w))
+      .map((w) => w.badge);
+    if (toAdd.length > 0) {
+      setRefs((prev) =>
+        [
+          ...prev,
+          ...toAdd.map((w) => ({
+            dataBase64: w.img.dataBase64,
+            mimeType: w.img.mimeType,
+            preview: w.img.preview,
+            label: w.img.label || `融合${w.badge}`,
+            origin: "manual" as const,
+            fusionBadge: w.badge,
+          })),
+        ].slice(0, 16),
+      );
+    }
+    const refParts: string[] = [];
+    if (toAdd.length > 0) {
+      refParts.push(
+        `融合参考图（${toAdd.map((w) => w.badge).join("、")}）也带进了参考素材区，点「生成图片」时会一起提交、按图生图`,
+      );
+    }
+    if (alreadyNames.length > 0) {
+      refParts.push(
+        `${alreadyNames.join("、")}已经在参考素材区里了，没有重复带入`,
+      );
+    }
+    if (blockedNames.length > 0) {
+      refParts.push(
+        `${blockedNames.join("、")}没带进来——参考素材已经满了（16 张），先删掉几张，再回融合界面点一次「使用此提示词」就能补带进来`,
+      );
+      setRefMsg(
+        "参考素材最多 16 张，融合参考图没带进来，先删掉几张再回融合界面点「使用此提示词」",
+      );
+    }
+    setFusionView(false);
+    setPanelTab("create");
+    setPromptCopyMsg(
+      `已把融合结果的中英文正向提示词填进提示词框${refParts.length > 0 ? `；${refParts.join("；")}` : ""}。检查无误后点下方「生成图片」出图。负向提示词没有自动带上（工作台没有负向输入框），需要时回融合结果里复制。`,
+    );
+  };
+  const requestUseFusionResult = () => {
+    if (!fusion.result) return;
+    if (promptZh.trim() || promptEn.trim()) {
+      setFusionUseConfirmOpen(true);
+      return;
+    }
+    applyFusionResult();
+  };
+
+  // v6.34 参考素材「更换」：用新选的图片替换指定下标那一张（走与
+  // 上传同一条 fileToBase64 路径，数量不变、不触上限校验之外的
+  // 任何逻辑），其余素材与顺序不动。
+  const replaceRefFile = (file: File) => {
+    if (replaceIdx == null) return;
+    if (!file.type.startsWith("image/")) {
+      setRefMsg("只接受图片文件");
+      setReplaceIdx(null);
+      return;
+    }
+    const idx = replaceIdx;
+    void (async () => {
+      const img = await fileToBase64(file);
+      setRefs((prev) =>
+        prev.map((r, j) =>
+          j === idx
+            ? {
+                ...img,
+                preview: `data:${img.mimeType};base64,${img.dataBase64}`,
+                label: file.name,
+                origin: "manual" as const,
+              }
+            : r,
+        ),
+      );
+      setRefMsg(null);
+      setReplaceIdx(null);
+    })();
+  };
+
+  // v6.34 人物参考关联卡：缩略图 / 名称 / 参考说明都取现有关联
+  // 状态（选中项 + 自动带入的参考图），不新增任何绑定逻辑。
+  const assocThumbUrl =
+    selectedPreset?.images[0]?.previewUrl ??
+    selectedPreset?.images[0]?.url ??
+    selectedCharacter?.imagePreviewUrl ??
+    selectedCharacter?.imageUrl ??
+    selectedScene?.imagePreviewUrl ??
+    selectedScene?.imageUrl ??
+    null;
+  const assocName =
+    selectedPreset?.name ??
+    selectedCharacter?.name ??
+    selectedScene?.name ??
+    "";
+  const autoRefCount = refs.filter((r) => r.origin === "auto").length;
+  const assocNote = [
+    mergeInfo?.source ? `参考说明：${mergeInfo.source}。` : "",
+    autoRefCount > 0
+      ? `已自动带入 ${autoRefCount} 张人物参考图，生成时按参考图锁脸。`
+      : "还没有自动带入的人物参考图。",
+  ]
+    .filter(Boolean)
+    .join("");
+  // 解除关联：取消人物选择（走原有 onSelectPerson 清空路径）并清
+  // 掉自动带入的参考图，手动上传的参考素材不动。
+  const unbindPerson = () => {
+    onSelectPerson("");
+    setRefs((prev) => prev.filter((r) => r.origin !== "auto"));
+    setAutoRefNote(null);
+    setAssocDetailOpen(false);
+  };
+
+  // v6.39 人物特征融合界面（同一悬浮窗内切换显示，顶部「返回」回创
+  // 作页；全部状态在 fusion 草稿里，返回 / 关窗都不丢）：
+  const renderFusionSlot = (
+    slot: "a" | "b" | "single",
+    title: string,
+    img: FusionImage | null,
+    inputRef: { current: HTMLInputElement | null },
+  ) => (
+    <div className="min-w-0">
+      <p className={labelCls}>{title}</p>
+      {img ? (
+        <div>
+          {/* v6.40 预览区重新设计（用户真机截图：旧 h-40 + object-cover
+              把图裁得只剩局部）：整张图按原始比例完整放进预览区，绝不
+              裁切——高度随图自适应（h-auto 按比例），上限 320px（约悬
+              浮窗内容区高度的一半），超上限的图等比缩小后用
+              object-contain 居中完整显示、多余空间深色底填充。点图
+              打开大图层看整张原图。 */}
+          <button
+            type="button"
+            className="block w-full cursor-zoom-in overflow-hidden rounded-[var(--radius)] p-0"
+            style={{
+              background: "#0a0d12",
+              outline: "1px solid var(--border)",
+              outlineOffset: "-1px",
+            }}
+            aria-label={`放大查看${title}（整张图）`}
+            onClick={() => setFusionLightbox({ src: img.preview, title })}
+          >
+            <img
+              src={img.preview}
+              alt={`${title}预览（整张图，点开看大图）`}
+              className="mx-auto block h-auto max-h-[320px] w-auto max-w-full object-contain"
+            />
+          </button>
+          <div className="mt-1.5 flex gap-1.5">
+            <button
+              type="button"
+              className="btn btn-sm flex-1"
+              aria-label={`更换${title}`}
+              onClick={() => inputRef.current?.click()}
+            >
+              更换
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm flex-1"
+              aria-label={`删除${title}`}
+              onClick={() =>
+                updateFusion(
+                  slot === "a"
+                    ? { imgA: null }
+                    : slot === "b"
+                      ? { imgB: null }
+                      : { imgSingle: null },
+                )
+              }
+            >
+              删除
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="btn w-full"
+          style={{ height: 160 }}
+          aria-label={`上传${title}`}
+          onClick={() => inputRef.current?.click()}
+        >
+          ＋ 上传{title}
+        </button>
+      )}
+    </div>
+  );
+
+  const renderFusionResultField = (
+    label: string,
+    value: string,
+    onChange: (v: string) => void,
+    rows: number,
+  ) => (
+    <div className="mt-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[13px] font-bold">{label}</p>
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-label={`复制${label}`}
+          onClick={() => void copyFusionText(label, value)}
+        >
+          复制
+        </button>
+      </div>
+      <textarea
+        className="field mt-1.5 w-full"
+        rows={rows}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={label}
+      />
+    </div>
+  );
+
+  const fusionResult = fusion.result;
+  const fusionResultSection = fusionResult ? (
+    <div
+      className="mt-5 border-t pt-4"
+      style={{ borderColor: "var(--border)" }}
+    >
+      <p className="text-[14px] font-bold">融合结果</p>
+      {renderFusionResultField(
+        "融合结果说明",
+        fusionResult.summary,
+        (v) => updateFusionResult({ summary: v }),
+        4,
+      )}
+      {renderFusionResultField(
+        "中文正向提示词",
+        fusionResult.promptZh,
+        (v) => updateFusionResult({ promptZh: v }),
+        5,
+      )}
+      {renderFusionResultField(
+        "英文正向提示词",
+        fusionResult.promptEn,
+        (v) => updateFusionResult({ promptEn: v }),
+        5,
+      )}
+      {renderFusionResultField(
+        "负向提示词",
+        fusionResult.negative,
+        (v) => updateFusionResult({ negative: v }),
+        3,
+      )}
+      <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+        工作台没有单独的负向提示词输入框：这份负向词只在这里展示和复制，「使用此提示词」只会把中英文正向填回提示词框，不会自动带上负向词。
+      </p>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-label="一键复制完整提示词（中文正向加英文正向加负向）"
+          onClick={() =>
+            void copyFusionText(
+              "完整提示词",
+              `中文正向提示词：\n${fusionResult.promptZh}\n\n英文正向提示词：\n${fusionResult.promptEn}\n\n负向提示词：\n${fusionResult.negative}`,
+            )
+          }
+        >
+          一键复制完整提示词
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-label="只复制正向提示词（中文加英文）"
+          onClick={() =>
+            void copyFusionText(
+              "正向提示词",
+              `${fusionResult.promptZh}\n\n${fusionResult.promptEn}`,
+            )
+          }
+        >
+          只复制正向
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-label="只复制负向提示词"
+          onClick={() =>
+            void copyFusionText("负向提示词", fusionResult.negative)
+          }
+        >
+          只复制负向
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-label="重新融合（按现在的图和设置再分析一次）"
+          disabled={fusing}
+          onClick={() => void runFusion()}
+        >
+          重新融合
+        </button>
+        <button
+          type="button"
+          className="btn btn-sm btn-primary"
+          aria-label="使用此提示词（把中英文正向填回创作页提示词框，并把融合参考图带进参考素材区）"
+          onClick={requestUseFusionResult}
+        >
+          使用此提示词
+        </button>
+      </div>
+    </div>
+  ) : null;
+
+  const fusionBody = (
+    <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-label="返回创作页（融合内容不会丢）"
+          onClick={() => setFusionView(false)}
+        >
+          ← 返回
+        </button>
+        <p className="text-[15px] font-bold">人物特征融合</p>
+      </div>
+      <p className="mt-1.5 text-[12px] leading-5 text-[var(--dim)]">
+        上传两张人物参考图，或一张参考图加文字要求，AI
+        把两边的人物特征（脸型、五官、发型、身材、服装、气质）真正融合重构，写成一段能直接拿去生图的提示词。这里只生成提示词、不直接出图；出图还是回创作页点「生成图片」。
+      </p>
+
+      <p className="mt-4 text-[13px] font-bold">融合模式</p>
+      <div className="seg seg-sm mt-1.5" aria-label="融合模式选择">
+        <button
+          type="button"
+          aria-pressed={fusion.mode === "dual"}
+          aria-label="双参考图融合（上传参考图 A 和参考图 B）"
+          onClick={() => updateFusion({ mode: "dual" })}
+        >
+          双参考图融合
+        </button>
+        <button
+          type="button"
+          aria-pressed={fusion.mode === "single"}
+          aria-label="单参考图加文字融合（上传一张参考图，再写文字要求）"
+          onClick={() => updateFusion({ mode: "single" })}
+        >
+          单参考图＋文字融合
+        </button>
+      </div>
+      <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+        切换模式不会清掉另一个模式已经传的图和写的字。
+      </p>
+
+      {fusion.mode === "dual" ? (
+        <div className="mt-3 grid grid-cols-2 items-start gap-3">
+          {renderFusionSlot("a", "参考图 A", fusion.imgA, fusionFileA)}
+          {renderFusionSlot("b", "参考图 B", fusion.imgB, fusionFileB)}
+        </div>
+      ) : (
+        <div className="mt-3">
+          <div className="max-w-[260px]">
+            {renderFusionSlot(
+              "single",
+              "参考图",
+              fusion.imgSingle,
+              fusionFileSingle,
+            )}
+          </div>
+          <label
+            className={`${labelCls} mt-3`}
+            htmlFor="imagegen-fusion-text-req"
+          >
+            文字要求（想给图里的人新增、替换、强化或修改哪些特征，写清）
+          </label>
+          <textarea
+            id="imagegen-fusion-text-req"
+            className="field w-full"
+            rows={3}
+            value={fusion.textRequirement}
+            onChange={(e) => updateFusion({ textRequirement: e.target.value })}
+            placeholder="例如：保留脸型和五官，把发型改成银灰色长卷发；气质改得更冷峻；上衣换成黑色皮夹克"
+            aria-label="单图融合的文字要求"
+          />
+          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+            参考图定基础外貌，文字定要改的地方：你写明要保留的，AI
+            不会擅自改；写明要改的，不会漏掉。
+          </p>
+        </div>
+      )}
+
+      <p className="mt-4 text-[13px] font-bold">融合风格</p>
+      <div className="seg seg-sm mt-1.5" aria-label="融合风格选择">
+        <button
+          type="button"
+          aria-pressed={fusion.style === "hyperreal"}
+          aria-label="超写实风格（真人摄影质感）"
+          onClick={() => updateFusion({ style: "hyperreal" })}
+        >
+          超写实
+        </button>
+        <button
+          type="button"
+          aria-pressed={fusion.style === "anime3d"}
+          aria-label="3D 动漫风格（三维动画角色设计）"
+          onClick={() => updateFusion({ style: "anime3d" })}
+        >
+          3D 动漫
+        </button>
+      </div>
+      <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+        {fusion.style === "hyperreal"
+          ? "超写实：按真实人物摄影写——自然面部结构、精细皮肤纹理与毛孔、真实发丝与发际线、服装真实织物细节、自然光影；避免塑料皮肤、蜡像感、过度磨皮。"
+          : "3D 动漫：按高品质三维动画角色设计写——精致统一的面部结构、有辨识度的动漫五官、发丝层次、真实三维体积感、电影级动画光影；避免廉价塑料模型感与面部崩坏。"}
+      </p>
+
+      {fusion.mode === "dual" && (
+        <>
+          <p className="mt-4 text-[13px] font-bold">融合主次</p>
+          <div className="seg seg-sm mt-1.5" aria-label="融合主次选择">
+            <button
+              type="button"
+              aria-pressed={fusion.balance === "balanced"}
+              aria-label="均衡融合（两张图智能均衡）"
+              onClick={() => updateFusion({ balance: "balanced" })}
+            >
+              均衡融合
+            </button>
+            <button
+              type="button"
+              aria-pressed={fusion.balance === "a"}
+              aria-label="以参考图 A 为主"
+              onClick={() => updateFusion({ balance: "a" })}
+            >
+              以参考图 A 为主
+            </button>
+            <button
+              type="button"
+              aria-pressed={fusion.balance === "b"}
+              aria-label="以参考图 B 为主"
+              onClick={() => updateFusion({ balance: "b" })}
+            >
+              以参考图 B 为主
+            </button>
+          </div>
+        </>
+      )}
+
+      <label
+        className={`${labelCls} mt-4`}
+        htmlFor="imagegen-fusion-extra"
+      >
+        补充要求（可选，写了优先按你写的来）
+      </label>
+      <textarea
+        id="imagegen-fusion-extra"
+        className="field w-full"
+        rows={2}
+        value={fusion.extraRequirement}
+        onChange={(e) => updateFusion({ extraRequirement: e.target.value })}
+        placeholder="例如：眼睛一定要用 A 的，发型用 B 的；年龄感定在 25 岁左右"
+        aria-label="融合补充要求（可选）"
+      />
+
+      <button
+        type="button"
+        className="btn btn-primary mt-4 w-full"
+        aria-label="开始融合（只生成提示词，不会提交生图）"
+        disabled={fusing || !fusionReady}
+        onClick={() => void runFusion()}
+      >
+        {fusing ? "正在分析…" : "开始融合"}
+      </button>
+      {!fusionReady && (
+        <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+          {fusion.mode === "dual"
+            ? "把参考图 A 和参考图 B 都上传好，按钮就能点。"
+            : "上传参考图、写清文字要求，按钮就能点。"}
+        </p>
+      )}
+      <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+        开始融合只做图片分析和写提示词，不会提交生图、不花生成图片的钱。
+      </p>
+      {fusionError && (
+        <p
+          className="mt-2 rounded-[var(--radius)] border px-2.5 py-1.5 text-[12.5px] leading-5"
+          style={{ borderColor: "var(--border)", color: "var(--bad)" }}
+          role="alert"
+        >
+          {fusionError}
+        </p>
+      )}
+      {fusionMsg && (
+        <p
+          className="mt-2 text-[12.5px] leading-5"
+          style={{ color: "var(--olive)" }}
+          role="status"
+        >
+          {fusionMsg}
+        </p>
+      )}
+
+      {fusionResultSection}
+    </div>
+  );
+
   return (
+    <div className="fixed inset-0 z-[95] flex items-center justify-center sm:p-6">
+      {/* v6.35 遮罩：半透明深色 + 背景模糊，盖住整个底层工作台；
+          点遮罩与点「关闭」、按 Esc 走同一 requestClose 口径。 */}
+      <div
+        aria-hidden="true"
+        className="absolute inset-0"
+        style={{
+          background: "rgba(3, 5, 9, 0.62)",
+          backdropFilter: "blur(3px)",
+          WebkitBackdropFilter: "blur(3px)",
+        }}
+        onClick={requestClose}
+      />
     <section
       role="dialog"
-      aria-label="生图 · 图片模型管理"
-      className="fixed right-3 top-[70px] z-[60] flex max-h-[calc(100dvh-88px)] w-[408px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[14px] border"
+      aria-modal="true"
+      aria-label="图片生成工作台"
+      className="relative flex h-full w-full flex-col overflow-hidden sm:h-[min(820px,calc(100dvh-48px))] sm:w-[min(1160px,calc(100vw-64px))] sm:rounded-2xl sm:border"
       style={{
         background: "var(--surface)",
         borderColor: "var(--border)",
@@ -2298,12 +3455,10 @@ function ImageGenPanel({
       }}
     >
       <div
-        className="flex items-center justify-between gap-2 border-b px-4 py-3"
+        className="flex items-center justify-between gap-2 border-b px-5 py-3"
         style={{ borderColor: "var(--border)" }}
       >
-        <p className="font-display text-base font-bold">
-          生图 · 图片模型管理
-        </p>
+        <p className="font-display text-base font-bold">图片生成工作台</p>
         <div className="flex shrink-0 gap-1.5">
           <button
             type="button"
@@ -2317,13 +3472,44 @@ function ImageGenPanel({
             type="button"
             className="btn btn-sm"
             aria-label="关闭生图面板"
-            onClick={onClose}
+            onClick={requestClose}
           >
             关闭
           </button>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+      <div
+        className="seg seg-sm border-b px-5 py-2"
+        style={{ borderColor: "var(--border)" }}
+        aria-label="图片生成工作台页面切换"
+      >
+        <button
+          type="button"
+          aria-pressed={panelTab === "create"}
+          aria-label="创作页（提示词、参考素材与生成操作）"
+          onClick={() => {
+            setFusionView(false);
+            setPanelTab("create");
+          }}
+        >
+          创作
+        </button>
+        <button
+          type="button"
+          aria-pressed={panelTab === "records"}
+          aria-label="生成记录页（历史任务与生成结果）"
+          onClick={() => {
+            setFusionView(false);
+            setPanelTab("records");
+          }}
+        >
+          生成记录{records.length > 0 ? `（${records.length}）` : ""}
+        </button>
+      </div>
+      {fusionView ? (
+        fusionBody
+      ) : panelTab === "create" ? (
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <p className="text-[13px] leading-5">
           服务：图片中转插件 - GeekNow(推荐)
         </p>
@@ -2361,9 +3547,6 @@ function ImageGenPanel({
             </button>
           </p>
         )}
-        <p className="mt-1.5 text-[12px] leading-5 text-[var(--dim)]">
-          按你的 Geeknow 账户计费；只有点「生成图片」才会调用。
-        </p>
 
         {/* v5.88：生图接口总设置已整份搬到左下角悬浮「设置」里
             （全站仍只一份，存储与生效顺序不变）；本面板不再另放
@@ -2377,6 +3560,310 @@ function ImageGenPanel({
           </span>
         </p>
 
+        <div className="mt-2 grid items-start gap-5 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+          <div className="min-w-0">
+{isEditMode && selectedPreset && (
+          <div
+            className="mt-3 rounded-[var(--radius)] border p-3"
+            style={{
+              borderColor: "var(--accent)",
+              background: "var(--accent-soft)",
+            }}
+            role="group"
+            aria-label={`改图：以${selectedPreset.name}当前资产图为参照图`}
+          >
+            <p className="text-sm font-bold">
+              改图 · {selectedPreset.name}
+            </p>
+            <div className="mt-2 flex items-start gap-2.5">
+              {selectedPreset.images[0] ? (
+                <PreviewImg
+                  src={selectedPreset.images[0].url}
+                  previewSrc={selectedPreset.images[0].previewUrl}
+                  previewRef={{
+                    kind: "presetImage",
+                    imageId: selectedPreset.images[0].id,
+                  }}
+                  alt={`${selectedPreset.name}当前的资产图（改图参照图）`}
+                  className="h-16 w-24 shrink-0 rounded object-cover object-top"
+                  style={{ outline: "1px solid var(--border)", outlineOffset: "-1px" }}
+                />
+              ) : null}
+              <p className="min-w-0 text-[12px] leading-5">
+                参照图就是左边这张——这张卡现在的资产图，已经放进下方「参考素材」。
+                在下面写清<strong>只改哪里</strong>，AI 会保持人物的脸、身材和身份特征不变，只动你点名的地方。
+                生成后先在下方记录里看预览，确认好再点记录上的「存到资产卡」：存进去是往卡上<strong>多加一张图，不替换、不删除现在的原图</strong>；
+                这张卡的「展开详情」里也会留一份改图记录。不满意就改一下要求、再点一次「开始改图」（新任务、重新计费）。
+              </p>
+            </div>
+            <label className={`${labelCls} mt-2`} htmlFor="imagegen-edit-request">
+              要改的部位（只写要改的，其他部位保持原样）
+            </label>
+            <textarea
+              id="imagegen-edit-request"
+              className="field w-full"
+              rows={3}
+              value={editRequest}
+              onChange={(e) => setEditRequest(e.target.value)}
+              placeholder="例如：把帽子换成黑色棒球帽；发型改成齐肩短发；发色改成银灰色；上衣换成红色连帽卫衣"
+              aria-label="改图要求：写清要修改的部位"
+            />
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {EDIT_QUICK_PHRASES.map((ph) => (
+                <button
+                  key={ph}
+                  type="button"
+                  className="btn btn-sm"
+                  aria-label={`把「${ph.trim()}」填进改图要求`}
+                  onClick={() =>
+                    setEditRequest((t) =>
+                      t.trim() ? `${t.replace(/[；;]\s*$/, "")}；${ph}` : ph,
+                    )
+                  }
+                >
+                  {ph.trim()}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <p className="text-[13px] font-bold">提示词</p>
+              <button
+                type="button"
+                className="btn btn-sm"
+                aria-label="人物特征融合（上传两张人物图、或一张图加文字要求，融合成一段生图提示词；只生成提示词，不直接出图）"
+                onClick={() => setFusionView(true)}
+              >
+                人物特征融合
+              </button>
+            </div>
+            <div className="seg seg-sm" aria-label="提示词语言切换">
+              <button
+                type="button"
+                aria-pressed={promptLang === "zh"}
+                aria-label="切换到中文构思"
+                onClick={() => setPromptLang("zh")}
+              >
+                中文构思
+              </button>
+              <button
+                type="button"
+                aria-pressed={promptLang === "en"}
+                aria-label="切换到英文提示词"
+                onClick={() => setPromptLang("en")}
+              >
+                英文提示词
+              </button>
+            </div>
+          </div>
+          {isEditMode && (
+            <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+              改图模式：中文提示词会在点「开始改图」时按改图要求自动拼好。
+            </p>
+          )}
+          {promptLang === "zh" ? (
+            <textarea
+              id="imagegen-prompt-zh"
+              className="field mt-2 w-full"
+              style={{ height: 190 }}
+              value={promptZh}
+              onChange={(e) => setPromptZh(e.target.value)}
+              placeholder="选人物自动拼好，也可以自己写中文提示词"
+              aria-label="中文提示词"
+            />
+          ) : (
+            <textarea
+              id="imagegen-prompt-en"
+              className="field mt-2 w-full"
+              style={{ height: 190 }}
+              value={promptEn}
+              onChange={(e) => setPromptEn(e.target.value)}
+              placeholder="English prompt (optional)"
+              aria-label="英文提示词"
+            />
+          )}
+          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+            英文提示词填了就优先用英文提交，中文构思原样保留；两份内容各自保存，切换标签不会丢失。
+          </p>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              className="btn btn-sm"
+              aria-label="复制当前语言的提示词"
+              onClick={() => void copyActivePrompt()}
+            >
+              复制{promptLang === "zh" ? "中文" : "英文"}提示词
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              aria-label="清空当前语言的提示词（另一份不动）"
+              onClick={clearActivePrompt}
+            >
+              清空当前
+            </button>
+          </div>
+          {promptCopyMsg && (
+            <p
+              className="mt-1 text-[11px] leading-4 text-[var(--dim)]"
+              role="status"
+            >
+              {promptCopyMsg}
+            </p>
+          )}
+          <button
+            type="button"
+            className="btn mt-3 w-full"
+            aria-label="AI一键优化细节提示词（把已填的基础提示词补成细节版，只改文字、不会提交生图）"
+            disabled={
+              optimizing || (!promptZh.trim() && !promptEn.trim())
+            }
+            onClick={() => void runOptimizePrompt()}
+          >
+            {optimizing ? "AI 优化中…" : "AI 一键优化细节提示词"}
+          </button>
+          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+            基础信息填完后点这里：AI
+            按当前画风把面部、皮肤肌理、发丝、服装材质、表情姿态、光影与画质细节补齐，已填的人物设定（发型、穿搭、年龄、时空）不改、「待核对」不编造。优化只改提示词文字，不会提交生图；生成仍只由下面的「生成图片」按钮触发。
+          </p>
+          {!promptZh.trim() && !promptEn.trim() && (
+            <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+              先选一个人物自动拼提示词、或自己填一点基础提示词，优化按钮才能点。
+            </p>
+          )}
+          {optimizeError && (
+            <p
+              className="mt-2 rounded-[var(--radius)] border px-2.5 py-1.5 text-[12.5px] leading-5"
+              style={{ borderColor: "var(--border)", color: "var(--bad)" }}
+              role="alert"
+            >
+              {optimizeError}
+            </p>
+          )}
+          {optimizeMsg && (
+            <div
+              className="mt-2 rounded-[var(--radius)] border px-2.5 py-1.5"
+              style={{ borderColor: "var(--border)" }}
+              role="status"
+              aria-label="AI优化提示词结果"
+            >
+              <p
+                className="text-[12.5px] leading-5"
+                style={{ color: "var(--olive)" }}
+              >
+                {optimizeMsg}
+              </p>
+              {preOptimize && (
+                <button
+                  type="button"
+                  className="btn btn-sm mt-1.5"
+                  aria-label="撤销AI优化（提示词回到优化前的版本）"
+                  onClick={undoOptimize}
+                >
+                  撤销优化（回到优化前）
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <div
+          className="mt-4 rounded-[var(--radius)] border p-3"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--surface-alt)",
+          }}
+        >
+          <p className="text-[13px] font-bold">生成设置</p>
+<div className="mt-3 grid grid-cols-2 gap-2">
+          <div>
+            <label className={labelCls} htmlFor="imagegen-quality">
+              质量
+            </label>
+            <select
+              id="imagegen-quality"
+              className="field w-full"
+              value={quality}
+              onChange={(e) =>
+                setQuality(e.target.value as "max" | "high" | "standard")
+              }
+            >
+              <option value="max">max</option>
+              <option value="high">high</option>
+              <option value="standard">standard</option>
+            </select>
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="imagegen-ratio">
+              图片比例
+            </label>
+            <select
+              id="imagegen-ratio"
+              className="field w-full"
+              value={ratio}
+              onChange={(e) => setRatio(e.target.value)}
+            >
+              {RATIO_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+          选比例参考：视频用 16:9、人物资产用 3:4、三视图用 16:9。
+        </p>
+
+                <div className="mt-3">
+          <label className={labelCls} htmlFor="imagegen-art-style">
+            人物画风
+          </label>
+          <select
+            id="imagegen-art-style"
+            className="field w-full"
+            value={artStyle}
+            onChange={(e) => changeArtStyle(e.target.value)}
+            aria-label="选择人物画风（默认超写实CG，真实肌理与皮肤纹理）"
+          >
+            {ART_STYLE_OPTIONS.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+            {artStyleById(artStyle).hint}
+            选完会自动把画风句拼进下面中英文提示词的尾部；换画风会先换掉旧画风句，不叠加。
+          </p>
+        </div>
+
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[13px] leading-5">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={threeView}
+              onChange={(e) => toggleThreeView(e.target.checked)}
+              aria-label="使用人物三视图排版"
+            />
+            <span>
+              <strong>人物三视图排版</strong>（默认勾选）：16:9，左 70% 三个无头全身（正 / 侧 / 背），右 30% 头部侧面 + 正面特写，五格同一人。取消则按普通单图生成。
+            </span>
+          </label>
+          <button
+            type="button"
+            className="btn btn-sm mt-3"
+            aria-expanded={advancedOpen}
+            aria-label="高级设置（模型、超时、重试、服务节点）"
+            onClick={() => setAdvancedOpen((o) => !o)}
+          >
+            {advancedOpen ? "收起高级设置" : "高级设置（模型 / 超时 / 重试 / 节点）"}
+          </button>
+          {advancedOpen && (
+            <div className="mt-1">
         {/* v1.1.0 软件更新：仅 exe 打包版显示（window.electronAPI 由主进程注入）；
             网页版 / Muse 版没有这个入口。更新只换程序文件，项目数据不动。 */}
         {hasElectronAPI && (
@@ -2467,46 +3954,6 @@ function ImageGenPanel({
           )}
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-2">
-          <div>
-            <label className={labelCls} htmlFor="imagegen-quality">
-              质量
-            </label>
-            <select
-              id="imagegen-quality"
-              className="field w-full"
-              value={quality}
-              onChange={(e) =>
-                setQuality(e.target.value as "max" | "high" | "standard")
-              }
-            >
-              <option value="max">max</option>
-              <option value="high">high</option>
-              <option value="standard">standard</option>
-            </select>
-          </div>
-          <div>
-            <label className={labelCls} htmlFor="imagegen-ratio">
-              图片比例
-            </label>
-            <select
-              id="imagegen-ratio"
-              className="field w-full"
-              value={ratio}
-              onChange={(e) => setRatio(e.target.value)}
-            >
-              {RATIO_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-        <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-          选比例参考：视频用 16:9、人物资产用 3:4、三视图用 16:9。
-        </p>
-
         <div className="mt-3 grid grid-cols-3 gap-2">
           <div>
             <label className={labelCls} htmlFor="imagegen-req-timeout">
@@ -2577,283 +4024,21 @@ function ImageGenPanel({
           </select>
         </div>
 
-        <div
-          className="mt-4 border-t pt-3"
-          style={{ borderColor: "var(--border)" }}
-        >
-          <label className={labelCls} htmlFor="imagegen-person">
-            选择人物（选中后自动按人物卡拼提示词）
-          </label>
-          <select
-            id="imagegen-person"
-            className="field w-full"
-            value={selection}
-            onChange={(e) => onSelectPerson(e.target.value)}
-            aria-label="选择要生成图的人物"
-          >
-            <option value="">不选人物（自己填提示词）</option>
-            {presets.length > 0 && (
-              <optgroup label="储存库资产卡">
-                {presets.map((p) => (
-                  <option key={p.id} value={`preset:${p.id}`}>
-                    {p.name}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            {characters.length > 0 && (
-              <optgroup label="当前剧本人物">
-                {characters.map((c) => (
-                  <option key={c.id} value={`character:${c.id}`}>
-                    {c.name || "未命名人物"}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-            {sceneAssets.length > 0 && (
-              <optgroup label="当前项目场景资产">
-                {sceneAssets.map((s) => (
-                  <option key={s.id} value={`scene:${s.id}`}>
-                    {s.name || "未命名场景"}
-                  </option>
-                ))}
-              </optgroup>
-            )}
-          </select>
-          {(selectedPreset || selectedCharacter) && (
-            <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-              已带入：
-              {selectedPreset
-                ? `储存库资产卡「${selectedPreset.name}」`
-                : `剧本人物「${selectedCharacter?.name || "未命名人物"}」`}
-              ，提示词已按这张卡的人物、发型、脸、衣服、下装、鞋子、配饰拼好，可直接改。
-            </p>
-          )}
-          {selectedScene && (
-            <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-              已带入：场景资产卡「{selectedScene.name || "未命名场景"}」，提示词是这张卡预填的场景提示词（无人空镜、16:9），可直接改。
-            </p>
-          )}
-          {mergeInfo && (selectedPreset || selectedCharacter || selectedScene) && (
-            <div
-              className="mt-1.5 rounded-[var(--radius)] border px-2.5 py-1.5"
-              style={{ borderColor: "var(--border)" }}
-              role="status"
-              aria-label="提示词合并来源与待核对项"
-            >
-              <p className="text-[11px] leading-4 text-[var(--dim)]">
-                提示词来源：{mergeInfo.source}。
-              </p>
-              {mergeInfo.pending.length > 0 && (
-                <p
-                  className="mt-0.5 text-[11px] leading-4"
-                  style={{ color: "var(--bad)" }}
-                >
-                  待核对：{mergeInfo.pending.join("、")}
-                  在资产卡与剧本备注里都没有设定，已留空标「待核对」，没有凭空编、也没有套用别人物的设定。
-                </p>
-              )}
-              {mergeInfo.conflicts.map((cf) => (
-                <p
-                  key={cf}
-                  className="mt-0.5 text-[11px] leading-4"
-                  style={{ color: "var(--bad)" }}
-                >
-                  冲突：{cf}
-                </p>
-              ))}
-            </div>
-          )}
-          <label className="mt-2 flex cursor-pointer items-start gap-2 text-[13px] leading-5">
-            <input
-              type="checkbox"
-              className="mt-1"
-              checked={threeView}
-              onChange={(e) => toggleThreeView(e.target.checked)}
-              aria-label="使用人物三视图排版"
-            />
-            <span>
-              <strong>人物三视图排版</strong>（默认勾选）：16:9，左 70% 三个无头全身（正 / 侧 / 背），右 30% 头部侧面 + 正面特写，五格同一人。取消则按普通单图生成。
-            </span>
-          </label>
-        </div>
-
-        <div
-          className="mt-4 border-t pt-3"
-          style={{ borderColor: "var(--border)" }}
-        >
-          <label className={labelCls} htmlFor="imagegen-art-style">
-            人物画风
-          </label>
-          <select
-            id="imagegen-art-style"
-            className="field w-full"
-            value={artStyle}
-            onChange={(e) => changeArtStyle(e.target.value)}
-            aria-label="选择人物画风（默认超写实CG，真实肌理与皮肤纹理）"
-          >
-            {ART_STYLE_OPTIONS.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-            {artStyleById(artStyle).hint}
-            选完会自动把画风句拼进下面中英文提示词的尾部；换画风会先换掉旧画风句，不叠加。
-          </p>
-
-          <button
-            type="button"
-            className="btn btn-primary mt-3 w-full"
-            aria-label="AI一键优化细节提示词（把已填的基础提示词补成细节版，只改文字、不会提交生图）"
-            disabled={
-              optimizing || (!promptZh.trim() && !promptEn.trim())
-            }
-            onClick={() => void runOptimizePrompt()}
-          >
-            {optimizing ? "AI 优化中…" : "AI 一键优化细节提示词"}
-          </button>
-          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-            基础信息填完后点这里：AI
-            按当前画风把面部、皮肤肌理、发丝、服装材质、表情姿态、光影与画质细节补齐，已填的人物设定（发型、穿搭、年龄、时空）不改、「待核对」不编造。优化只改提示词文字，不会提交生图；生成仍只由下面的「生成图片」按钮触发。
-          </p>
-          {!promptZh.trim() && !promptEn.trim() && (
-            <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-              先选一个人物自动拼提示词、或自己填一点基础提示词，优化按钮才能点。
-            </p>
-          )}
-          {optimizeError && (
-            <p
-              className="mt-2 rounded-[var(--radius)] border px-2.5 py-1.5 text-[12.5px] leading-5"
-              style={{ borderColor: "var(--border)", color: "var(--bad)" }}
-              role="alert"
-            >
-              {optimizeError}
-            </p>
-          )}
-          {optimizeMsg && (
-            <div
-              className="mt-2 rounded-[var(--radius)] border px-2.5 py-1.5"
-              style={{ borderColor: "var(--border)" }}
-              role="status"
-              aria-label="AI优化提示词结果"
-            >
-              <p
-                className="text-[12.5px] leading-5"
-                style={{ color: "var(--olive)" }}
-              >
-                {optimizeMsg}
-              </p>
-              {preOptimize && (
-                <button
-                  type="button"
-                  className="btn btn-sm mt-1.5"
-                  aria-label="撤销AI优化（提示词回到优化前的版本）"
-                  onClick={undoOptimize}
-                >
-                  撤销优化（回到优化前）
-                </button>
-              )}
             </div>
           )}
         </div>
-
-        {isEditMode && selectedPreset && (
-          <div
-            className="mt-3 rounded-[var(--radius)] border p-3"
-            style={{
-              borderColor: "var(--accent)",
-              background: "var(--accent-soft)",
-            }}
-            role="group"
-            aria-label={`改图：以${selectedPreset.name}当前资产图为参照图`}
-          >
-            <p className="text-sm font-bold">
-              改图 · {selectedPreset.name}
-            </p>
-            <div className="mt-2 flex items-start gap-2.5">
-              {selectedPreset.images[0] ? (
-                <PreviewImg
-                  src={selectedPreset.images[0].url}
-                  previewSrc={selectedPreset.images[0].previewUrl}
-                  previewRef={{
-                    kind: "presetImage",
-                    imageId: selectedPreset.images[0].id,
-                  }}
-                  alt={`${selectedPreset.name}当前的资产图（改图参照图）`}
-                  className="h-16 w-24 shrink-0 rounded object-cover object-top"
-                  style={{ outline: "1px solid var(--border)", outlineOffset: "-1px" }}
-                />
-              ) : null}
-              <p className="min-w-0 text-[12px] leading-5">
-                参照图就是左边这张——这张卡现在的资产图，已经放进下方「参考素材」。
-                在下面写清<strong>只改哪里</strong>，AI 会保持人物的脸、身材和身份特征不变，只动你点名的地方。
-                生成后先在下方记录里看预览，确认好再点记录上的「存到资产卡」：存进去是往卡上<strong>多加一张图，不替换、不删除现在的原图</strong>；
-                这张卡的「展开详情」里也会留一份改图记录。不满意就改一下要求、再点一次「开始改图」（新任务、重新计费）。
-              </p>
-            </div>
-            <label className={`${labelCls} mt-2`} htmlFor="imagegen-edit-request">
-              要改的部位（只写要改的，其他部位保持原样）
-            </label>
-            <textarea
-              id="imagegen-edit-request"
-              className="field w-full"
-              rows={3}
-              value={editRequest}
-              onChange={(e) => setEditRequest(e.target.value)}
-              placeholder="例如：把帽子换成黑色棒球帽；发型改成齐肩短发；发色改成银灰色；上衣换成红色连帽卫衣"
-              aria-label="改图要求：写清要修改的部位"
-            />
-            <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {EDIT_QUICK_PHRASES.map((ph) => (
-                <button
-                  key={ph}
-                  type="button"
-                  className="btn btn-sm"
-                  aria-label={`把「${ph.trim()}」填进改图要求`}
-                  onClick={() =>
-                    setEditRequest((t) =>
-                      t.trim() ? `${t.replace(/[；;]\s*$/, "")}；${ph}` : ph,
-                    )
-                  }
-                >
-                  {ph.trim()}
-                </button>
-              ))}
-            </div>
           </div>
-        )}
-
-        <div className="mt-3">
-          <label className={labelCls} htmlFor="imagegen-prompt-zh">
-            {isEditMode ? "提示词（中文，开始改图时按改图要求自动拼好）" : "提示词（中文）"}
-          </label>
-          <textarea
-            id="imagegen-prompt-zh"
-            className="field w-full"
-            rows={5}
-            value={promptZh}
-            onChange={(e) => setPromptZh(e.target.value)}
-            placeholder="选人物自动拼好，也可以自己写中文提示词"
-            aria-label="中文提示词"
-          />
-          <label className={`${labelCls} mt-2`} htmlFor="imagegen-prompt-en">
-            提示词（英文，填了优先用英文）
-          </label>
-          <textarea
-            id="imagegen-prompt-en"
-            className="field w-full"
-            rows={3}
-            value={promptEn}
-            onChange={(e) => setPromptEn(e.target.value)}
-            placeholder="English prompt (optional)"
-            aria-label="英文提示词"
-          />
-        </div>
-
-        <div className="mt-3">
-          <p className={labelCls}>参考素材（{refs.length} / 16）</p>
+          <div className="min-w-0">
+        <div>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[13px] font-bold">参考素材</p>
+            <span
+              className="rounded-full px-2 py-0.5 text-[11px] font-bold text-[var(--dim)]"
+              style={{ background: "var(--surface-alt)" }}
+            >
+              {refs.length} / 16
+            </span>
+          </div>
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
@@ -2931,102 +4116,238 @@ function ImageGenPanel({
             </p>
           )}
           {refs.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2">
+            <div className="mt-2 grid grid-cols-3 gap-2">
               {refs.map((r, i) => (
-                <figure key={i} className="w-[64px]">
-                  <img
-                    src={r.preview}
-                    alt={`参考素材${i + 1}：${r.label}`}
-                    className="h-12 w-[64px] rounded object-cover"
-                    style={{ outline: "1px solid var(--border)", outlineOffset: "-1px" }}
-                  />
+                <figure key={i} className="min-w-0">
                   <button
                     type="button"
-                    className="btn btn-sm mt-0.5 w-full"
-                    aria-label={`删除参考素材${i + 1}：${r.label}`}
-                    onClick={() =>
-                      setRefs((prev) => prev.filter((_, j) => j !== i))
-                    }
+                    className="relative block w-full cursor-pointer"
+                    aria-label={`查看参考素材${i + 1}：${r.label}（大图）`}
+                    onClick={() => setRefLightbox(r)}
                   >
-                    删除
+                    <img
+                      src={r.preview}
+                      alt={`参考素材${i + 1}：${r.label}`}
+                      className="aspect-square w-full rounded object-cover"
+                      style={{
+                        outline: "1px solid var(--border)",
+                        outlineOffset: "-1px",
+                      }}
+                    />
+                    {r.fusionBadge && (
+                      <span
+                        className="absolute left-1 top-1 rounded-full px-1.5 py-px text-[10px] font-bold leading-4 text-white"
+                        style={{
+                          background: "var(--walnut)",
+                          boxShadow: "0 1px 3px rgba(0,0,0,0.45)",
+                        }}
+                      >
+                        {r.fusionBadge}
+                      </span>
+                    )}
                   </button>
+                  <p
+                    className="mt-0.5 truncate text-[11px] leading-4 text-[var(--dim)]"
+                    title={r.label}
+                  >
+                    {r.label}
+                  </p>
+                  <div className="mt-0.5 flex gap-1">
+                    <button
+                      type="button"
+                      className="btn btn-sm flex-1 px-1"
+                      aria-label={`更换参考素材${i + 1}：${r.label}`}
+                      onClick={() => {
+                        setReplaceIdx(i);
+                        replaceRef.current?.click();
+                      }}
+                    >
+                      更换
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm flex-1 px-1"
+                      aria-label={`删除参考素材${i + 1}：${r.label}`}
+                      onClick={() =>
+                        setRefs((prev) => prev.filter((_, j) => j !== i))
+                      }
+                    >
+                      删除
+                    </button>
+                  </div>
                 </figure>
               ))}
             </div>
           )}
         </div>
 
-        <p
-          className="mt-3 text-[11px] leading-4"
-          style={{ color: submitPromptOver ? "var(--bad)" : "var(--dim)" }}
-          role={submitPromptOver ? "alert" : undefined}
-        >
-          {submitPromptLen > 0 ? (
-            <>
-              实际提交的提示词（{promptEn.trim() ? "英文" : "中文"}）共{" "}
-              <span className="tc font-bold">{submitPromptLen}</span> 字符 ·
-              Geeknow 上限 {GEEKNOW_PROMPT_HARD_LIMIT} 字符
-              {submitPromptOver
-                ? `，已超过 ${SUBMIT_PROMPT_BUDGET} 字符的安全线：先删减提示词再生成，否则提交会被服务商以「提示词过长」拒绝。`
-                : "，在安全线内。"}
-            </>
-          ) : (
-            <>提示词字数会显示在这里（Geeknow 上限 {GEEKNOW_PROMPT_HARD_LIMIT} 字符）。</>
-          )}
-        </p>
-        <button
-          type="button"
-          className="btn btn-primary mt-2 w-full"
-          aria-label={
-            isEditMode
-              ? "开始改图（按 Geeknow 账户计费，以参照图为原图只改指定部位，提交后立刻生成一条改图记录）"
-              : "生成图片（按 Geeknow 账户计费，提交后立刻生成一条记录，可继续给其他人物提交）"
-          }
-          disabled={
-            submitting ||
-            (isEditMode
-              ? !editRequest.trim() || refs.length === 0
-              : (!promptZh.trim() && !promptEn.trim()) || submitPromptOver)
-          }
-          onClick={() => void runGenerate()}
-        >
-          {submitting ? "提交中…" : isEditMode ? "开始改图" : "生成图片"}
-        </button>
-        {!isEditMode && !promptZh.trim() && !promptEn.trim() && (
-          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-            先选一个人物自动拼提示词，或自己填提示词，才能生成。
-          </p>
-        )}
-        {isEditMode && !editRequest.trim() && (
-          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-            先在上方「改图」区写清要改的部位，才能开始改图。
-          </p>
-        )}
-        <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
-          提交成功立刻在下方生成一条记录，之后不用等：可以换下一个人接着提交，每个任务独立轮询、独立出图、独立保存，互不阻塞；一个任务失败不会取消其他任务。并行方式为「并行提交，逐任务独立轮询」——服务商的并发上限没有确认过，面板不编造上限数字；若服务商排队，记录状态会如实停在生成中。关闭或最小化面板不会取消已提交的任务，重开面板会逐条续查。
-        </p>
-        {submitError && (
-          <p
-            className="mt-2 rounded-[var(--radius)] border px-2.5 py-1.5 text-[12.5px] leading-5"
-            style={{ borderColor: "var(--border)", color: "var(--bad)" }}
-            role="alert"
-          >
-            {submitError}
-          </p>
-        )}
-        {hostRouteNote && (
-          <p
-            className="mt-2 text-[12px] leading-5 text-[var(--dim)]"
-            role="status"
-          >
-            {hostRouteNote}
-          </p>
-        )}
-
         <div
-          className="mt-4 border-t pt-3"
-          style={{ borderColor: "var(--border)" }}
+          className="mt-4 rounded-[var(--radius)] border p-3"
+          style={{
+            borderColor: "var(--border)",
+            background: "var(--surface-alt)",
+          }}
         >
+          <p className="text-[13px] font-bold">人物参考关联</p>
+          <label className={`${labelCls} mt-2`} htmlFor="imagegen-person">
+            选择人物（选中后自动按人物卡拼提示词）
+          </label>
+          <select
+            id="imagegen-person"
+            className="field w-full"
+            value={selection}
+            onChange={(e) => onSelectPerson(e.target.value)}
+            aria-label="选择要生成图的人物"
+          >
+            <option value="">不选人物（自己填提示词）</option>
+            {presets.length > 0 && (
+              <optgroup label="储存库资产卡">
+                {presets.map((p) => (
+                  <option key={p.id} value={`preset:${p.id}`}>
+                    {p.name}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {characters.length > 0 && (
+              <optgroup label="当前剧本人物">
+                {characters.map((c) => (
+                  <option key={c.id} value={`character:${c.id}`}>
+                    {c.name || "未命名人物"}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {sceneAssets.length > 0 && (
+              <optgroup label="当前项目场景资产">
+                {sceneAssets.map((s) => (
+                  <option key={s.id} value={`scene:${s.id}`}>
+                    {s.name || "未命名场景"}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+          {(selectedPreset || selectedCharacter || selectedScene) && (
+            <div
+              className="mt-2 flex items-start gap-2.5 rounded-[var(--radius)] border p-2.5"
+              style={{
+                borderColor: "var(--border)",
+                background: "var(--surface)",
+              }}
+              role="status"
+              aria-label="人物参考关联状态"
+            >
+              {assocThumbUrl && (
+                <img
+                  src={assocThumbUrl}
+                  alt={`${assocName}的人物缩略图`}
+                  className="h-12 w-12 shrink-0 rounded object-cover object-top"
+                  style={{
+                    outline: "1px solid var(--border)",
+                    outlineOffset: "-1px",
+                  }}
+                />
+              )}
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-bold leading-5">
+                  {assocName || "未命名"}
+                  <span
+                    className="ml-2 rounded-full px-2 py-0.5 text-[11px] font-bold"
+                    style={{
+                      background: "var(--ok-soft)",
+                      color: "var(--olive)",
+                    }}
+                  >
+                    已关联
+                  </span>
+                </p>
+                <p className="mt-0.5 text-[11px] leading-4 text-[var(--dim)]">
+                  {assocNote}
+                </p>
+              </div>
+            </div>
+          )}
+          {!selection && (
+            <p className="mt-2 text-[11px] leading-4 text-[var(--dim)]">
+              还没有关联人物。选一个人，提示词会自动拼好，人物参考图也会自动带进参考素材。
+            </p>
+          )}
+          {selection && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                className="btn btn-sm"
+                aria-expanded={assocDetailOpen}
+                aria-label="查看人物绑定详情（提示词来源、待核对与冲突项）"
+                onClick={() => setAssocDetailOpen((o) => !o)}
+              >
+                {assocDetailOpen ? "收起绑定详情" : "查看绑定详情"}
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                aria-label="解除人物关联（取消选择人物，并清除自动带入的参考图，手动上传的不动）"
+                onClick={unbindPerson}
+              >
+                解除关联
+              </button>
+            </div>
+          )}
+          {(selectedPreset || selectedCharacter) && (
+            <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+              已带入：
+              {selectedPreset
+                ? `储存库资产卡「${selectedPreset.name}」`
+                : `剧本人物「${selectedCharacter?.name || "未命名人物"}」`}
+              ，提示词已按这张卡的人物、发型、脸、衣服、下装、鞋子、配饰拼好，可直接改。
+            </p>
+          )}
+          {selectedScene && (
+            <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+              已带入：场景资产卡「{selectedScene.name || "未命名场景"}」，提示词是这张卡预填的场景提示词（无人空镜、16:9），可直接改。
+            </p>
+          )}
+          {assocDetailOpen &&
+            mergeInfo &&
+            (selectedPreset || selectedCharacter || selectedScene) && (
+            <div
+              className="mt-1.5 rounded-[var(--radius)] border px-2.5 py-1.5"
+              style={{ borderColor: "var(--border)" }}
+              role="status"
+              aria-label="提示词合并来源与待核对项"
+            >
+              <p className="text-[11px] leading-4 text-[var(--dim)]">
+                提示词来源：{mergeInfo.source}。
+              </p>
+              {mergeInfo.pending.length > 0 && (
+                <p
+                  className="mt-0.5 text-[11px] leading-4"
+                  style={{ color: "var(--bad)" }}
+                >
+                  待核对：{mergeInfo.pending.join("、")}
+                  在资产卡与剧本备注里都没有设定，已留空标「待核对」，没有凭空编、也没有套用别人物的设定。
+                </p>
+              )}
+              {mergeInfo.conflicts.map((cf) => (
+                <p
+                  key={cf}
+                  className="mt-0.5 text-[11px] leading-4"
+                  style={{ color: "var(--bad)" }}
+                >
+                  冲突：{cf}
+                </p>
+              ))}
+            </div>
+          )}
+        </div>
+
+          </div>
+        </div>
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div>
           <p className="text-[13px] font-bold">
             生成记录{records.length > 0 ? `（${records.length}）` : ""}
           </p>
@@ -3473,14 +4794,198 @@ function ImageGenPanel({
             </div>
           )}
         </div>
+        </div>
+      )}
+      <div
+        className="border-t px-5 py-3"
+        style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+      >
+        <p className="text-[12px] leading-5 text-[var(--dim)]" role="status">
+          当前模型：{model}（{modelFamily}）· 质量 {quality} · 比例 {ratio}
+          {submitting
+            ? " · 正在提交…"
+            : activeGenCount > 0
+              ? ` · ${activeGenCount} 个任务生成中`
+              : ""}
+        </p>
+        <p
+          className="mt-1 text-[11px] leading-4"
+          style={{ color: submitPromptOver ? "var(--bad)" : "var(--dim)" }}
+          role={submitPromptOver ? "alert" : undefined}
+        >
+          {submitPromptLen > 0 ? (
+            <>
+              实际提交的提示词（{promptEn.trim() ? "英文" : "中文"}）共{" "}
+              <span className="tc font-bold">{submitPromptLen}</span> 字符 ·
+              Geeknow 上限 {GEEKNOW_PROMPT_HARD_LIMIT} 字符
+              {submitPromptOver
+                ? `，已超过 ${SUBMIT_PROMPT_BUDGET} 字符的安全线：先删减提示词再生成，否则提交会被服务商以「提示词过长」拒绝。`
+                : "，在安全线内。"}
+            </>
+          ) : (
+            <>提示词字数会显示在这里（Geeknow 上限 {GEEKNOW_PROMPT_HARD_LIMIT} 字符）。</>
+          )}
+        </p>
+        <button
+          type="button"
+          className="btn btn-primary mt-2 w-full"
+          aria-label={
+            isEditMode
+              ? "开始改图（按 Geeknow 账户计费，以参照图为原图只改指定部位，提交后立刻生成一条改图记录）"
+              : "生成图片（按 Geeknow 账户计费，提交后立刻生成一条记录，可继续给其他人物提交）"
+          }
+          disabled={
+            submitting ||
+            (isEditMode
+              ? !editRequest.trim() || refs.length === 0
+              : (!promptZh.trim() && !promptEn.trim()) || submitPromptOver)
+          }
+          onClick={() => void runGenerate()}
+        >
+          {submitting ? "提交中…" : isEditMode ? "开始改图" : "生成图片"}
+        </button>
+        {!isEditMode && !promptZh.trim() && !promptEn.trim() && (
+          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+            先选一个人物自动拼提示词，或自己填提示词，才能生成。
+          </p>
+        )}
+        {isEditMode && !editRequest.trim() && (
+          <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+            先在上方「改图」区写清要改的部位，才能开始改图。
+          </p>
+        )}
+        <details className="help-fold">
+          <summary>提交与并行说明</summary>
+          <div className="help-fold-body">
+          提交成功立刻在下方生成一条记录，之后不用等：可以换下一个人接着提交，每个任务独立轮询、独立出图、独立保存，互不阻塞；一个任务失败不会取消其他任务。并行方式为「并行提交，逐任务独立轮询」——服务商的并发上限没有确认过，面板不编造上限数字；若服务商排队，记录状态会如实停在生成中。关闭或最小化面板不会取消已提交的任务，重开面板会逐条续查。
+          </div>
+        </details>
+        {submitError && (
+          <p
+            className="mt-2 rounded-[var(--radius)] border px-2.5 py-1.5 text-[12.5px] leading-5"
+            style={{ borderColor: "var(--border)", color: "var(--bad)" }}
+            role="alert"
+          >
+            {submitError}
+          </p>
+        )}
+        {hostRouteNote && (
+          <p
+            className="mt-2 text-[12px] leading-5 text-[var(--dim)]"
+            role="status"
+          >
+            {hostRouteNote}
+          </p>
+        )}
+
+        <p className="mt-1 text-[11px] leading-4 text-[var(--dim)]">
+          按你的 Geeknow 账户计费；只有点「生成图片」才会调用。
+        </p>
       </div>
+      <input
+        ref={replaceRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        aria-label="更换参考图片文件"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) replaceRefFile(f);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={fusionFileA}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        aria-label="上传融合参考图 A 的文件"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void pickFusionImage("a", f);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={fusionFileB}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        aria-label="上传融合参考图 B 的文件"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void pickFusionImage("b", f);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={fusionFileSingle}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        aria-label="上传单图融合参考图的文件"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) void pickFusionImage("single", f);
+          e.target.value = "";
+        }}
+      />
+      {fusionLightbox && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+          style={{ background: "rgba(3, 5, 9, 0.78)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`融合${fusionLightbox.title}大图`}
+          onClick={() => setFusionLightbox(null)}
+        >
+          <img
+            src={fusionLightbox.src}
+            alt={`融合${fusionLightbox.title}大图（整张图）`}
+            className="max-h-[86vh] w-auto max-w-full rounded-[var(--radius)]"
+          />
+          <button
+            type="button"
+            className="btn btn-sm absolute right-4 top-4"
+            aria-label={`关闭融合${fusionLightbox.title}大图`}
+            onClick={() => setFusionLightbox(null)}
+          >
+            关闭
+          </button>
+        </div>
+      )}
+      {refLightbox && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4"
+          style={{ background: "rgba(3, 5, 9, 0.78)" }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`参考素材大图：${refLightbox.label}`}
+          onClick={() => setRefLightbox(null)}
+        >
+          <img
+            src={refLightbox.preview}
+            alt={`参考素材大图：${refLightbox.label}`}
+            className="max-h-[86vh] w-auto max-w-full rounded-[var(--radius)]"
+          />
+          <button
+            type="button"
+            className="btn btn-sm absolute right-4 top-4"
+            aria-label="关闭参考素材大图"
+            onClick={() => setRefLightbox(null)}
+          >
+            关闭
+          </button>
+        </div>
+      )}
       {/* v4.20 出图大图预览（面板内弹窗）：旧版「预览出图」是
           <a target="_blank" href={blob 地址}>——blob 地址带沙箱响应
           头、且在新标签页里脱离了工作台的会话上下文，打开只剩
           about:blank 空白页（用户实报）。改成与封面页同款的页内
           弹层：图直接用记录里已在缩略图 / 展开区正常显示的同一
           地址渲染，不开新页、不受弹窗拦截；点任意处或「关闭」
-          收起。z-[70] 压过面板自身的 z-[60]。 */}
+          收起。z-[70] 在居中窗口（z-[95]）的层叠上下文内压过窗口
+          本体。 */}
       {lightboxRec?.imageUrl && (
         <div
           className="fixed inset-0 z-[70] flex items-center justify-center p-4"
@@ -3518,5 +5023,29 @@ function ImageGenPanel({
         </div>
       )}
     </section>
+      {closeConfirmOpen && (
+        <ConfirmDialog
+          title="正在提交生成请求"
+          body="这次生成请求还在提交途中，现在关窗口会把面板关掉，这次提交可能会被当成失败。等它提交完（几秒钟）再关最稳妥；已经提交成功的任务不受关窗影响，会继续生成。"
+          confirmLabel="仍然关闭"
+          cancelLabel="继续等"
+          onConfirm={() => {
+            setCloseConfirmOpen(false);
+            onClose();
+          }}
+          onCancel={() => setCloseConfirmOpen(false)}
+        />
+      )}
+      {fusionUseConfirmOpen && (
+        <ConfirmDialog
+          title="提示词框里已经有内容"
+          body="创作页的中文构思 / 英文提示词框里已经填了内容。用融合结果填进去会把现在框里的内容整个换掉，换掉的内容找不回来。要换吗？"
+          confirmLabel="覆盖，填融合结果"
+          cancelLabel="先不换"
+          onConfirm={applyFusionResult}
+          onCancel={() => setFusionUseConfirmOpen(false)}
+        />
+      )}
+    </div>
   );
 }

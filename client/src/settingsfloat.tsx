@@ -21,7 +21,7 @@
 // 一行极短提示。功能与口径一字不变：地址框 / 密钥框 / 只读预检 /
 // 带确认的清除 / 「当前用：…」来源行 / 生效顺序（单次输入＞总设置
 // ＞已连接凭证）/ Key 只存本机不进数据库·备份·记录·日志。
-// 悬浮框 z-[55]：低于生图面板（z-[60]）与各类确认弹窗（z-50 起的
+// 悬浮框 z-[55]：低于生图面板（v6.35 起居中悬浮窗 z-[95]）与各类确认弹窗（z-50 起的
 // ConfirmDialog 在本框之上弹出清除确认时仍可点），高于主内容区。
 // v6.04 新增第二项「监控中转站」（问题 #111301）：生图接口总设置
 // 下面加一段中转站地址 + 密钥自填（RelaySettingsForm），存储与生
@@ -37,21 +37,21 @@ import { api } from "./api";
 import { ConfirmDialog } from "./confirm";
 import { describeThrownError } from "./gateway";
 import {
-  clearImageApiSettings,
-  loadImageApiSettings,
-  resolveImageApiConfig,
-  saveImageApiSettings,
-  DEFAULT_IMAGE_API_BASE,
-  IMAGE_API_SETTINGS_EVENT,
-  type ImageApiSettings,
+clearImageApiSettings,
+loadImageApiSettings,
+resolveImageApiConfig,
+saveImageApiSettings,
+DEFAULT_IMAGE_API_BASE,
+IMAGE_API_SETTINGS_EVENT,
+type ImageApiSettings,
 } from "./imageapi";
 import {
-  clearRelaySettings,
-  loadRelaySettings,
-  resolveRelayConfig,
-  saveRelaySettings,
-  RELAY_SETTINGS_EVENT,
-  type RelaySettings,
+clearRelaySettings,
+loadRelaySettings,
+resolveRelayConfig,
+saveRelaySettings,
+RELAY_SETTINGS_EVENT,
+type RelaySettings,
 } from "./relaysettings";
 
 const labelCls = "mb-1 block text-xs font-bold text-[var(--dim)]";

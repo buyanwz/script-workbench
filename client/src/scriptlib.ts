@@ -5456,8 +5456,9 @@ export function buildLensPackageText(
 //     头包附图清单同序）；<Picture N> 只给真有资产图的人物编号
 //     （有图才占号，与 v5.24 绑定行同口径），没图的人物定义句不
 //     写 <Picture N>、不虚构参考图。定义句 =「<Subject N> 是
-//     <Picture N> 中的{身份首段}，{canonical 造型}。」+ 音色句
-//     （音色是同步范围的一部分，定义段是它在 H3 里的落点）。
+//     <Picture N> 中的{身份首段}，{canonical 造型}。」；音色是
+//     同步范围的一部分，落点在定义段——v6.45 起音色不再接在定
+//     义句尾，而是紧跟该人物单独成行（见下方 v6.45 说明）。
 //   · (Sx) 按本镜头内发声顺序从 (S1) 起编、同一人全程复用；台词
 //     逐字照节拍原文，结构 = 主体标签 + (Sx) + 中文发声动词（由
 //     本拍 emotion 确定性映射）+ <d>[Chinese] 台词</d>；多人同说
@@ -5502,6 +5503,43 @@ export function buildLensPackageText(
 // 前没有 <scenetrans> / <cutoff> 的既有规范，本版不自创新格
 // 式（见 v6.12 回执说明）；不写「首帧等于上一镜末帧」类承诺、
 // 不新增参考图编号。
+// v6.45 起两版拼装严格对齐 minimax-h3-zh-prompt 技能标准（用
+// 户 2026-11-17 亲定「以后严格按照这样的规则标准去写」）。逐
+// 条核对技能「写完再查」9 项 + 硬约束后，只改偏离的四处，已
+// 符合的（六段顺序与段名、定义句句式、retention 的 appears
+// in 与正文同源、台词 <d>[Chinese] 结构与 (Sx) 发声序编号、
+// 齐声复合编号 (S1,S2)、运镜英文枚举、无故不标画外音、配乐
+// N/A、每拍一个主要动作一个运镜一个结束姿态）原样保留：
+//   ①音色单独成行：技能的音色参考句是给真实音频素材的英文
+//     整句「<Audio N> is the voice-timbre reference for
+//     <Subject M> (Sx). …」；工作台没有音频素材、音色存的是
+//     中文文字描述，按技能硬约束「只能引用用户实际提供的图
+//     / 视频 / 音频序号」不虚构 <Audio N>、也不机翻用户文字
+//     ——音色改为紧跟该人物定义句单独成行「<Subject N> 的音
+//     色：{音色原文}。」（张力点，待用户定夺是否另行处理）。
+//   ②切镜垫字补齐：技能要求切镜后先有 0.3–0.5 秒微动作 / 停
+//     顿再出对白；原口径只有上一拍有末帧文本时才写停顿句，
+//     现改为第 2 拍起恒写「先停顿约半秒，再开始本镜的主要动
+//     作。」（有承接句时排在承接句之后），台词永远不做一镜
+//     的第一句。
+//   ③环境音口径对齐技能：底噪句改「换镜头时底噪不断」；本
+//     镜头没有任何台词时不再写「对白贴近、清楚」，改写「本
+//     镜头无人说话，只有环境底噪持续。」——沉默按技能要求
+//     写出来、不留空，也不假称有对白。
+//   ④retention 的 <Picture N> 行角色说明改「<Subject N> 的
+//     人物参考图」（技能口径：Picture 行写它担任的角色、不
+//     写 appears in；本台的图是人物参考图不是首帧，不写
+//     「首帧」）。
+// 张力点（切分逻辑与硬规则优先、写法尽量贴技能，回执逐条列
+// 明待用户定夺，本版不擅自改）：技能时长镜数表（单段 4–15
+// 秒、每镜 2.5–4.0 秒、禁止 1 秒碎切）vs 一拍一镜与按剧情分
+// 组；<scenetrans> / <cutoff> 的触发条件（一句台词跨切 / 结
+// 尾被截断）在节拍数据模型里不出现（一拍一句完整台词、从
+// 不拆句跨镜），不虚构标记；每镜光线只写到场景级「光线方
+// 向保持一致」（节拍无逐镜光源数据，不编窗光方向）；台词
+// 标点按「台词一字不差」硬规则逐字保留，不补技能允许补的
+// 句末标点；retention 场景行与 summary 身高句、逐拍尺度锁
+// 句是 v6.12 硬规则叠加，技能里没有、保留。
 // 重分组只影响这一节的 H3 输出，不动已确认的分镜结构、不写回
 // 任何数据。旧 20–30 秒分组（h3DurationGroups）H3 不再使用，
 // 只剩 Seedance 每镜 20–30 秒版继续用同一函数。
@@ -6163,8 +6201,11 @@ export function buildH3TextForGroup(
         : "";
       if (prevFinalFixed) {
         sentences.push(`承接上一镜结尾：${prevFinalFixed}。`);
-        sentences.push("先停顿约半秒，再开始本镜的主要动作。");
       }
+      // v6.45 技能对齐：切镜后先有 0.3–0.5 秒停顿垫字再出对白，
+      // 第 2 拍起恒写（有承接句时紧跟其后），不再只在上一拍有
+      // 末帧文本时才写；停顿句是节奏指令、不含编造的画面内容。
+      sentences.push("先停顿约半秒，再开始本镜的主要动作。");
     }
     sentences.push(h3CameraSentence(beat));
     // 尺度锁句：多人同框且非特写 / 近景的拍才带，固定全文复用。
@@ -6306,13 +6347,19 @@ export function buildH3TextForGroup(
       pic != null
         ? `<Subject ${i + 1}> 是 <Picture ${pic}> 中的${desc}。`
         : `<Subject ${i + 1}> 是${desc}。`;
-    const voice = (info?.voice ?? "").trim();
-    if (voice) lineText += `音色是${voice}。`;
     // v6.12 身高锚点：人物行手填值有值才在定义句末尾原样追加
     // （不加字、不改字、不补标点），空值时定义句与原来一字相同。
     const anchor = (row?.heightAnchor ?? "").trim();
     if (anchor) lineText += anchor;
     defLines.push(lineText);
+    // v6.45 技能对齐：音色单独成行（紧跟该人物的定义句）。技
+    // 能的音色参考句是给真实音频素材的英文整句，本台没有音
+    // 频素材、音色是中文文字描述，不虚构 <Audio N>、不机翻，
+    // 原文整行照写（见本节头部 v6.45 说明与张力点）。
+    const voice = (info?.voice ?? "").trim();
+    if (voice) {
+      defLines.push(`<Subject ${i + 1}> 的音色：${voice}。`);
+    }
   });
 
   // ---- summary ----------------------------------------------------------
@@ -6354,7 +6401,7 @@ export function buildH3TextForGroup(
     const pic = pictureOf.get(e.code);
     if (pic == null) return;
     retLines.push(
-      `<Picture ${pic}> (人物 <Subject ${i + 1}> 的参考图): fully_preserved - <Subject ${i + 1}> 的外貌、发型与服装以这张参考图为准。`,
+      `<Picture ${pic}> (<Subject ${i + 1}> 的人物参考图): fully_preserved - <Subject ${i + 1}> 的外貌、发型与服装以这张参考图为准。`,
     );
   });
   // v6.12 场景保留行：有场景名且已有人物 / 参考图保留行时补一行
@@ -6381,9 +6428,17 @@ export function buildH3TextForGroup(
       if (!allSfx.includes(p)) allSfx.push(p);
     }
   }
-  const soundscape = `${sceneName ? `${sceneName}的环境底噪` : "环境底噪"}贯穿本镜头，切镜时不断。${
+  // v6.45 技能对齐：底噪换镜头不断；本镜头没有任何台词时不
+  // 假称有对白，改把沉默写出来（技能：沉默是一种选择，要写
+  // 出来，不要留空）。
+  const hasAnyLine = g.beats.some((b) => b.line.trim() !== "");
+  const soundscape = `${sceneName ? `${sceneName}的环境底噪` : "环境底噪"}贯穿本镜头，换镜头时底噪不断。${
     allSfx.length > 0 ? `跟画面动作同步的现场声有${allSfx.join("、")}。` : ""
-  }对白贴近、清楚，带一点现场的自然回声。`;
+  }${
+    hasAnyLine
+      ? "对白贴近、清楚，带一点现场的自然回声。"
+      : "本镜头无人说话，只有环境底噪持续。"
+  }`;
 
   const sections = [
     `subject_definitions:\n${defLines.join("\n")}`,

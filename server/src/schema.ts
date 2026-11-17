@@ -592,6 +592,52 @@ export const coverAnalysisJobs = sqliteTable("cover_analysis_jobs", {
 });
 
 // ---------------------------------------------------------------------------
+// v6.43 人物特征融合任务（fusion_jobs）：融合分析改后台任务＋轮询
+// 后，一次融合就是一行任务——startFusionJob 把模式 / 风格 / 主次 /
+// 两份文字要求与参考图副本（1024px JPEG 的 base64，JSON 内联，与
+// flor 优化任务内联附图同一做法）整份存进任务行、秒回任务号；
+// runFusionJobStep 在服务端跑那一次视觉分析（实现与原同步动作共
+// 用 runFusionAnalysis），结果先落 resultJson 再回；
+// pollFusionJob 只读任务行（毫秒级），页面每 3 秒轮询取结果。
+// status: running 进行中 / done 已完成 / failed 失败（error 存真
+// 实报错原文）；stepStartedAt = 本次执行开始时刻（毫秒），认领窗
+// 口内重复推进直接回 running、不重复跑分析（防网关重试双跑）。
+// dryRun* 三列只供沙箱验证（页面从不写）：dryRun=1 时 step 不调
+// 模型、回桩结果；dryRunDelayMs>0 时桩结果到期（建任务后经过这
+// 么多毫秒）才落库，模拟慢分析；dryRunFail=1 时 step 直接落一条
+// 桩失败。真实任务这三列恒为 0 / 空。
+// ---------------------------------------------------------------------------
+
+export const fusionJobs = sqliteTable("fusion_jobs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // dual 双参考图 / single 单参考图＋文字
+  mode: text("mode").notNull().default("dual"),
+  // hyperreal 超写实 / anime3d 3D 动漫
+  style: text("style").notNull().default("hyperreal"),
+  // balanced 均衡 / a 以 A 为主 / b 以 B 为主
+  balance: text("balance").notNull().default("balanced"),
+  textRequirement: text("text_requirement").notNull().default(""),
+  extraRequirement: text("extra_requirement").notNull().default(""),
+  // 参考图副本 JSON：[{dataBase64, mimeType, caption}]（最多 2 张）
+  imagesJson: text("images_json").notNull().default(""),
+  // running / done / failed
+  status: text("status").notNull().default("running"),
+  resultJson: text("result_json").notNull().default(""),
+  error: text("error").notNull().default(""),
+  stepStartedAt: integer("step_started_at"),
+  dryRun: integer("dry_run").notNull().default(0),
+  dryRunLayout: text("dry_run_layout").notNull().default(""),
+  dryRunDelayMs: integer("dry_run_delay_ms").notNull().default(0),
+  dryRunFail: integer("dry_run_fail").notNull().default(0),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ---------------------------------------------------------------------------
 // v5.14 封面提示词草稿（聊天分析直达第三步）：封面分析改走聊天框后
 // （v5.10），助手在聊天里出的中英文封面提示词此前只能靠用户手动
 // 复制粘贴进第三步的提示词框。本表按（项目 + 风格）存一份草稿：
@@ -959,4 +1005,70 @@ export const sceneImages = sqliteTable("scene_images", {
   createdAt: integer("created_at", { mode: "timestamp_ms" })
     .notNull()
     .$defaultFn(() => new Date()),
+});
+
+// ---------------------------------------------------------------------------
+// v6.27 拆解提示词库：监控页顶部工具栏「拆解提示词库」悬浮窗管理的
+// 提示词预设（名称 / 简介 / 正文 / 分类 / 类型）。与「发送到聊天解剖」
+// 按钮复制的代码常量 DISSECT_CHAT_RULES 互不影响：预设库只管管理与
+// 复制，改这里的默认预设不改变解剖按钮复制的文本。
+// slug 是系统预设的固定标识（种子幂等：只在不存在时插入一次，唯一
+// 索引兜底）；用户自定义预设 slug 为 NULL（SQLite 唯一索引不拦 NULL）。
+// kind: system = 系统默认（可编辑、不可删）/ custom = 用户自定义。
+// ---------------------------------------------------------------------------
+
+export const dissectPresets = sqliteTable("dissect_presets", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  slug: text("slug"),
+  name: text("name").notNull().default(""),
+  intro: text("intro").notNull().default(""),
+  body: text("body").notNull().default(""),
+  category: text("category").notNull().default("自定义预设"),
+  kind: text("kind", { enum: ["system", "custom"] })
+    .notNull()
+    .default("custom"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp_ms" })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// ---------------------------------------------------------------------------
+// v6.36 下载任务队列（下载线第一步）：用户在监控页卡片点「下载原片」
+// 建一条任务，后台取件（独立 cron，不在本表职责内）按状态机领取并
+// 回写结果。工作台只负责建任务与显示状态，不实现下载本身。
+// status: queued 排队中 / downloading 下载中 / done 已存好 /
+// failed 下载失败（error_message 存大白话原因）。同一 videoId 同时
+// 只允许一条非终态（queued/downloading）任务，由 enqueueDownloadTask
+// 在建任务前查重保证（不靠数据库唯一约束，失败任务要能重试建新行）。
+// presetId 先固定 1，预留给第二步自动解剖选预设，本版无选择界面。
+// 时间一律存毫秒整数（取件侧按毫秒口径读写，不走 timestamp 模式）。
+// ---------------------------------------------------------------------------
+
+export const downloadTasks = sqliteTable("download_tasks", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  videoId: text("video_id").notNull().default(""),
+  // 建任务时从卡片快照下来的标题 / 视频页链接 / 平台 / 达人名，
+  // 取件时不用再回查卡片（卡片可能已被清理）。
+  title: text("title").notNull().default(""),
+  pageUrl: text("page_url").notNull().default(""),
+  platform: text("platform").notNull().default(""),
+  creatorName: text("creator_name").notNull().default(""),
+  presetId: integer("preset_id").notNull().default(1),
+  status: text("status", {
+    enum: ["queued", "downloading", "done", "failed"],
+  })
+    .notNull()
+    .default("queued"),
+  errorMessage: text("error_message").notNull().default(""),
+  fileSizeBytes: integer("file_size_bytes"),
+  durationMs: integer("duration_ms"),
+  sha256: text("sha256").notNull().default(""),
+  cloudPath: text("cloud_path").notNull().default(""),
+  createdAtMs: integer("created_at_ms").notNull().default(0),
+  updatedAtMs: integer("updated_at_ms").notNull().default(0),
+  claimedAtMs: integer("claimed_at_ms"),
+  doneAtMs: integer("done_at_ms"),
 });

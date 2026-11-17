@@ -70,6 +70,12 @@
 // v6.16 起记录区显示已按用户要求下线（只删显示，清理触发、
 // 规则与服务端删除日志存档照旧）；同版一并下线页面顶部的云
 // 端存储用量条、后台存入状态条与待解剖队列条，均为只删显示。
+// v6.29 起中部的大粘贴框（填写区）按用户要求整体下线：输入框
+// 组件、粘贴处理入口 handlePastedText 与仅供它用的解析函数
+// parsePastedInfo、规范顺序表 PASTE_FIELD_LABELS 一并删除，页
+// 面上不再有手动粘贴建卡入口；PASTE_FIELD_MAP 与 FormState /
+// EMPTY_FORM 保留（Excel 导入仍在用），扩展上报（intake）与
+// Excel 导入建卡不受影响。
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -82,11 +88,15 @@ dispatchMonitorIntake,
 type MonitorIntakeResult,
 } from "./monitorintake";
 import {
-downloadMonitorTemplateXlsx,
 excelSerialToText,
 looksLikeExcelSerial,
 parseMonitorXlsx,
 } from "./monitorxlsx";
+import {
+DissectPresetLibrary,
+DissectPresetPicker,
+type DissectPreset,
+} from "./dissectpresets";
 import { CloudBadge, useCloudVideoSource } from "./cloudvideo";
 import { loadRelaySettings, relayActionArgs } from "./relaysettings";
 import sampleCover from "./assets/封面参照图-21张/monitor-huanxiong-cover.jpg";
@@ -94,16 +104,23 @@ import type { AnalysisPrefill } from "./analysisbench";
 
 type FeedAccount = ApiResponse<typeof api, "listMonitorFeed">["accounts"][number];
 type FeedVideo = FeedAccount["videos"][number];
+// v6.36 下载任务（下载线第一步）：卡片/详情窗的下载状态与建任务
+// 回执形状，直接取服务端动作出参，保证前后端一字不差。
+type DownloadTaskInfo = ApiResponse<typeof api, "listDownloadTasks">["tasks"][number];
+type EnqueueDownloadResult = ApiResponse<typeof api, "enqueueDownloadTask">;
 
 // 用户 2026-11-03 提供的参考视频（快手「幻熊」）的封面已下载存进
 // 本站资源（assets/monitor-huanxiong-cover.jpg）：这条视频的卡片
 // 优先用本站这份封面，不依赖快手带签名会过期的图床链接。
 const SAMPLE_VIDEO_ID = "3xnukh46rac9yww";
 
-// 粘贴解析后的 18 项字段（与 fetchMonitorVideo 入参一一对应）：
+// Excel 导入行的 18 项字段（与 fetchMonitorVideo 入参一一对应）：
 // 原 12 项 + v4.37 按扩展实际采集格式新增的 6 项（快手号 / 粉丝数 /
-// 获赞 / 达人简介 / 评论量 / 采集时间）。
+// 获赞 / 达人简介 / 评论量 / 采集时间）。v6.24 再加 platform 一项
+// （平台，只从 Excel「平台」列来，不进 18 项规范顺序、
+// 不进模板表头别名之外的新增列——模板首列另加「平台」）。
 type FormState = {
+  platform: string;
   videoId: string;
   videoUrl: string;
   durationText: string;
@@ -137,6 +154,12 @@ const PASTE_FIELD_MAP: Record<string, keyof FormState> = {
   播放: "playCount",
   发布时间: "publishedAt",
   达人ID: "creatorId",
+  // v6.24 抖音模板别名：达人UID 就是达人ID；抖音号存进 kuaishouId
+  // 字段（每行存的达人 handle 快照，字段名与库列名不改）。
+  达人UID: "creatorId",
+  抖音号: "kuaishouId",
+  // v6.24：平台列（抖音 / 快手），透传给服务端定新账号的平台。
+  平台: "platform",
   达人链接: "creatorUrl",
   达人主页: "creatorUrl",
   达人昵称: "creatorName",
@@ -157,76 +180,8 @@ const PASTE_FIELD_MAP: Record<string, keyof FormState> = {
   采集时间: "collectedAt",
 };
 
-// 18 项的规范顺序（与扩展采集输出、详情窗原文渲染同一顺序）。
-const PASTE_FIELD_LABELS: { key: keyof FormState; label: string }[] = [
-  { key: "videoId", label: "视频ID" },
-  { key: "videoUrl", label: "视频链接" },
-  { key: "durationText", label: "视频时长" },
-  { key: "description", label: "视频描述" },
-  { key: "likeCount", label: "点赞量" },
-  { key: "playCount", label: "播放量" },
-  { key: "publishedAt", label: "发布时间" },
-  { key: "creatorId", label: "达人ID" },
-  { key: "creatorUrl", label: "达人链接" },
-  { key: "creatorName", label: "达人昵称" },
-  { key: "coverUrl", label: "视频封面链接" },
-  { key: "videoFileUrl", label: "视频文件链接" },
-  { key: "kuaishouId", label: "快手号" },
-  { key: "fansCount", label: "粉丝数" },
-  { key: "totalLikeCount", label: "获赞" },
-  { key: "creatorBio", label: "达人简介" },
-  { key: "commentCount", label: "评论量" },
-  { key: "collectedAt", label: "采集时间" },
-];
-
-// 解析整段粘贴文本（v4.37 按扩展实际采集格式升级到 18 项）：
-// 逐行处理——行首是认得出的「字段名：」就开一个新字段（只拆第一
-// 个冒号，值里自带的冒号保留）；带「字段名：」样子但不在 18 项里
-// 的行（如扩展附带的「音频文件链接」「锚点信息」）整行跳过并关
-// 掉当前字段，免得它的续行误拼进来；其余没有字段名的行视为上
-// 一个字段的续行，拼到该字段值后面并保留换行（视频描述第二行
-// 的 #话题、达人简介的多行都靠这个）；第一个字段出现之前的行
-// 丢弃。字段顺序可乱、重复字段以后出现的为准、缺少的字段不进
-// patch（调用方以空表单为底，缺项自然留空、不报错不拦截）。
-function parsePastedInfo(text: string): {
-  patch: Partial<FormState>;
-  recognized: string[];
-  missing: string[];
-} {
-  const patch: Partial<FormState> = {};
-  const seen = new Set<keyof FormState>();
-  let currentKey: keyof FormState | null = null;
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    const m = line.match(/^([^：:]{1,12})[：:]\s*(.*)$/);
-    const key = m ? PASTE_FIELD_MAP[(m[1] ?? "").trim()] : undefined;
-    if (key) {
-      patch[key] = (m?.[2] ?? "").trim();
-      seen.add(key);
-      currentKey = key;
-      continue;
-    }
-    if (m) {
-      // 未知字段行：跳过，并结束当前字段的续行收集。
-      currentKey = null;
-      continue;
-    }
-    // 续行：拼到当前字段后面（保留换行）。空行在多行值里也保留
-    // 一行空行，让简介的段落感不丢；还没有任何字段时直接跳过。
-    if (currentKey !== null) {
-      patch[currentKey] = `${patch[currentKey] ?? ""}\n${line}`;
-    }
-  }
-  // 续行拼接可能在值首尾留下空行，统一收一下边（内部换行不动）。
-  for (const k of Object.keys(patch) as (keyof FormState)[]) {
-    patch[k] = (patch[k] ?? "").trim();
-  }
-  const recognized = PASTE_FIELD_LABELS.filter((f) => seen.has(f.key)).map((f) => f.label);
-  const missing = PASTE_FIELD_LABELS.filter((f) => !seen.has(f.key)).map((f) => f.label);
-  return { patch, recognized, missing };
-}
-
 const EMPTY_FORM: FormState = {
+  platform: "",
   videoId: "",
   videoUrl: "",
   durationText: "",
@@ -758,6 +713,11 @@ function mapIntakeRow(row: IntakeRow, platformRaw: unknown) {
       : captionText || tagsText;
   return {
     videoId,
+    // v6.44：把上面已归一化的 platform 一并带回——fetchMonitorVideo
+    // 的请求类型（zod output 口径）要求调用方必传 platform，之前只
+    // 在本函数内部用来拼链接、返回值里没带，exe 同步的类型检查在
+    // intake 调用点报 TS2345。服务端拿到后仍走自己的归一化。
+    platform,
     videoUrl: normalizeUrl(videoUrl),
     durationText: intakeDuration(
       pickIntakeField(row, ["duration", "duration_text", "durationText"]),
@@ -1000,18 +960,29 @@ function parseCloudSavedAt(at: string): number {
 function VideoPlayerModal({
   video,
   creatorName,
+  platform = "",
   onClose,
   cloudOnly = false,
+  onReplicate,
 }: {
   video: FeedVideo;
   creatorName: string;
+  // v6.25：所属账号平台，与卡片同口径判定要不要显示播放量；
+  // 不传就不隐藏（保持原显示）。
+  platform?: string;
   onClose: () => void;
+  // v6.37：「复刻」入口——点开拆解提示词预设选择窗，与卡片按钮、
+  // 详情窗入口走同一个窗、同一套复制逻辑；不传时按钮不渲染。
+  onReplicate?: () => void;
   // v4.65：「云端已存」视图专用——只播云端地址（getCloudVideo
   // ≙ /api/cloud-video/:videoId），不回退快手直链；云端没读到
   // 就明示，不静默换源。
   cloudOnly?: boolean;
 }) {
   const { title } = splitDescription(video.description);
+  // v6.25：与卡片同口径——抖音卡没有播放数据（playCount=0）时，
+  // 底部那行不显示「播放 …」那一段，只留点赞。
+  const hidePlay = platform === "抖音" && video.playCount === 0;
   // v4.64 云端优先：先查云端有没有这条视频的文件，有就播云端
   //（同源、不过期），没有再回退快手直链走 v4.60 过期降级。
   const cloud = useCloudVideoSource(
@@ -1083,14 +1054,28 @@ function VideoPlayerModal({
         )}
         <div className="flex flex-wrap items-center gap-2 p-3.5 pt-2.5">
           <span className="text-[13px] text-[var(--dim)]">
-            播放 {formatCount(video.playCount)} · 点赞 {formatCount(video.likeCount)}
+            {hidePlay ? (
+              <>点赞 {formatCount(video.likeCount)}</>
+            ) : (
+              <>播放 {formatCount(video.playCount)} · 点赞 {formatCount(video.likeCount)}</>
+            )}
           </span>
+          {onReplicate && (
+            <button
+              type="button"
+              className="btn btn-sm ml-auto"
+              aria-label={`复刻这条视频（先选拆解提示词预设）：${title}`}
+              onClick={onReplicate}
+            >
+              复刻
+            </button>
+          )}
           {video.videoUrl && (
             <a
               href={video.videoUrl}
               target="_blank"
               rel="noreferrer"
-              className="btn btn-sm ml-auto"
+              className={onReplicate ? "btn btn-sm" : "btn btn-sm ml-auto"}
               aria-label={`看原视频：${title}`}
             >
               看原视频
@@ -1185,38 +1170,663 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// v4.88 发送到聊天解剖：卡片按钮点下去，先查云端清单——有云端文件
-// 才组装这段结构化解剖指令复制到剪贴板，用户去聊天框粘贴发送，
+// v4.88 解剖指令（v6.37 起入口改名「复刻」）：点「复刻」选好拆解
+// 提示词预设后，就组装这段结构化指令复制到剪贴板（v6.22 起不再
+// 先查云端清单、不再拦路弹窗），用户去聊天框粘贴发送，
 // 聊天里的助手按指令里的规则精修解剖，做完存分析记录 + 一键套用
 // 成新项目。工作台不传文件字节、不生成分享链接：助手与工作台在
 // 同一台机器上，按云端路径直接读 ~/workspace/video-cloud/videos/
-// {videoId}.mp4。规则提示词全文写死在这里，一字不改口径。
-// v5.58：规则全文升级到项目 41 聊天精修标准（用户 2026-11-09 18:35
-// 亲口定）：tiny ASR 定时间轴与台词条数（ASR 文字只是草稿）＋ 1fps
-// 逐帧读烧录字幕核对（字幕为准）＋易错处 3fps 复核；说话人按口型／
-// 画面构图／语义闭环对位，对不上标存疑（lowConfidence）；人物上限
-// 由旧「2~4 主角」改为最多 10 位；分镜 groups 的 sceneName 必须与
-// 资产 scenes 的 name 逐字相同；actionSeconds 必须用整数；输出另加
-// 两份 MiniMax H3 六段式中文提示词（按剧情版、每镜 10–15 秒版，
-// v5.90 起第 2 版改按转折点切割的 10–15 秒版，原 20–30 秒版下线）；
-// 套用用裸标题。旧规则全文下线，本常量是唯一出口，队列「复制指令」
-// 与指令全文窗都经 buildDissectInstruction 复用同一份。
+// {videoId}.mp4。规则提示词全文写死在这里，一字不改口径；v6.37
+// 起它同时是拆解提示词库默认预设的种子与 buildDissectInstruction
+// 的默认正文，「复刻」选别的预设时正文换成那条预设的全文。
+// v6.23：规则全文换成用户在主聊亲手发的新版模板（14 节＋最终执行
+// 纪律）：核台词与时间轴、对说话人及人物身份（人物上限 10 位）、
+// 逐镜头逆向拆解、人物站位与空间连续性审核、道具连续性审核、
+// 动作完整性审核、场景连续性审核、原片穿帮破绽审核
+// （CONFIRMED_ERROR 等四类标注＋S1–S4 分级）、破绽修复与最小化
+// 修改、修复后全片二次审核、时长与镜头切割规则、两份 MiniMax H3
+// 六段式中文提示词（按剧情版、每镜 10–15 秒版）、最终输出与存档
+// 格式、存档与套用。流程口径：先还原原片事实、再检查破绽、最后
+// 合理修复，不得因修复改变原剧情。旧 9 条简版规则全文下线，本
+// 常量是唯一出口，队列「复制指令」与指令全文窗都经
+// buildDissectInstruction 复用同一份。
 // ---------------------------------------------------------------------------
 const DISSECT_CHAT_RULES =
-  "请按聊天精修方法做 1:1 复刻解剖，规则如下（项目 41 同款标准，一条不许少）：\n" +
-  "1. 核台词：先用 tiny ASR 定时间轴与台词条数，ASR 文字只是草稿；再以 1fps 逐帧读烧录字幕核对台词，字幕与 ASR 对不上时以字幕为准；易错处（快语速、重叠说话、谐音梗、生僻字）用 3fps 复核。\n" +
-  "2. 对说话人：说话人按口型、画面构图、语义闭环对位；对不上的句标存疑（lowConfidence），绝不编造台词、不靠看图猜台词；最后数一遍台词总数，跟时间轴对上。\n" +
-  "3. 台词口径：台词仅配音、不烧录字幕；台词一字不差。\n" +
-  "4. 人物锁定：人物严格锁定，A/B/C/D 与外貌一一对应，严禁互换串演。\n" +
-  "5. 人物筛选：人物只取最多 10 位主角，按台词量＋出镜时长排序，龙套过滤。\n" +
-  "6. 场景与道具：场景逐个写详细提示词；分镜 groups 的 sceneName 必须与资产 scenes 的 name 逐字相同；道具有特殊才加，无则不加。\n" +
-  "7. 时长口径：actionSeconds 必须用整数。\n" +
-  "8. 输出：剧本格式01分镜表＋资产清单＋转写原文＋两份 MiniMax H3 六段式中文提示词（按剧情版、每镜 10–15 秒版：按剧情切割、攒够 10 秒后在转折点换镜、每镜 10–15 秒；同一个动作没做完不切新镜头——切镜等动作做完、一个动作的节拍整段放在同一镜里）。\n" +
-  "9. 存档套用：做完按分析模仿页现有记录格式存入分析记录，并用裸标题一键套用成新项目。";
+  "请按聊天精修方法做 1:1 视频复刻解剖，严格执行项目 41 同款标准。以下规则一条不许少。\n" +
+  "\n" +
+  "核心目标：\n" +
+  "对原视频进行完整的影视级逆向拆解，尽可能 1:1 还原原视频的剧情、人物、台词、镜头、运镜、动作、场景、道具、剪辑节奏和视听效果。\n" +
+  "\n" +
+  "同时，你必须充当专业影视连续性审片师，主动检查原视频中存在的穿帮、人物站位错乱、人物或道具不合理出现、动作断裂、场景空间矛盾等问题。\n" +
+  "\n" +
+  "注意：\n" +
+  "复刻原视频想表达的内容，不是照搬原视频无意中犯下的错误。\n" +
+  "必须先还原原片事实，再检查问题，最后进行合理修复。\n" +
+  "不得因为修复而擅自改变原剧情。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "1. 核台词与时间轴\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "先使用 tiny ASR 建立原始音频时间轴与台词条数，ASR 文字仅作为初步草稿。\n" +
+  "\n" +
+  "再以 1fps 逐帧读取视频烧录字幕，核对每一句台词的文字、出现时间和结束时间。\n" +
+  "\n" +
+  "字幕与 ASR 对不上时，以画面中实际可见的烧录字幕作为文字核对依据，同时记录音频与字幕不一致的情况，不得擅自掩盖差异。\n" +
+  "\n" +
+  "以下易错位置必须使用 3fps 复核：\n" +
+  "- 快语速\n" +
+  "- 多人重叠说话\n" +
+  "- 谐音梗\n" +
+  "- 生僻字\n" +
+  "- 字幕快速切换\n" +
+  "- 字幕与语音存在明显差异\n" +
+  "- 台词时间轴不匹配\n" +
+  "\n" +
+  "每条台词必须记录：\n" +
+  "- 台词编号\n" +
+  "- 原始文字\n" +
+  "- 开始时间\n" +
+  "- 结束时间\n" +
+  "- 对应人物\n" +
+  "- 对应镜头\n" +
+  "- 是否存在识别疑点\n" +
+  "\n" +
+  "最后重新核对台词总数、文字数量及时间轴，确保没有遗漏、重复或擅自补充。\n" +
+  "\n" +
+  "无法确认的内容必须标记 lowConfidence，禁止编造台词。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "2. 对说话人及人物身份\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "说话人必须根据口型、画面构图、声音线索及上下文进行交叉判断。\n" +
+  "\n" +
+  "说话人对位依据：\n" +
+  "- 人物口型是否与发声时间匹配。\n" +
+  "- 当前镜头是否明确展示正在说话的人。\n" +
+  "- 是否属于画外音。\n" +
+  "- 是否属于其他人物在镜头外说话。\n" +
+  "- 是否存在多人同时说话。\n" +
+  "- 前后语义是否能够形成合理闭环。\n" +
+  "\n" +
+  "无法确认说话人的台词标记 lowConfidence，不允许仅凭画面猜测。\n" +
+  "\n" +
+  "人物必须严格锁定：\n" +
+  "- A/B/C/D 等人物编号与人物外貌一一对应。\n" +
+  "- 不允许人物互换、串演或身份漂移。\n" +
+  "- 不同人物不能共用错误的外貌描述。\n" +
+  "- 人物发型、脸型、年龄感、服装、身材及显著特征必须保持一致。\n" +
+  "\n" +
+  "人物筛选：\n" +
+  "最多提取 10 位重要人物。\n" +
+  "\n" +
+  "按照以下维度综合筛选：\n" +
+  "1. 出镜时长。\n" +
+  "2. 台词数量。\n" +
+  "3. 剧情重要程度。\n" +
+  "4. 是否承担关键动作。\n" +
+  "5. 是否推动重要剧情转折。\n" +
+  "\n" +
+  "不能单纯按照台词数量删除重要角色。\n" +
+  "无剧情作用的龙套、背景路人不必单独建立人物资产。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "3. 逐镜头逆向拆解\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "必须按照原视频实际时间顺序逐镜头拆解，不允许只概括剧情。\n" +
+  "\n" +
+  "每个镜头必须尽可能提取以下信息：\n" +
+  "\n" +
+  "\n" +
+  "- 镜头编号\n" +
+  "- 开始时间\n" +
+  "- 结束时间\n" +
+  "- 原片实际时长\n" +
+  "- 景别\n" +
+  "- 拍摄角度\n" +
+  "- 摄影机位置\n" +
+  "- 人物数量\n" +
+  "\n" +
+  "\n" +
+  "- 人物在画面中的位置\n" +
+  "- 人物身体朝向\n" +
+  "- 人物视线方向\n" +
+  "- 人物之间的距离\n" +
+  "- 人物在前景、中景、后景中的关系\n" +
+  "- 人物与环境的空间关系\n" +
+  "- 画面主体占比\n" +
+  "- 前景遮挡物\n" +
+  "- 背景环境细节\n" +
+  "\n" +
+  "\n" +
+  "- 固定镜头或运动镜头\n" +
+  "- 推镜、拉镜、摇镜、移镜、跟拍、环绕、升降等\n" +
+  "- 运镜开始位置\n" +
+  "- 运镜过程\n" +
+  "- 运镜结束位置\n" +
+  "- 运镜速度与运动幅度\n" +
+  "- 摄影机与人物之间的距离变化\n" +
+  "- 镜头切换方式\n" +
+  "\n" +
+  "\n" +
+  "- 动作开始前的状态\n" +
+  "- 动作执行过程\n" +
+  "- 动作完成状态\n" +
+  "- 面部表情\n" +
+  "- 眼神变化\n" +
+  "- 肢体细节\n" +
+  "- 人物之间的互动\n" +
+  "- 动作发生的先后顺序\n" +
+  "\n" +
+  "\n" +
+  "- 对应台词\n" +
+  "- 人物发声状态\n" +
+  "- 环境音\n" +
+  "- 动作音效\n" +
+  "- 背景音乐\n" +
+  "- 音效出现时间\n" +
+  "- 音乐节奏变化\n" +
+  "- 声音与画面的对应关系\n" +
+  "\n" +
+  "\n" +
+  "- 光线方向\n" +
+  "- 色彩和明暗\n" +
+  "- 天气及环境变化\n" +
+  "- 烟雾、粒子、火焰等特效\n" +
+  "- 画面质感\n" +
+  "- 其他重要视觉信息\n" +
+  "\n" +
+  "必须还原镜头中的关键动作、构图及视听变化，不允许用一句话概括复杂镜头。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "4. 人物站位与空间连续性审核\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "这是强制检查项目。\n" +
+  "\n" +
+  "必须为每个场景建立人物空间关系记录，并且逐镜头核对人物位置是否合理。\n" +
+  "\n" +
+  "同时使用两套坐标记录：\n" +
+  "\n" +
+  "A. 场景空间位置：\n" +
+  "- 人物在场景中的实际位置。\n" +
+  "- 人物与桌椅、门窗、墙壁、车辆等固定物体的关系。\n" +
+  "- 人物在场景中的前后左右关系。\n" +
+  "- 人物移动的起点和终点。\n" +
+  "\n" +
+  "B. 当前镜头画面位置：\n" +
+  "- 画面左侧、中央、右侧。\n" +
+  "- 前景、中景、后景。\n" +
+  "- 人物在画面中的具体占位。\n" +
+  "- 人物当前朝向及视线方向。\n" +
+  "\n" +
+  "注意：\n" +
+  "场景空间位置与画面位置不能混为一谈。\n" +
+  "摄影机改变角度后，人物在画面中的左右位置可能变化，但不代表人物在场景中真的交换了位置。\n" +
+  "\n" +
+  "必须重点检查：\n" +
+  "- 上一镜人物在左侧，下一镜是否无依据出现在右侧。\n" +
+  "- 人物是否在没有移动过程的情况下突然改变位置。\n" +
+  "- 两个人物的前后关系是否错误。\n" +
+  "- 人物面向方向是否突然改变。\n" +
+  "- 人物是否无依据出现在其他人物身后。\n" +
+  "- 人物是否突然出现在门内、门外或其他空间。\n" +
+  "- 人物是否穿过墙壁、桌子等障碍物。\n" +
+  "- 人物移动路线是否合理。\n" +
+  "- 人物离开画面后是否有合理的再次入镜逻辑。\n" +
+  "\n" +
+  "必须建立人物站位图或文字形式的空间关系图。\n" +
+  "\n" +
+  "涉及反打镜头、越轴、机位变化时，必须判断摄影机是否改变空间观察方向，不能将正常反打误判为人物换位。\n" +
+  "\n" +
+  "如果上一镜与下一镜之间存在无法解释的位置变化，必须记录并进一步检查。\n" +
+  "\n" +
+  "不能只看单个镜头，必须结合前后镜头进行交叉审核。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "5. 道具出现、消失与状态连续性审核\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "所有具有剧情作用或明显视觉存在感的道具，必须建立独立记录。\n" +
+  "\n" +
+  "每件重要道具必须明确：\n" +
+  "- 道具名称\n" +
+  "- 道具外观\n" +
+  "- 初次出现时间\n" +
+  "- 出现位置\n" +
+  "- 所属人物\n" +
+  "- 当前持有者\n" +
+  "- 使用哪只手\n" +
+  "- 使用动作\n" +
+  "- 是否发生交接\n" +
+  "- 是否被放下\n" +
+  "- 是否损坏或改变状态\n" +
+  "- 最后出现时间\n" +
+  "- 最终所在位置\n" +
+  "\n" +
+  "重点排查：\n" +
+  "\n" +
+  "1. 道具是否凭空出现。\n" +
+  "2. 道具是否没有合理来源。\n" +
+  "3. 人物上一镜没有拿东西，下一镜突然拿着东西。\n" +
+  "4. 人物上一镜拿着道具，下一镜道具突然消失。\n" +
+  "5. 道具在左右手之间无依据切换。\n" +
+  "6. 道具持有者突然变化。\n" +
+  "7. 道具在桌面、地面或其他固定位置发生无依据位移。\n" +
+  "8. 道具尺寸、颜色、形状前后不一致。\n" +
+  "9. 道具使用动作与实际接触状态不匹配。\n" +
+  "10. 道具损坏、打开、关闭等状态没有合理衔接。\n" +
+  "\n" +
+  "没有出现交接动作的情况下，不允许擅自改变道具持有者。\n" +
+  "\n" +
+  "对于有合理剪辑省略的道具变化，要结合前后剧情判断，不得机械地认定为穿帮。\n" +
+  "\n" +
+  "无特殊用途的普通背景物品不必全部建立独立资产，但必须保证重要道具和明显环境物体的连续性。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "6. 动作完整性与剧情逻辑审核\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "必须检查人物动作是否合理、完整，前后镜头是否能够正常衔接。\n" +
+  "\n" +
+  "重点检查：\n" +
+  "- 人物是否突然瞬移。\n" +
+  "- 动作是否被无依据截断。\n" +
+  "- 人物动作是否出现前后跳跃。\n" +
+  "- 人物身体姿势是否突然改变。\n" +
+  "- 人物是否出现不合理的身体穿透。\n" +
+  "- 人物之间的接触动作是否成立。\n" +
+  "- 人物是否对尚未发生的事情提前做出反应。\n" +
+  "- 人物的视线是否指向正确对象。\n" +
+  "- 人物动作与道具状态是否匹配。\n" +
+  "- 前一个镜头的动作结果是否能够衔接下一个镜头。\n" +
+  "\n" +
+  "每个重要动作必须具备：\n" +
+  "\n" +
+  "动作起始状态 → 动作执行过程 → 动作完成状态 → 后续衔接状态。\n" +
+  "\n" +
+  "例如：\n" +
+  "人物站立 → 伸手 → 接触手机 → 拿起手机 → 查看屏幕 → 放下手机。\n" +
+  "\n" +
+  "不能只写人物拿起手机。\n" +
+  "必须交代拿起之前的位置、拿起时的动作，以及拿起后的状态。\n" +
+  "\n" +
+  "同一个连续动作不能无依据拆断。\n" +
+  "不得为了凑镜头数量破坏动作完整性。\n" +
+  "\n" +
+  "对于打斗、奔跑、转身、递交物品、开门、起身、坐下等关键动作，必须重点检查动作前后的身体状态和空间位置。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "7. 场景与环境连续性审核\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "每个场景都必须提取详细资产提示词。\n" +
+  "\n" +
+  "场景分析必须包含：\n" +
+  "- 场景整体结构。\n" +
+  "- 空间大小与布局。\n" +
+  "- 门窗位置。\n" +
+  "- 家具及固定物体的位置。\n" +
+  "- 前景、中景、后景关系。\n" +
+  "- 光线来源与方向。\n" +
+  "- 主要色调。\n" +
+  "- 环境材质与细节。\n" +
+  "- 天气和时间状态。\n" +
+  "- 场景中的重要物体。\n" +
+  "\n" +
+  "场景连续性重点检查：\n" +
+  "\n" +
+  "1. 同一场景的门窗是否发生无依据变化。\n" +
+  "2. 桌椅、沙发、车辆等固定物体位置是否一致。\n" +
+  "3. 人物进出场方向是否合理。\n" +
+  "4. 人物能否通过合理路线抵达下一位置。\n" +
+  "5. 室内外空间是否正确衔接。\n" +
+  "6. 场景结构是否突然变化。\n" +
+  "7. 光线方向是否存在明显矛盾。\n" +
+  "8. 天气、时间及环境状态是否无依据变化。\n" +
+  "9. 背景重要物体是否突然出现或消失。\n" +
+  "\n" +
+  "场景资产必须统一命名。\n" +
+  "\n" +
+  "分镜 groups 的 sceneName 必须与资产 scenes 的 name 逐字相同，禁止名称不一致、重复创建同一个场景或错误引用场景。\n" +
+  "\n" +
+  "道具有特殊才加，无特殊道具不需要为了填充清单而增加普通物品。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "8. 原片穿帮、破绽与错误审核\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "必须在完整分镜拆解后，再进行一次独立的全片连续性审核。\n" +
+  "\n" +
+  "不能只检查某个镜头，必须将前后镜头、人物、场景和道具放在一起交叉比对。\n" +
+  "\n" +
+  "重点审核六大类：\n" +
+  "\n" +
+  "A. 人物错误\n" +
+  "- 人物站位错乱。\n" +
+  "- 人物突然出现或消失。\n" +
+  "- 人物人数前后不一致。\n" +
+  "- 人物服装、发型、配饰变化。\n" +
+  "- 人物身体朝向和视线错误。\n" +
+  "- 人物身份串演。\n" +
+  "\n" +
+  "B. 道具错误\n" +
+  "- 道具凭空出现。\n" +
+  "- 道具无依据消失。\n" +
+  "- 道具位置变化。\n" +
+  "- 道具持有者变化。\n" +
+  "- 道具状态不一致。\n" +
+  "- 人物动作与道具不匹配。\n" +
+  "\n" +
+  "C. 空间错误\n" +
+  "- 场景空间关系矛盾。\n" +
+  "- 人物移动路线不成立。\n" +
+  "- 人物与固定物体位置关系错误。\n" +
+  "- 反打镜头造成空间关系混乱。\n" +
+  "- 无依据越轴或方向变化。\n" +
+  "\n" +
+  "D. 动作错误\n" +
+  "- 动作突然中断。\n" +
+  "- 动作完成状态不一致。\n" +
+  "- 人物身体姿势跳跃。\n" +
+  "- 人物移动不合理。\n" +
+  "- 动作过程与动作结果不匹配。\n" +
+  "\n" +
+  "E. 剧情错误\n" +
+  "- 人物对不存在的事情做出反应。\n" +
+  "- 人物提前知道尚未发生的信息。\n" +
+  "- 道具使用没有合理来源。\n" +
+  "- 前后剧情出现明显矛盾。\n" +
+  "- 人物行为与当前情节不匹配。\n" +
+  "\n" +
+  "F. 视听错误\n" +
+  "- 台词与人物不匹配。\n" +
+  "- 口型与声音不匹配。\n" +
+  "- 音效提前或延后。\n" +
+  "- 环境声音无依据中断。\n" +
+  "- 音乐衔接不合理。\n" +
+  "- 画面动作与声音效果不匹配。\n" +
+  "\n" +
+  "特别注意：\n" +
+  "正常的蒙太奇、跳切、闪回、时间省略、艺术化剪辑、故意越轴等不能直接认定为错误。\n" +
+  "\n" +
+  "必须先判断是否属于有意的影视表达。\n" +
+  "\n" +
+  "每个发现的问题必须标注：\n" +
+  "\n" +
+  "- CONFIRMED_ERROR：有充分证据，确认错误。\n" +
+  "- SUSPECTED_ERROR：存在异常，但证据不足。\n" +
+  "- INTENTIONAL_EDIT：有意的剪辑或艺术表达，不需要修复。\n" +
+  "- UNCERTAIN：无法判断，保留疑点。\n" +
+  "\n" +
+  "破绽严重程度：\n" +
+  "\n" +
+  "S1：严重错误，直接破坏剧情理解或人物、空间关系。\n" +
+  "S2：明显错误，影响人物、动作、道具连续性。\n" +
+  "S3：一般错误，影响画面连贯性或细节一致性。\n" +
+  "S4：轻微瑕疵，不影响主要剧情。\n" +
+  "\n" +
+  "每个问题必须记录：\n" +
+  "- 问题编号。\n" +
+  "- 发生时间。\n" +
+  "- 涉及镜头。\n" +
+  "- 涉及人物或道具。\n" +
+  "- 原片具体表现。\n" +
+  "- 前后镜头证据。\n" +
+  "- 判断依据。\n" +
+  "- 问题等级。\n" +
+  "- 判断置信度。\n" +
+  "- 是否需要修复。\n" +
+  "\n" +
+  "不能因为主观感觉不合理就认定原片错误。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "9. 破绽修复与最小化修改\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "发现错误后，必须进行合理修复。\n" +
+  "\n" +
+  "修复目标：\n" +
+  "最大程度保留原片的剧情、台词、人物关系、关键动作、情绪表达、视觉效果和剪辑节奏。\n" +
+  "\n" +
+  "只修复影响合理性及连续性的错误。\n" +
+  "\n" +
+  "严格执行以下原则：\n" +
+  "\n" +
+  "\n" +
+  "优先修改存在问题的镜头描述，不得无理由重写整段剧情或全部分镜。\n" +
+  "\n" +
+  "\n" +
+  "不得为修复站位而改变人物身份、人物关系和剧情设定。\n" +
+  "\n" +
+  "\n" +
+  "人物位置变化必须有合理的空间依据和移动逻辑。\n" +
+  "\n" +
+  "\n" +
+  "道具必须有合理的出现、持有、交接、使用及最终状态。\n" +
+  "\n" +
+  "\n" +
+  "每一个关键动作都必须具备起始、过程和结果，不能出现无依据的动作跳跃。\n" +
+  "\n" +
+  "\n" +
+  "尽可能保留原片景别、机位、运镜方式、构图和切换节奏。\n" +
+  "\n" +
+  "\n" +
+  "不允许为了修复一个小问题擅自增加新人物、新对白、新事件或改变剧情发展。\n" +
+  "\n" +
+  "修复优先级：\n" +
+  "\n" +
+  "第一优先级：修正人物站位、朝向及动作描述。\n" +
+  "\n" +
+  "第二优先级：修正道具的位置、持有者和状态。\n" +
+  "\n" +
+  "第三优先级：调整场景空间关系及镜头构图。\n" +
+  "\n" +
+  "第四优先级：补足必要的动作衔接。\n" +
+  "\n" +
+  "第五优先级：确实无法通过前述方式解决时，才考虑调整镜头衔接或增加必要的过渡镜头。\n" +
+  "\n" +
+  "如果修复方案涉及原片不存在的实质性事件，必须单独标记为建议方案，不得当作原片事实。\n" +
+  "\n" +
+  "每次修复必须记录：\n" +
+  "\n" +
+  "- 原片问题。\n" +
+  "- 涉及镜头。\n" +
+  "- 修复前状态。\n" +
+  "- 修复后状态。\n" +
+  "- 具体修改内容。\n" +
+  "- 修改原因。\n" +
+  "- 是否影响剧情。\n" +
+  "- 是否影响镜头时长。\n" +
+  "- 是否影响人物资产。\n" +
+  "- 是否影响道具资产。\n" +
+  "- 是否影响下一镜头。\n" +
+  "\n" +
+  "禁止只告诉我有问题，却不提供具体可执行的修复版本。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "10. 修复后全片二次审核\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "所有修复完成后，必须重新检查整条视频，而不是只检查修改过的镜头。\n" +
+  "\n" +
+  "重点检查：\n" +
+  "\n" +
+  "1. 人物站位是否前后统一。\n" +
+  "2. 人物运动轨迹是否成立。\n" +
+  "3. 人物是否仍存在无依据瞬移。\n" +
+  "4. 道具是否具有合理的出现和消失过程。\n" +
+  "5. 道具持有者及状态是否一致。\n" +
+  "6. 动作是否完整。\n" +
+  "7. 场景空间是否合理。\n" +
+  "8. 摄影机轴线及人物方向是否正确。\n" +
+  "9. 镜头衔接是否存在新的逻辑冲突。\n" +
+  "10. 修复一个问题后是否产生其他问题。\n" +
+  "11. 台词、动作、声音是否仍然匹配。\n" +
+  "12. 是否改变了原片的剧情及关键转折。\n" +
+  "13. 最终生成提示词是否还遗留已经确认的原片错误。\n" +
+  "\n" +
+  "修复后的镜头必须与前后镜头一起复核。\n" +
+  "\n" +
+  "未能完全解决的问题必须保留记录，禁止谎称已经修复。\n" +
+  "\n" +
+  "最终输出：\n" +
+  "- 原片问题清单。\n" +
+  "- 已修复问题清单。\n" +
+  "- 未解决问题清单。\n" +
+  "- 修复后二次审核结果。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "11. 时长与镜头切割规则\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "actionSeconds 必须使用整数。\n" +
+  "\n" +
+  "同时保留原片镜头的准确开始时间、结束时间及原始时长，不得因为整数化而丢失原始时间轴。\n" +
+  "\n" +
+  "原片时长、原片镜头时长和重制版生成时长必须区分记录。\n" +
+  "\n" +
+  "同一个动作没做完不切新镜头。\n" +
+  "\n" +
+  "禁止为了迎合固定时长，强行截断正在进行的动作。\n" +
+  "\n" +
+  "对动作较多的连续镜头，必须按照完整动作节拍组织。\n" +
+  "\n" +
+  "每个镜头尽可能包含完整动作：\n" +
+  "动作开始 → 动作发展 → 动作完成 → 自然转场。\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "12. 最终输出：两份 MiniMax H3 六段式中文提示词\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "最终必须输出两份独立版本，不能把两种方案混在一起。\n" +
+  "\n" +
+  "A. 按剧情复刻版\n" +
+  "\n" +
+  "尽可能按照原片实际剧情、镜头顺序、人物动作、场景和剪辑节奏组织。\n" +
+  "\n" +
+  "重点：\n" +
+  "- 保留原片关键剧情。\n" +
+  "- 保留原片镜头设计。\n" +
+  "- 保留关键动作和情绪节拍。\n" +
+  "- 使用已经修复的正确人物站位。\n" +
+  "- 使用已经修复的正确道具状态。\n" +
+  "- 使用统一的人物及场景资产。\n" +
+  "- 不再将已经确认的原片穿帮带入生成提示词。\n" +
+  "\n" +
+  "B. 每镜 10–15 秒生成版\n" +
+  "\n" +
+  "按照原片剧情切割，兼顾 AI 视频生成时长要求。\n" +
+  "\n" +
+  "规则：\n" +
+  "- 每镜目标时长为 10–15 秒。\n" +
+  "- 按剧情发展和动作节拍进行切割。\n" +
+  "- 攒够约 10 秒后，优先在剧情转折点或完整动作结束点换镜。\n" +
+  "- 一个动作尚未完成，绝不为了凑时长强行切镜。\n" +
+  "- 如果完整动作超过 15 秒，优先保证动作完整性，不得强行截断。\n" +
+  "- 下一镜必须继承上一镜结束时的人物位置、身体姿态、道具状态和场景关系。\n" +
+  "- 不得出现上一镜站立、下一镜无依据坐下等状态跳跃。\n" +
+  "- 不得出现人物或道具无依据地改变位置。\n" +
+  "- 所有动作必须有完整的起始、执行和结束状态。\n" +
+  "\n" +
+  "两份版本都必须使用 MiniMax H3 六段式中文提示词结构。\n" +
+  "\n" +
+  "每一段提示词必须具体描述画面、人物、动作、运镜、环境、声音和视觉效果，不允许用空泛文字代替具体执行内容。\n" +
+  "\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "13. 最终输出与存档格式\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "最终交付必须包含：\n" +
+  "\n" +
+  "01. 分镜表\n" +
+  "02. 人物资产清单\n" +
+  "03. 场景资产清单\n" +
+  "04. 道具资产清单（有特殊道具才单独提取）\n" +
+  "05. 转写原文\n" +
+  "06. 人物空间站位与运动轨迹审核\n" +
+  "07. 原片破绽审核报告\n" +
+  "08. 破绽修复记录\n" +
+  "09. 修复后二次审核报告\n" +
+  "10. MiniMax H3 六段式中文提示词（按剧情复刻版）\n" +
+  "11. MiniMax H3 六段式中文提示词（每镜 10–15 秒版）\n" +
+  "\n" +
+  "格式要求：\n" +
+  "\n" +
+  "- 保留项目 41 现有剧本及分镜格式。\n" +
+  "- 不得随意改变原有字段结构。\n" +
+  "- 分镜 groups 的 sceneName 必须与资产 scenes 的 name 逐字相同。\n" +
+  "- 人物编号与人物资产严格对应。\n" +
+  "- 台词与时间轴必须一一对应。\n" +
+  "- actionSeconds 必须为整数。\n" +
+  "- 原始时间戳必须保留。\n" +
+  "- 资产提示词必须具体，不能只写简单名称。\n" +
+  "- 修复前原片事实与修复后执行方案必须分开记录。\n" +
+  "- 最终分镜以修复后的正确版本为准。\n" +
+  "- 不得遗漏原片重要剧情、人物动作和关键镜头。\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "14. 存档与套用\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "完成后，按照「分析模仿页」现有记录格式存入分析记录。\n" +
+  "\n" +
+  "保留现有存档格式、字段和命名习惯，不要擅自另建不兼容的记录结构。\n" +
+  "\n" +
+  "存档内容必须包括：\n" +
+  "- 原片分析结果。\n" +
+  "- 人物、场景、道具资产。\n" +
+  "- 完整转写原文。\n" +
+  "- 原片破绽审核结果。\n" +
+  "- 修复方案及修改记录。\n" +
+  "- 修复后的完整分镜。\n" +
+  "- 两份 MiniMax H3 提示词。\n" +
+  "\n" +
+  "最后使用裸标题一键套用为新项目。\n" +
+  "\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "最终执行纪律\n" +
+  "━━━━━━━━━━━━━━━━━━\n" +
+  "\n" +
+  "1. 先还原原片，再检查破绽，最后修复，禁止颠倒流程。\n" +
+  "2. 不能只分析单个镜头，必须检查前后镜头的连续性。\n" +
+  "3. 不能为了画面合理而编造原片不存在的事实。\n" +
+  "4. 不能把原片的穿帮错误继续复制到最终生成提示词。\n" +
+  "5. 不能为了修复小问题而改变原剧情。\n" +
+  "6. 不能擅自遗漏台词、镜头、动作和重要道具。\n" +
+  "7. 不能为了满足 10–15 秒而破坏完整动作。\n" +
+  "8. 不能将不确定的问题当作已经确认的错误。\n" +
+  "9. 所有修改都必须说明修改位置、具体内容及原因。\n" +
+  "10. 最终交付前必须完成全片二次审核。\n" +
+  "\n" +
+  "最高优先级：\n" +
+  "\n" +
+  "原片内容准确性 ＞ 人物身份一致性 ＞ 空间与道具连续性 ＞ 动作完整性 ＞ 剪辑节奏 ＞ 画面视觉效果。\n" +
+  "\n" +
+  "在不改变原片核心剧情的前提下，尽可能实现真正的 1:1 高质量复刻。";
 
+// v6.37：第三个入参 rulesBody 是「复刻」选中的预设正文——视频信息
+// 头（上面 lines 的固定部分）一字不变，正文换成选中预设的全文；
+// 不传时仍用代码常量 DISSECT_CHAT_RULES（队列等旧调用口径不变）。
+// 选系统默认预设时其正文与常量逐字一致，拼出的指令与旧版相同。
 function buildDissectInstruction(
   video: FeedVideo,
   creatorName: string,
+  rulesBody: string = DISSECT_CHAT_RULES,
 ): string {
   const { title } = splitDescription(video.description);
   const displayTitle = title || video.videoId || "未命名视频";
@@ -1235,7 +1845,7 @@ function buildDissectInstruction(
     `描述/话题：${video.description || "（无）"}`,
     `云端文件：~/workspace/video-cloud/videos/${video.videoId}.mp4`,
     "",
-    DISSECT_CHAT_RULES,
+    rulesBody,
   ];
   return lines.join("\n");
 }
@@ -1302,12 +1912,22 @@ function VideoDetailModal({
   onClose,
   onPrefillAnalysis,
   onPinnedChanged,
+  downloadTask,
+  onEnqueueDownload,
+  onReplicate,
 }: {
   video: FeedVideo;
   creatorName: string;
   creatorId: string;
   creatorUrl: string;
   onClose: () => void;
+  // v6.36：「下载原片」入口（与卡片同一套状态口径，见
+  // useDownloadOriginal）；不传 onEnqueueDownload 时整节不渲染。
+  downloadTask?: DownloadTaskInfo | null;
+  onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
+  // v6.37：「复刻」入口——点开拆解提示词预设选择窗，与卡片按钮、
+  // 播放窗按钮走同一个窗、同一套复制逻辑；不传时整节不渲染。
+  onReplicate?: () => void;
   // v6.21：置顶标记改完后通知父组件刷新 feed（卡片标记跟着变）。
   onPinnedChanged?: () => void;
   // v4.88：旧「卡片分析 → 预填到分析模仿页」入口搬家到这里——
@@ -1346,6 +1966,12 @@ function VideoDetailModal({
     },
     onError: (e) => setPinnedError(`置顶标记没改成：${describeThrownError(e)}`),
   });
+  // v6.36：下载原片状态与卡片共用同一 hook，详情窗与卡片同步。
+  const dl = useDownloadOriginal(video, downloadTask, onEnqueueDownload);
+  const showDownload =
+    Boolean(onEnqueueDownload) &&
+    Boolean(video.videoId) &&
+    video.videoId !== SAMPLE_VIDEO_ID;
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -1523,6 +2149,80 @@ function VideoDetailModal({
               </p>
             )}
           </section>
+          {/* 下载原片（v6.36）：与卡片按钮同一入口、同一状态——点
+              一下把这条排进下载队列，后台取件下载存回云端库；下
+              载完这里与卡片一起变「已存好」。 */}
+          {showDownload && (
+            <section aria-label="下载原片" className="mt-2.5">
+              <h3 className="mb-1 text-xs font-bold text-[var(--dim)]">下载原片</h3>
+              <p className="text-[13px]">
+                {dl.status === "done"
+                  ? "当前：原片已经存回云端库了。"
+                  : dl.status === "downloading"
+                    ? "当前：正在下载原片，下载完会自动存回云端库。"
+                    : dl.status === "queued"
+                      ? "当前：已排队，等后台取件下载，下载完会自动存回云端库。"
+                      : dl.status === "failed"
+                        ? "当前：上次下载没成功，可以再点一次重试。"
+                        : "链接过期、原片还没存回云端库时，点下面按钮排队下载。"}
+              </p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={
+                    dl.status === "queued" ||
+                    dl.status === "downloading" ||
+                    dl.busy
+                  }
+                  aria-label={
+                    dl.status === "done"
+                      ? `这条视频已存好：${title}`
+                      : `下载原片：${title}`
+                  }
+                  onClick={() => void dl.handleClick()}
+                >
+                  {downloadButtonLabel(dl.status)}
+                </button>
+              </div>
+              {dl.status === "failed" && downloadTask?.errorMessage && (
+                <p className="mt-1 text-xs" style={{ color: "var(--bad)" }} role="alert">
+                  下载失败：{downloadTask.errorMessage}。点「下载原片」可以再试一次。
+                </p>
+              )}
+              {dl.error && (
+                <p className="mt-1 text-xs" style={{ color: "var(--bad)" }} role="alert">
+                  {dl.error}
+                </p>
+              )}
+              {dl.note && (
+                <p className="mt-1 text-xs" style={{ color: "var(--olive)" }} role="status">
+                  {dl.note}
+                </p>
+              )}
+            </section>
+          )}
+          {/* 复刻（v6.37）：与卡片底部「复刻」按钮、播放窗「复刻」
+              按钮同一个入口——点开先选一条拆解提示词预设，选好把
+              复刻指令复制好、去聊天框粘贴发送，并排进待解剖队列。 */}
+          {onReplicate && video.videoId !== SAMPLE_VIDEO_ID && (
+            <section aria-label="复刻" className="mt-2.5">
+              <h3 className="mb-1 text-xs font-bold text-[var(--dim)]">复刻</h3>
+              <p className="text-[13px]">
+                选一条拆解提示词预设，把这条视频的复刻指令复制好，去聊天框粘贴发送；同时排进待解剖队列。
+              </p>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  aria-label={`复刻这条视频（先选拆解提示词预设）：${title}`}
+                  onClick={onReplicate}
+                >
+                  复刻
+                </button>
+              </div>
+            </section>
+          )}
           {/* 视频信息 */}
           {hasVideoInfo && (
             <section aria-label="视频信息" className="mt-2.5">
@@ -1612,34 +2312,106 @@ function sz(base: number, s: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// v6.15「下载视频」文件名：用视频标题，没有标题用视频编号，后缀
-// .mp4。Windows 不允许出现在文件名里的字符（/ \ : * ? " < > |）
-// 与控制字符一律换成下划线，首尾的空格与句点去掉（Windows 会吞
-// 掉、容易下载失败），过长截断；换完为空时回落视频编号，再空回
-// 落「视频」。
+// v6.36「下载原片」（下载线第一步）：卡片按钮行与详情窗共用同一套
+// 状态口径。任务状态以服务端 download_tasks 为准——页面打开时经
+// listDownloadTasks 一次读回、按 videoId 取最新一条，经入参 task
+// 传进来（与页面其他读查询同一节奏刷新，不另起轮询）。点按钮先
+// 本地乐观显示「排队中」，动作回执/列表刷新后再以服务端状态为
+// 准。状态文案：queued=排队中、downloading=下载中、done=已存好、
+// failed=下载失败（带任务里的大白话原因、按钮可再点重试）。已存
+// 好的再点只提示「已经存好了」、不重复建任务。下载本身由后台取
+// 件做，页面只建任务与显示状态。
 // ---------------------------------------------------------------------------
-export function downloadFileNameForVideo(video: FeedVideo, title: string): string {
-  const rawTitle = title && title !== "未命名视频" ? title : "";
-  const base = (rawTitle || video.videoId || "视频")
-    .replace(/[/\\:*?"<>|\u0000-\u001f]/g, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[. ]+$/g, "")
-    .slice(0, 80)
-    .replace(/[. ]+$/g, "");
-  const safe = base || (video.videoId || "视频").replace(/[/\\:*?"<>|\u0000-\u001f]/g, "_");
-  return `${safe}.mp4`;
+
+function downloadButtonLabel(status: DownloadTaskInfo["status"] | null): string {
+  switch (status) {
+    case "queued":
+      return "排队中";
+    case "downloading":
+      return "下载中";
+    case "done":
+      return "已存好";
+    default:
+      return "下载原片";
+  }
 }
 
+function useDownloadOriginal(
+  video: FeedVideo,
+  task: DownloadTaskInfo | null | undefined,
+  onEnqueue?: (v: FeedVideo) => Promise<EnqueueDownloadResult>,
+) {
+  const [optimisticQueued, setOptimisticQueued] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const taskId = task?.id ?? null;
+  const taskStatus = task?.status ?? null;
+  useEffect(() => {
+    // 服务端状态跟上（新任务出现 / 状态变化）就撤掉本地乐观显示。
+    setOptimisticQueued(false);
+  }, [taskId, taskStatus]);
+  const status: DownloadTaskInfo["status"] | null =
+    optimisticQueued && taskStatus !== "done" && taskStatus !== "downloading"
+      ? "queued"
+      : taskStatus;
+  const handleClick = async () => {
+    if (!onEnqueue) return;
+    if (status === "done") {
+      setError(null);
+      setNote("这条视频已经存好了，不用再下载。");
+      return;
+    }
+    if (status === "queued" || status === "downloading" || busy) return;
+    setNote(null);
+    setError(null);
+    setOptimisticQueued(true);
+    setBusy(true);
+    try {
+      const res = await onEnqueue(video);
+      if (!res.ok) {
+        setOptimisticQueued(false);
+        setError(res.message || "没排上队，请再点一次试试。");
+      } else if (res.outcome === "already_saved") {
+        setOptimisticQueued(false);
+        setNote("这条视频已经存好了，不用再下载。");
+      }
+    } catch (e) {
+      setOptimisticQueued(false);
+      setError(`没排上队：${describeThrownError(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { status, busy, note, error, handleClick };
+}
+
+// ---------------------------------------------------------------------------
+// 卡片底部按钮行：播放 / 详情 / 删除。
+// v6.37 起同一排加「复刻」按钮（在「下载原片」之后、「删除」之
+// 前）：旧「发送到聊天解剖」入口改名加回——点开先选拆解提示词
+// 预设，选好才拼指令复制 + 入待解剖队列（封面顶部不加，#111606
+// 的删除决定不动）。
+// v6.33 起「放入聊天框」按钮整颗下线（v6.31 加、v6.32 移到封面
+// 顶部；用户真机实点确认剪贴板写文件被浏览器权限拦住、这条路走
+// 不通，亲口定删）：按钮本体、useChatCopy 取文件 + 写剪贴板逻辑
+// 与本组件下方的反馈文字（chatState / chatMsg 入参）一并删除，
+// 页面上不再出现「没能放进剪贴板」红字与「已复制，去左侧聊天框
+// 按 Ctrl+V」绿字。服务端 getCloudVideo 动作播放器还在用，保留。
 function MonitorCardButtons({
   video,
   title,
   onPlay,
   onDetail,
   onDelete,
-  onRefresh,
-  refreshing = false,
-  refreshFailed = false,
+  // 刷新链接按钮已下线、入参保留（见函数内注释）：解构名加下划
+  // 线前缀仅为过类型检查的未用变量关，入参与调用方一字不动。
+  onRefresh: _onRefresh,
+  refreshing: _refreshing = false,
+  refreshFailed: _refreshFailed = false,
+  downloadTask,
+  onEnqueueDownload,
+  onReplicate,
   s,
   marginTop,
 }: {
@@ -1648,6 +2420,16 @@ function MonitorCardButtons({
   onPlay: (v: FeedVideo) => void;
   onDetail: (v: FeedVideo) => void;
   onDelete?: (v: FeedVideo) => void;
+  // v6.36：「下载原片」按钮与状态（见 useDownloadOriginal）。上层
+  // 不传 onEnqueueDownload 时整颗按钮与状态行都不渲染（版式预览
+  // 示例卡走这条）；downloadTask 是这条视频最新一条下载任务，
+  // 没有任务时为 null。
+  downloadTask?: DownloadTaskInfo | null;
+  onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
+  // v6.37：「复刻」按钮——点击开拆解提示词预设选择窗（选好才复
+  // 制、入队，见 MonitorBench 的 openReplicatePicker）。上层不传
+  // 时整颗按钮不渲染（版式预览示例卡走这条）。
+  onReplicate?: (v: FeedVideo) => void;
   // v4.66：卡片级「存云端」按钮已下线（v4.65 的卡片按钮作废）——
   // 存云端改走标题行右上角的批量入口（勾选悬浮窗），卡片按钮行
   // 恢复 播放 / 详情 / 删除，不再有任何云端按钮与云端状态入参。
@@ -1663,70 +2445,56 @@ function MonitorCardButtons({
   s: number;
   marginTop: number;
 }) {
+  // v6.38：按钮尺寸口径改「按文字自适应」——旧口径 flex-1 等宽 +
+  // min-w-0 把按钮压到约 30px 宽，「下载原片」4 个字（11px 字号约
+  // 44px）塞不下、文字溢出按钮框贴边（用户截图实报）。新口径：
+  // 按钮改 flex-auto（flex: 1 1 auto），最小宽度由文字内容撑住
+  // （不再加 min-w-0），多余空间再均分；字号 / 上下内边距同排统
+  // 一，左右内边距按按钮个数分两档，都是同排统一值：
+  // · 普通档（紧凑款，最多 播放 / 详情 / 下载原片 / 复刻 4 个）：
+  //   字号 11、左右内边距 5、间距 4——最窄的极简款卡宽 176 里
+  //   4 个按钮文字 + 内边距 + 间距 + 边框合计约 170，放得下；
+  // · 密排档（分组款带「删除」，5 个按钮）：字号 10、左右内边
+  //   距 3、间距 3——12 个字合计约 172，仍收在 176 卡宽内。
+  // 两档都按档位 s 等比缩放（sz），比例在各档位下不变。按钮高
+  // 度由同一套字号 + 内边距 + 行高决定，同排天然等高。
+  const dense = Boolean(onDelete);
+  const btnFont = dense ? sz(10, s) : sz(11, s);
+  const btnPadX = dense ? sz(3, s) : sz(5, s);
+  const btnGap = dense ? sz(3, s) : sz(4, s);
   const btnStyle: CSSProperties = {
-    fontSize: sz(11, s),
+    fontSize: btnFont,
     lineHeight: 1.25,
-    padding: `${sz(4, s)}px ${sz(8, s)}px`,
+    padding: `${sz(4, s)}px ${btnPadX}px`,
     minHeight: 0,
     height: "auto",
   };
-  // v6.15「下载视频」：点后把卡片当前最新的播放地址（videoFileUrl）
-  // 在浏览器里拉成 blob 再触发下载——快手播放地址是跨域 CDN 直链，
-  // 直接 <a download> 跨域只会打开播放、不会下载；fetch 拉 blob 后
-  // 用同源 object URL 点 <a download> 才是真下载（快手直链带 CORS
-  // 头，解剖抽帧用的就是同一条跨域读通道）。文件名走
-  // downloadFileNameForVideo（标题优先、无标题用编号、非法字符已
-  // 换掉、后缀 .mp4）。下载中按钮禁用显示「下载中…」不一直转圈无
-  // 期限：单次最长等 120 秒，超时 / 对方返回错误（403/410 等链接
-  // 过期）/ 拉不到文件一律停下来，按钮下方红字用既有过期口径提示
-  // 「视频直链已过期（快手链接有时效）……点下方刷新链接重新拿」，
-  // 不报技术错误。成功后按钮下方绿字写明已开始下载的文件名。
-  const [downloading, setDownloading] = useState(false);
-  const [downloadFailed, setDownloadFailed] = useState(false);
-  const [downloadedName, setDownloadedName] = useState("");
-  const handleDownload = async () => {
-    const url = (video.videoFileUrl ?? "").trim();
-    if (!url || downloading) return;
-    const fileName = downloadFileNameForVideo(video, title);
-    setDownloading(true);
-    setDownloadFailed(false);
-    setDownloadedName("");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 120_000);
-    try {
-      const resp = await fetch(url, { mode: "cors", signal: controller.signal });
-      if (!resp.ok) throw new Error(`http ${resp.status}`);
-      const blob = await resp.blob();
-      if (!blob || blob.size === 0 || blob.type.includes("html")) {
-        throw new Error("empty");
-      }
-      const objUrl = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = objUrl;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(objUrl), 4000);
-      setDownloadedName(fileName);
-    } catch {
-      setDownloadFailed(true);
-    } finally {
-      clearTimeout(timer);
-      setDownloading(false);
-    }
+  const dl = useDownloadOriginal(video, downloadTask, onEnqueueDownload);
+  const showDownload =
+    Boolean(onEnqueueDownload) &&
+    Boolean(video.videoId) &&
+    video.videoId !== SAMPLE_VIDEO_ID;
+  const dlNoteStyle: CSSProperties = {
+    marginTop: sz(4, s),
+    fontSize: sz(11, s),
+    lineHeight: 1.35,
   };
   return (
-    <>
+    // v6.38：整个按钮块（按钮行 + 下方状态小字）包一层贴底容器：
+    // 卡片本体已改纵向 flex（见 MonitorCardCore），本层 marginTop
+    // 取 auto 把按钮块顶到卡片底部、paddingTop 承接原 marginTop
+    // 的最小间距——同一行卡片不论标题 / 标签 / 附加行占几行，
+    // 按钮行都落在同一条水平线上。状态小字仍跟在按钮行下方。
+    <div style={{ marginTop: "auto", paddingTop: marginTop }}>
       <div
         className="flex"
-        style={{ marginTop, gap: sz(6, s) }}
+        style={{ gap: btnGap }}
         onClick={(e) => e.stopPropagation()}
       >
         {video.videoFileUrl && (
           <button
             type="button"
-            className="btn btn-primary btn-sm min-w-0 flex-1 whitespace-nowrap"
+            className="btn btn-primary btn-sm flex-auto whitespace-nowrap"
             style={btnStyle}
             aria-label={`播放视频：${title}`}
             onClick={() => onPlay(video)}
@@ -1736,17 +2504,46 @@ function MonitorCardButtons({
         )}
         <button
           type="button"
-          className="btn btn-sm min-w-0 flex-1 whitespace-nowrap"
+          className="btn btn-sm flex-auto whitespace-nowrap"
           style={btnStyle}
           aria-label={`查看详情：${title}`}
           onClick={() => onDetail(video)}
         >
           详情
         </button>
+        {showDownload && (
+          <button
+            type="button"
+            className="btn btn-sm flex-auto whitespace-nowrap"
+            style={btnStyle}
+            disabled={
+              dl.status === "queued" || dl.status === "downloading" || dl.busy
+            }
+            aria-label={
+              dl.status === "done"
+                ? `这条视频已存好：${title}`
+                : `下载原片：${title}`
+            }
+            onClick={() => void dl.handleClick()}
+          >
+            {downloadButtonLabel(dl.status)}
+          </button>
+        )}
+        {onReplicate && (
+          <button
+            type="button"
+            className="btn btn-sm flex-auto whitespace-nowrap"
+            style={btnStyle}
+            aria-label={`复刻这条视频（先选拆解提示词预设）：${title}`}
+            onClick={() => onReplicate(video)}
+          >
+            复刻
+          </button>
+        )}
         {onDelete && (
           <button
             type="button"
-            className="btn btn-danger-ghost btn-sm min-w-0 flex-1 whitespace-nowrap"
+            className="btn btn-danger-ghost btn-sm flex-auto whitespace-nowrap"
             style={btnStyle}
             aria-label={`删除这张视频卡片：${title}`}
             onClick={() => onDelete(video)}
@@ -1755,85 +2552,35 @@ function MonitorCardButtons({
           </button>
         )}
       </div>
-      {video.videoFileUrl && (
-        <div
-          style={{ marginTop: sz(6, s) }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            className="btn btn-primary btn-sm w-full whitespace-nowrap"
-            style={btnStyle}
-            disabled={downloading}
-            aria-label={`下载视频：${title}（把视频文件下载到这台设备，文件名为标题加 .mp4）`}
-            onClick={() => void handleDownload()}
-          >
-            {downloading ? "下载中…" : "⬇ 下载视频"}
-          </button>
-          {downloadFailed && (
-            <p
-              className="text-center"
-              style={{
-                marginTop: sz(3, s),
-                fontSize: sz(10, s),
-                lineHeight: 1.35,
-                color: "var(--bad)",
-              }}
-              role="alert"
-            >
-              视频直链已过期（快手链接有时效），这次没下载成。请点下方「刷新链接」重新拿新地址，再点「下载视频」。
-            </p>
-          )}
-          {!downloadFailed && downloadedName && (
-            <p
-              className="text-center"
-              style={{
-                marginTop: sz(3, s),
-                fontSize: sz(10, s),
-                lineHeight: 1.35,
-                color: "var(--olive)",
-              }}
-              role="status"
-            >
-              已开始下载：{downloadedName}
-            </p>
-          )}
-        </div>
+      {/* v6.36：「下载原片」状态小字（按钮行下方）：失败显示任务
+          里的大白话原因（按钮可再点重试）；建任务没成功显示回执
+          原因；已存好再点时显示绿字提示。排队中 / 下载中 / 已存
+          好三种状态直接写在按钮文字上，不再另占一行。 */}
+      {showDownload && dl.status === "failed" && downloadTask?.errorMessage && (
+        <p role="alert" style={{ ...dlNoteStyle, color: "var(--bad)" }}>
+          下载失败：{downloadTask.errorMessage}。点「下载原片」可以再试一次。
+        </p>
       )}
-      {onRefresh && (
-        <div
-          style={{ marginTop: sz(6, s) }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            className="btn btn-sm w-full whitespace-nowrap"
-            style={btnStyle}
-            disabled={refreshing}
-            aria-label={`刷新链接：${title}（打开快手视频页重新获取这条视频的最新播放链接）`}
-            onClick={() => onRefresh(video)}
-          >
-            {refreshing ? "🔄 正在刷新…" : "🔄 刷新链接"}
-          </button>
-          <p
-            className="text-center"
-            style={{
-              marginTop: sz(3, s),
-              fontSize: sz(10, s),
-              lineHeight: 1.35,
-              color: refreshFailed ? "var(--bad)" : "var(--dim)",
-            }}
-            role={refreshFailed ? "alert" : undefined}
-          >
-            {refreshing
-              ? "正在刷新…已打开快手视频页，等新链接回来"
-              : refreshFailed
-                ? "刷新超时：检查扩展是否开启（新标签页要在同一个浏览器里打开）"
-                : "链接过期播不了？点我重新拿"}
-          </p>
-        </div>
+      {showDownload && dl.error && (
+        <p role="alert" style={{ ...dlNoteStyle, color: "var(--bad)" }}>
+          {dl.error}
+        </p>
       )}
-    </>
+      {showDownload && dl.note && (
+        <p role="status" style={{ ...dlNoteStyle, color: "var(--olive)" }}>
+          {dl.note}
+        </p>
+      )}
+      {/* v6.30（#111610）：第二排「⬇ 下载视频」「⬆ 传文件」两个按钮
+          已按用户要求整排下线，连同仅供它们使用的下载处理
+          （handleDownload / downloadFileNameForVideo）与卡片上传入口
+          （onUploadFile 透传链路、监控页 handleUploadFileRequest 与
+          cloudupload 分片上传）一并删除；卡片只剩第一排 播放 / 详情 /
+          删除。云端库已有文件与账本不动、服务端上传动作保留未删。 */}
+      {/* 「🔄 刷新链接」按钮已按用户要求下线（只删按钮显示）：
+          onRefresh / refreshing / refreshFailed 入参与刷新回程
+          逻辑全部保留不动，卡片上不再渲染这一行。 */}
+    </div>
   );
 }
 
@@ -2033,6 +2780,7 @@ function MonitorCardTags({
 function MonitorCardCore({
   video,
   creatorName,
+  platform = "",
   width,
   cardStyle,
   cardScale,
@@ -2040,7 +2788,7 @@ function MonitorCardCore({
   onPlay,
   onDetail,
   onDelete,
-  onAnalyze,
+  onReplicate,
   onOpenDissected,
   dissected = null,
   onRefresh,
@@ -2049,9 +2797,14 @@ function MonitorCardCore({
   cloudBadge = false,
   showCollected = false,
   pinnedUnknown = false,
+  downloadTask,
+  onEnqueueDownload,
 }: {
   video: FeedVideo;
   creatorName: string;
+  // v6.24：账号平台（抖音 / 快手），在达人名旁以小标签显示；
+  // 不传就不显示（版式预览示例卡不传）。
+  platform?: string;
   width: number;
   cardStyle: MonitorCardStyle;
   cardScale: MonitorCardScale;
@@ -2059,10 +2812,14 @@ function MonitorCardCore({
   onPlay: (v: FeedVideo) => void;
   onDetail: (v: FeedVideo) => void;
   onDelete?: (v: FeedVideo) => void;
-  // v4.55：封面右上角淡绿色按钮的回调。v4.88 起行为改为「发送
-  // 到聊天解剖」（查云端 → 复制解剖指令 + 入待解剖队列），按钮
-  // 文字同步改名；版式预览示例卡不传，按钮就不渲染。
-  onAnalyze?: (v: FeedVideo) => void;
+  // v4.55：封面右上角淡绿色按钮的回调，v4.88 起行为改为复制解剖
+  // 指令 + 入待解剖队列；v6.26（#111606）封面绿色标签显示整颗
+  // 删除后本链路一度只剩透传、无可见入口。
+  // v6.37：入口以「复刻」之名加回——不在封面（#111606 的删除决定
+  // 不动），改由卡片底部按钮行（MonitorCardButtons）渲染「复刻」
+  // 按钮，点击开预设选择窗（openReplicatePicker）；版式预览示例
+  // 卡不传，按钮就不渲染。
+  onReplicate?: (v: FeedVideo) => void;
   // v4.88：这条视频已有解剖记录时的「已解剖 ✓」标记数据与点击
   // 出口（有已套用项目跳项目、否则打开分析记录）。没有记录时
   // dissected 为 null，标记不渲染。
@@ -2081,6 +2838,10 @@ function MonitorCardCore({
   // v6.21：「最新5条」视图专用——这张卡还没确认是否置顶
   // （isPinned=null）时，封面右上角打一个小标记提醒。
   pinnedUnknown?: boolean;
+  // v6.36：「下载原片」任务状态与建任务回调，透传给按钮行；
+  // 不传 onEnqueueDownload 时按钮不渲染（版式预览示例卡）。
+  downloadTask?: DownloadTaskInfo | null;
+  onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
 }) {
   const [coverFailed, setCoverFailed] = useState(false);
   const coverSrc =
@@ -2096,6 +2857,11 @@ function MonitorCardCore({
   const relative = formatRelativeTime(video.publishedAt);
   const wan = formatWanCount(video.playCount);
   const likes = formatCount(video.likeCount);
+  // v6.25：抖音账号的卡没有播放数据（抖音导出没有播放量一列，
+  // playCount 恒为 0）时，数据行不渲染播放量那一段——那个 0 是
+  // 没数据、不是真 0，摆出来容易误导；以后有了真实播放数据
+  // （playCount>0）照常显示。快手卡一律不动（含 playCount=0）。
+  const hidePlay = platform === "抖音" && video.playCount === 0;
   const clickable = variant === "compact";
 
   const coverImg = (radius: number, height: number) => (
@@ -2189,30 +2955,15 @@ function MonitorCardCore({
           已解剖 ✓
         </button>
       )}
-      {onAnalyze && (
-        <button
-          type="button"
-          aria-label={`发送到聊天解剖：${displayTitle}`}
-          onClick={(e) => {
-            e.stopPropagation();
-            onAnalyze(video);
-          }}
-          className="absolute font-bold"
-          style={{
-            right: sz(6, s),
-            top: sz(6, s),
-            fontSize: sz(11, s),
-            lineHeight: 1.25,
-            padding: `${sz(3, s)}px ${sz(8, s)}px`,
-            borderRadius: 999,
-            background: "rgba(187, 247, 208, 0.95)",
-            color: "#14532d",
-            boxShadow: "0 1px 4px rgba(0,0,0,0.35)",
-          }}
-        >
-          发送到聊天解剖
-        </button>
-      )}
+      {/* v6.26（问题 #111606）：封面右上角淡绿色「发送到聊天解剖」
+          标签按用户截图红箭头所指整颗删除（只删这处显示，所有卡片
+          款式共用本渲染核、一处全清）。v6.37 入口以「复刻」之名加
+          回到卡片底部按钮行（不在封面，见 MonitorCardButtons），
+          本处封面保持删除后的样子不变。 */}
+      {/* v6.33：「放入聊天框」按钮（v6.31 加、v6.32 移到封面
+          顶部）已按用户要求整颗删除，封面恢复成加按钮之前的
+          样子：只剩封面图、时长角标、云端标、未确认置顶标与
+          「已解剖 ✓」标记，点封面其余区域行为不变。 */}
     </div>
   );
 
@@ -2227,6 +2978,12 @@ function MonitorCardCore({
     </p>
   ) : null;
 
+  // v6.38：三款设计的 article 统一改纵向 flex（display:flex +
+  // flexDirection:column，见各分支 style）——视图容器是 flex-wrap、
+  // 同一行卡片默认拉伸到行高一致，卡内再靠按钮块的 marginTop:
+  // auto 贴底（见 MonitorCardButtons），标题 / 数据 / 标签之外的
+  // 附加行（如 full 款的「发布于」行、最新视图的采集行）行数有
+  // 出入时也由这段弹性空白吸收，按钮行恒在同一水平线。
   const articleProps = {
     className: "shrink-0 snap-start",
     style: { width } as CSSProperties,
@@ -2242,7 +2999,7 @@ function MonitorCardCore({
       <article
         {...articleProps}
         className={`${articleProps.className} bg-transparent${clickable ? " cursor-pointer" : ""}`}
-        style={{ width, background: "transparent", border: "none", boxShadow: "none" }}
+        style={{ width, background: "transparent", border: "none", boxShadow: "none", display: "flex", flexDirection: "column" }}
       >
         <div className="relative" style={{ borderRadius: sz(12, s) }}>
           {coverImg(sz(12, s), coverHeight)}
@@ -2274,7 +3031,7 @@ function MonitorCardCore({
                 textShadow: "0 1px 3px rgba(0,0,0,0.85)",
               }}
             >
-              {creatorName || "达人未填"} · ▶{wan} · {relative}
+              {creatorName || "达人未填"}{platform ? ` · ${platform}` : ""}{hidePlay ? "" : ` · ▶${wan}`} · {relative}
             </p>
           </div>
         </div>
@@ -2289,6 +3046,9 @@ function MonitorCardCore({
           onRefresh={onRefresh}
           refreshing={refreshing}
           refreshFailed={refreshFailed}
+          downloadTask={downloadTask}
+          onEnqueueDownload={onEnqueueDownload}
+          onReplicate={onReplicate}
           s={s}
           marginTop={sz(6, s)}
         />
@@ -2325,14 +3085,14 @@ function MonitorCardCore({
       <article
         {...articleProps}
         className={`${articleProps.className} card overflow-hidden${clickable ? " cursor-pointer" : ""}`}
-        style={{ width, padding: pad }}
+        style={{ width, padding: pad, display: "flex", flexDirection: "column" }}
       >
         {coverImg(sz(8, s), stripHeight)}
         <p
           className="truncate text-[var(--dim)]"
           style={{ marginTop: sz(8, s), fontSize: sz(11, s), lineHeight: 1.25 }}
         >
-          {creatorName || "达人未填"}
+          {creatorName || "达人未填"}{platform ? ` · ${platform}` : ""}
         </p>
         <p
           className="truncate font-semibold"
@@ -2348,11 +3108,11 @@ function MonitorCardCore({
           style={{
             marginTop: sz(8, s),
             display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr",
+            gridTemplateColumns: hidePlay ? "1fr 1fr" : "1fr 1fr 1fr",
             gap: sz(8, s),
           }}
         >
-          {dataCol("播放量", wan)}
+          {!hidePlay && dataCol("播放量", wan)}
           {dataCol("点赞", likes)}
           {dataCol("发布", relative)}
         </div>
@@ -2367,6 +3127,9 @@ function MonitorCardCore({
           onRefresh={onRefresh}
           refreshing={refreshing}
           refreshFailed={refreshFailed}
+          downloadTask={downloadTask}
+          onEnqueueDownload={onEnqueueDownload}
+          onReplicate={onReplicate}
           s={s}
           marginTop={sz(10, s)}
         />
@@ -2383,7 +3146,7 @@ function MonitorCardCore({
     <article
       {...articleProps}
       className={`${articleProps.className}${clickable ? " cursor-pointer" : ""}`}
-      style={{ width, background: "transparent", border: "none", boxShadow: "none" }}
+      style={{ width, background: "transparent", border: "none", boxShadow: "none", display: "flex", flexDirection: "column" }}
     >
       <div className="relative">
         {coverImg(sz(10, s), coverHeight)}
@@ -2400,7 +3163,7 @@ function MonitorCardCore({
             background: "rgba(0,0,0,0.55)",
           }}
         >
-          {creatorName || "达人未填"}
+          {creatorName || "达人未填"}{platform ? ` · ${platform}` : ""}
         </span>
       </div>
       <p
@@ -2425,13 +3188,17 @@ function MonitorCardCore({
           overflow: "hidden",
         }}
       >
-        <span aria-label={`播放量 ${formatCount(video.playCount)}`}>
-          ▶{" "}
-          <strong style={{ fontSize: sz(13, s), color: "var(--text)" }}>
-            {wan}
-          </strong>
-        </span>
-        <span aria-hidden="true">·</span>
+        {!hidePlay && (
+          <>
+            <span aria-label={`播放量 ${formatCount(video.playCount)}`}>
+              ▶{" "}
+              <strong style={{ fontSize: sz(13, s), color: "var(--text)" }}>
+                {wan}
+              </strong>
+            </span>
+            <span aria-hidden="true">·</span>
+          </>
+        )}
         <span aria-label={`点赞量 ${formatCount(video.likeCount)}`}>
           👍 {likes}
         </span>
@@ -2458,6 +3225,9 @@ function MonitorCardCore({
         onRefresh={onRefresh}
         refreshing={refreshing}
         refreshFailed={refreshFailed}
+        downloadTask={downloadTask}
+        onEnqueueDownload={onEnqueueDownload}
+        onReplicate={onReplicate}
         s={s}
         marginTop={sz(8, s)}
       />
@@ -2468,10 +3238,11 @@ function MonitorCardCore({
 function VideoCard({
   video,
   creatorName,
+  platform = "",
   onDelete,
   onPlay,
   onDetail,
-  onAnalyze,
+  onReplicate,
   onOpenDissected,
   dissected = null,
   onRefresh,
@@ -2480,13 +3251,20 @@ function VideoCard({
   cloudBadge = false,
   cardStyle = "minimal",
   cardScale = 1,
+  downloadTask,
+  onEnqueueDownload,
 }: {
   video: FeedVideo;
   creatorName: string;
+  // v6.24：账号平台小标签，透传给渲染核。
+  platform?: string;
+  // v6.36：「下载原片」任务状态与建任务回调，透传给渲染核。
+  downloadTask?: DownloadTaskInfo | null;
+  onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
   onDelete: (v: FeedVideo) => void;
   onPlay: (v: FeedVideo) => void;
   onDetail: (v: FeedVideo) => void;
-  onAnalyze?: (v: FeedVideo) => void;
+  onReplicate?: (v: FeedVideo) => void;
   onOpenDissected?: (v: FeedVideo, link: DissectedLink) => void;
   dissected?: DissectedLink | null;
   onRefresh?: (v: FeedVideo) => void;
@@ -2504,6 +3282,7 @@ function VideoCard({
     <MonitorCardCore
       video={video}
       creatorName={creatorName}
+      platform={platform}
       width={width}
       cardStyle={cardStyle}
       cardScale={cardScale}
@@ -2511,13 +3290,15 @@ function VideoCard({
       onPlay={onPlay}
       onDetail={onDetail}
       onDelete={onDelete}
-      onAnalyze={onAnalyze}
+      onReplicate={onReplicate}
       onOpenDissected={onOpenDissected}
       dissected={dissected}
       onRefresh={onRefresh}
       refreshing={refreshing}
       refreshFailed={refreshFailed}
       cloudBadge={cloudBadge}
+      downloadTask={downloadTask}
+      onEnqueueDownload={onEnqueueDownload}
     />
   );
 }
@@ -2528,6 +3309,37 @@ function VideoCard({
 // v6.21：新增第五个视图「最新5条」（latest5）——按达人分组，
 // 每位达人只取按发布时间倒序的前 5 张、排除置顶卡。
 type MonitorViewMode = "plays" | "creator" | "collected" | "cloud" | "latest5";
+
+// 发布日期筛选（#111602）：0 = 全部（不筛）；3 / 7 / 15 = 只看
+// 最近 N 天内发布的作品，按作品发布时间（publishedAt）往前算。
+type MonitorPublishRange = 0 | 3 | 7 | 15;
+const MONITOR_PUBLISH_RANGE_KEY = "monitor-publish-range-v1";
+const MONITOR_PUBLISH_RANGES: { key: MonitorPublishRange; label: string }[] = [
+  { key: 0, label: "全部" },
+  { key: 3, label: "3 天" },
+  { key: 7, label: "7 天" },
+  { key: 15, label: "15 天" },
+];
+
+// 平台筛选（v6.24）：all = 全部；抖音 / 快手 = 只看该平台达人的
+// 作品（平台挂在账号上，卡片经账号归类）。只影响显示、不删数据，
+// 选择记 localStorage，与发布日期筛选同口径。
+type MonitorPlatformFilter = "all" | "抖音" | "快手";
+const MONITOR_PLATFORM_FILTER_KEY = "monitor-platform-filter-v1";
+const MONITOR_PLATFORM_FILTERS: { key: MonitorPlatformFilter; label: string }[] = [
+  { key: "all", label: "全部" },
+  { key: "抖音", label: "抖音" },
+  { key: "快手", label: "快手" },
+];
+
+// 作品是否落在最近 range 天内：发布时间为空或解析不出时间的，
+// 筛选开启时不显示（没法确认它在不在范围内）；range=0 不筛、全过。
+function withinPublishRange(v: FeedVideo, range: MonitorPublishRange, nowMs: number): boolean {
+  if (range === 0) return true;
+  const t = v.publishedAt ? new Date(v.publishedAt).getTime() : NaN;
+  if (Number.isNaN(t)) return false;
+  return t >= nowMs - range * 24 * 3600 * 1000;
+}
 
 type MonitorGroup = { id: number; name: string };
 
@@ -2854,9 +3666,10 @@ function cardGapFor(style: MonitorCardStyle): number {
 function CompactVideoCard({
   video,
   creatorName,
+  platform = "",
   onPlay,
   onDetail,
-  onAnalyze,
+  onReplicate,
   onOpenDissected,
   dissected = null,
   onRefresh,
@@ -2867,12 +3680,16 @@ function CompactVideoCard({
   pinnedUnknown = false,
   cardStyle = "minimal",
   cardScale = 1,
+  downloadTask,
+  onEnqueueDownload,
 }: {
   video: FeedVideo;
   creatorName: string;
+  // v6.24：账号平台小标签，透传给渲染核。
+  platform?: string;
   onPlay: (v: FeedVideo) => void;
   onDetail: (v: FeedVideo) => void;
-  onAnalyze?: (v: FeedVideo) => void;
+  onReplicate?: (v: FeedVideo) => void;
   onOpenDissected?: (v: FeedVideo, link: DissectedLink) => void;
   dissected?: DissectedLink | null;
   onRefresh?: (v: FeedVideo) => void;
@@ -2886,6 +3703,10 @@ function CompactVideoCard({
   // 卡共用同一渲染核、同一基准宽，封面恒 3:4。
   cardStyle?: MonitorCardStyle;
   cardScale?: MonitorCardScale;
+  // v6.36：「下载原片」任务状态与建任务回调，透传给渲染核；
+  // 版式预览示例卡不传，按钮不渲染。
+  downloadTask?: DownloadTaskInfo | null;
+  onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
   // 「最新采集」视图专用：数据行下面再加一行采集时间，让用户
   // 一眼看出这条是什么时候采回来的（没填采集时间时回退入库
   // 时间并标注）。其他视图不传，保持原样。
@@ -2896,13 +3717,14 @@ function CompactVideoCard({
     <MonitorCardCore
       video={video}
       creatorName={creatorName}
+      platform={platform}
       width={width}
       cardStyle={cardStyle}
       cardScale={cardScale}
       variant="compact"
       onPlay={onPlay}
       onDetail={onDetail}
-      onAnalyze={onAnalyze}
+      onReplicate={onReplicate}
       onOpenDissected={onOpenDissected}
       dissected={dissected}
       onRefresh={onRefresh}
@@ -2911,6 +3733,8 @@ function CompactVideoCard({
       cloudBadge={cloudBadge}
       showCollected={showCollected}
       pinnedUnknown={pinnedUnknown}
+      downloadTask={downloadTask}
+      onEnqueueDownload={onEnqueueDownload}
     />
   );
 }
@@ -3502,19 +4326,9 @@ export function MonitorBench({
   });
   const accounts = feedQuery.data?.accounts ?? [];
   const groups = feedQuery.data?.groups ?? [];
-  // v6.21：24 小时自动更新总开关与固定间隔（服务端 monitor_meta）。
-  const autoUpdateEnabled = feedQuery.data?.autoUpdateEnabled ?? false;
+  // v6.21：24 小时自动更新固定间隔（服务端 monitor_meta）。顶部
+  // 总开关显示已按用户要求删除；间隔仍供达人行「上次更新」提示用。
   const autoUpdateIntervalHours = feedQuery.data?.autoUpdateIntervalHours ?? 24;
-  const [autoUpdateToggleError, setAutoUpdateToggleError] = useState<string | null>(null);
-  const autoUpdateEnabledMut = useMutation({
-    mutationFn: (enabled: boolean) => api.setMonitorAutoUpdateEnabled({ enabled }),
-    onSuccess: () => {
-      setAutoUpdateToggleError(null);
-      queryClient.invalidateQueries({ queryKey: ["monitor-feed"] });
-    },
-    onError: (e) =>
-      setAutoUpdateToggleError(`总开关没设置成：${describeThrownError(e)}`),
-  });
   const totalVideos = accounts.reduce((s, a) => s + a.videos.length, 0);
   // 数据来源诊断（v4.49）：视频卡片只存服务端数据库，客户端没
   // 有 localStorage / IndexedDB 副本（已全仓排查）——页面加载
@@ -3582,54 +4396,72 @@ export function MonitorBench({
     if (onOpenAnalysisRecord) onOpenAnalysisRecord(video.videoId);
   };
 
-  // v4.88 发送到聊天解剖的两扇窗：没存云端时的提示窗（标题）
-  // 与自动复制失败时的指令全文窗（指令原文）。
-  const [dissectNoCloudTitle, setDissectNoCloudTitle] = useState<
-    string | null
-  >(null);
+  // ------------------------------------------------------------------
+  // v6.36 下载原片（下载线第一步）：打开监控页时把全部下载任务
+  // 读回来，按 videoId 取最新一条给卡片/详情窗显示状态（与页面
+  // 其他读查询同一节奏刷新，不另起轮询）。点卡片「下载原片」=
+  // 调 enqueueDownloadTask 建任务，回来后刷新任务列表让状态落
+  // 到服务端口径；下载本身由后台取件做，页面不下载。
+  // ------------------------------------------------------------------
+  const downloadTasksQuery = useQuery({
+    queryKey: ["download-tasks"],
+    queryFn: () => withReadTimeout(() => api.listDownloadTasks({})),
+    retry: retryReadQuery,
+  });
+  const downloadTaskByVideoId = new Map<string, DownloadTaskInfo>();
+  for (const t of downloadTasksQuery.data?.tasks ?? []) {
+    // 列表按创建时间从早到晚，后写覆盖先写 = 每条视频的最新一条。
+    if (t.videoId) downloadTaskByVideoId.set(t.videoId, t);
+  }
+  const handleEnqueueDownload = async (
+    video: FeedVideo,
+  ): Promise<EnqueueDownloadResult> => {
+    const res = await api.enqueueDownloadTask({ videoId: video.videoId });
+    await queryClient.invalidateQueries({ queryKey: ["download-tasks"] });
+    return res;
+  };
+
+  // v4.88 解剖指令全文窗（自动复制失败时用，指令原文）。
+  // v6.22 起：原「没存云端」提示窗已按用户定案删除（点按钮不再
+  // 查云端、不再弹窗，点一下就复制 + 入队）。
   const [dissectCopyFallback, setDissectCopyFallback] = useState<
     string | null
   >(null);
 
   // ------------------------------------------------------------------
-  // v4.88 卡片「发送到聊天解剖」：
-  //   1. 先现查云端清单（listCloudSavedVideos）——没有云端文件
-  //      就只弹「先点存云端，再点分析」的提示窗，不复制残缺指
-  //      令、不入队（聊天里的助手要直接读云端文件才能精修）。
-  //   2. 有云端文件：组装结构化解剖指令（视频元数据 + 云端路
-  //      径 + 聊天精修规则全文）复制到剪贴板，toast 明示去聊天
-  //      框粘贴；复制失败弹全文窗让用户手动复制，不静默失败。
-  //   3. 同时入「待解剖队列」（服务端持久化；重复点同视频服务
-  //      端去重、只重新复制指令）。入队失败不拦复制，只在
-  //      toast 里如实带一句。
+  // 卡片 / 详情窗 / 播放窗「复刻」（v4.88 立为「发送到聊天解剖」，
+  // v6.22 改点一下直接复制，v6.26 封面入口删除，v6.37 改名「复
+  // 刻」加回并改走预设选择）：
+  //   点「复刻」先开 DissectPresetPicker 选择窗（列全部拆解提示
+  //   词预设），选中一条后关窗，按现行指令格式拼「视频信息头
+  //   （一字不变）＋选中预设正文全文」复制到剪贴板，toast 明示
+  //   去聊天框粘贴；复制失败弹全文窗让用户手动复制，不静默失
+  //   败。同时入「待解剖队列」（服务端持久化；重复点同视频服
+  //   务端去重、只重新复制指令）。入队失败不拦复制，只在 toast
+  //   里如实带一句。预设列表为空时选择窗只显示提示文案、不复
+  //   制、不入队。选系统默认预设时正文与 DISSECT_CHAT_RULES 常
+  //   量逐字一致，复制结果与旧版「发送到聊天解剖」完全相同。
   // ------------------------------------------------------------------
+  const [replicateTarget, setReplicateTarget] = useState<{
+    video: FeedVideo;
+    creatorName: string;
+  } | null>(null);
+  const openReplicatePicker = (video: FeedVideo, creatorName: string) => {
+    setReplicateTarget({ video, creatorName });
+  };
   const dissectBusyRef = useRef<Set<string>>(new Set());
-  const handleAnalyze = async (video: FeedVideo, creatorName: string) => {
+  const handleReplicatePick = async (preset: DissectPreset) => {
+    const target = replicateTarget;
+    setReplicateTarget(null);
+    if (!target) return;
+    const { video, creatorName } = target;
     const videoId = video.videoId;
     const { title } = splitDescription(video.description);
     const displayTitle = title || videoId || "未命名视频";
-    if (!videoId) {
-      setDissectNoCloudTitle(displayTitle);
-      return;
-    }
     if (dissectBusyRef.current.has(videoId)) return;
     dissectBusyRef.current.add(videoId);
     try {
-      let savedIds: Set<string>;
-      try {
-        const res = await api.listCloudSavedVideos({});
-        savedIds = new Set(res.saved.map((e) => e.videoId));
-      } catch (e) {
-        setIntakeToast(
-          `云端清单没查成（${describeThrownError(e)}），先确认网络再点一次。`,
-        );
-        return;
-      }
-      if (!savedIds.has(videoId)) {
-        setDissectNoCloudTitle(displayTitle);
-        return;
-      }
-      const text = buildDissectInstruction(video, creatorName);
+      const text = buildDissectInstruction(video, creatorName, preset.body);
       let queueNote = "";
       try {
         const res = await api.addDissectQueueItem({
@@ -3946,7 +4778,7 @@ export function MonitorBench({
   const [viewMode, setViewMode] = useState<MonitorViewMode>(() => {
     try {
       const saved = window.localStorage.getItem(MONITOR_VIEW_STORAGE_KEY);
-      if (saved === "plays" || saved === "creator" || saved === "collected" || saved === "cloud" || saved === "latest5") return saved;
+      if (saved === "plays" || saved === "creator" || saved === "collected") return saved;
     } catch {
       // localStorage 不可用时用默认视图
     }
@@ -3961,6 +4793,46 @@ export function MonitorBench({
       // 忽略写入失败
     }
   }, [viewMode]);
+
+  // 发布日期筛选（#111602）：全部 / 最近 3 天 / 7 天 / 15 天，
+  // 选择存 localStorage，下次打开保持；只影响显示，不删任何数据。
+  const [publishRange, setPublishRange] = useState<MonitorPublishRange>(() => {
+    try {
+      const saved = window.localStorage.getItem(MONITOR_PUBLISH_RANGE_KEY);
+      if (saved === "3") return 3;
+      if (saved === "7") return 7;
+      if (saved === "15") return 15;
+    } catch {
+      // localStorage 不可用时用「全部」
+    }
+    return 0;
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MONITOR_PUBLISH_RANGE_KEY, String(publishRange));
+    } catch {
+      // 忽略写入失败
+    }
+  }, [publishRange]);
+
+  // 平台筛选（v6.24）：全部 / 抖音 / 快手，选择存 localStorage，
+  // 下次打开保持；只影响显示，不删任何数据。
+  const [platformFilter, setPlatformFilter] = useState<MonitorPlatformFilter>(() => {
+    try {
+      const saved = window.localStorage.getItem(MONITOR_PLATFORM_FILTER_KEY);
+      if (saved === "抖音" || saved === "快手") return saved;
+    } catch {
+      // localStorage 不可用时用「全部」
+    }
+    return "all";
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(MONITOR_PLATFORM_FILTER_KEY, platformFilter);
+    } catch {
+      // 忽略写入失败
+    }
+  }, [platformFilter]);
 
   // 顶部使用说明折叠：默认收起只显示一行标题，展开/收起状态记 localStorage 下次保持。
   const [guideOpen, setGuideOpen] = useState<boolean>(() => {
@@ -4008,11 +4880,6 @@ export function MonitorBench({
     saveCardDisplay(next.style, next.scale);
   };
 
-  // 单行粘贴输入框：粘贴即自动解析建卡。pasteBusy 防同一段粘贴
-  // 重复触发；失败时框内文本保留，成功才清空。
-  const [pasteInput, setPasteInput] = useState("");
-  const [pasteBusy, setPasteBusy] = useState(false);
-  const pasteBusyRef = useRef(false);
   // Excel 导入（v4.44）：excelBusy 防重复导入；隐藏 file input 由
   // 「导入 Excel」按钮触发，选完即解析建卡，input 值随手清掉以便
   // 同一个文件改完能再选一次。
@@ -4024,6 +4891,8 @@ export function MonitorBench({
   const [playing, setPlaying] = useState<{
     video: FeedVideo;
     creatorName: string;
+    // v6.25：透传给播放窗判定抖音无播放数据时隐藏播放段。
+    platform?: string;
     cloudOnly?: boolean;
   } | null>(null);
   // 详情悬浮窗：当前查看详情的视频及所属达人信息，非空时渲染。
@@ -4033,6 +4902,12 @@ export function MonitorBench({
     creatorId: string;
     creatorUrl: string;
   } | null>(null);
+  // v6.27 拆解提示词库悬浮窗开关：顶部工具栏原「下载模板」按钮位置
+  // 改为绿色「拆解提示词库」按钮（下载模板的底层函数
+  // downloadMonitorTemplateXlsx 在 monitorxlsx.ts 原样保留、只是不再
+  // 由按钮触发）。默认预设正文经 seedBody 把 DISSECT_CHAT_RULES 常量
+  // 原样传给窗口落库，与解剖按钮复制的常量互不影响。
+  const [presetLibOpen, setPresetLibOpen] = useState(false);
   // 扩展上报 toast（v4.33）：intake 建卡完成后显示，7 秒自动收起。
   const [intakeToast, setIntakeToast] = useState<string | null>(null);
   // 钩子状态（v4.34）：挂载后复查一次 window 上钩子在不在，页首
@@ -4458,6 +5333,8 @@ export function MonitorBench({
         let created = 0;
         let skipped = 0;
         let refreshed = 0;
+        // v6.46：链接没变、只更新了点赞/播放的重复上报单独计数。
+        let countsUpdated = 0;
         for (const row of rows) {
           if (!row || typeof row !== "object") {
             skipped++;
@@ -4467,8 +5344,8 @@ export function MonitorBench({
             // v4.54：fromIntake 标记自动投递——服务端据此查删除
             // 墓碑（单删 / 删达人 / 一键清除留下的），命中的按
             // duplicated 跳过：删过的卡不会被补推 / 双发第二份
-            // 重建。手动粘贴与 Excel 导入不带这个标记，命中墓
-            // 碑会先解除再建卡。
+            // 重建。Excel 导入不带这个标记，命中墓碑会先解除
+            // 再建卡（手动粘贴入口 v6.29 已下线）。
             const res = await api.fetchMonitorVideo({
               ...mapIntakeRow(row, p.platform),
               fromIntake: true,
@@ -4479,17 +5356,27 @@ export function MonitorBench({
             // ——单独计数，不算跳过重复；卡片链接变化后本页的
             // pending 对比会再发「链接已刷新」toast 收尾。
             else if (res.duplicated && res.updated) refreshed++;
+            // v6.46：链接没更新、只更新了点赞/播放（服务端取大口径
+            // 只升不降）——计「更新数据」，不算跳过重复；链接与数
+            // 据同时更新的已在上一分支计「刷新链接」，不重复计。
+            else if (res.duplicated && res.countsUpdated) countsUpdated++;
             else if (res.duplicated) skipped++;
             else created++;
           } catch {
             skipped++;
           }
         }
-        setIntakeToast(
-          refreshed > 0
-            ? `收到扩展上报 ${total} 条，新建卡 ${created} 张，刷新链接 ${refreshed} 张，跳过 ${skipped} 张重复`
-            : `收到扩展上报 ${total} 条，新建卡 ${created} 张，跳过 ${skipped} 张重复`,
-        );
+        // v6.46：toast 按段拼装——「刷新链接」段只在大于 0 时出现
+        // （原口径），「更新数据」段同样只在大于 0 时多一段；两段
+        // 都为 0 时与原 toast 一字一样。四类数之和 = 上报总条数。
+        const toastParts = [
+          `收到扩展上报 ${total} 条`,
+          `新建卡 ${created} 张`,
+        ];
+        if (refreshed > 0) toastParts.push(`刷新链接 ${refreshed} 张`);
+        if (countsUpdated > 0) toastParts.push(`更新数据 ${countsUpdated} 张`);
+        toastParts.push(`跳过 ${skipped} 张重复`);
+        setIntakeToast(toastParts.join("，"));
         queryClient.invalidateQueries({ queryKey: ["monitor-feed"] });
         return { ok: true, created, skipped };
       })();
@@ -4501,79 +5388,12 @@ export function MonitorBench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 粘贴即建卡：解析整段「字段名：值」文本（复用 parsePastedInfo）
-  // → 直接走 fetchMonitorVideo 建卡管线（归户 / 去重 / 倒序不变）。
-  // 0 项认出 → toast 提示格式不对、文本保留；服务端拒收 / 请求
-  // 失败 → toast 报错、文本保留；建卡成功 → toast「已建卡 1 张」
-  // 并清空输入框；重复视频 → toast 说明已跳过并清空（内容已入库
-  // 过，留着只会重复触发）。
-  const handlePastedText = async (text: string) => {
-    if (pasteBusyRef.current) return;
-    if (!text.trim()) return;
-    const { patch, recognized } = parsePastedInfo(text);
-    if (recognized.length === 0) {
-      setIntakeToast(
-        "格式不对：没认出任何一项——请按「字段名：值」一行一项粘贴，如「视频ID：3xnukh46rac9yww」。框里的内容已保留，改好再粘一次。",
-      );
-      return;
-    }
-    const f: FormState = { ...EMPTY_FORM, ...patch };
-    pasteBusyRef.current = true;
-    setPasteBusy(true);
-    try {
-      const res = await api.fetchMonitorVideo({
-        videoId: f.videoId.trim(),
-        videoUrl: normalizeUrl(f.videoUrl),
-        durationText: f.durationText.trim(),
-        description: f.description.trim(),
-        likeCount: parseCount(f.likeCount),
-        playCount: parseCount(f.playCount),
-        publishedAt: f.publishedAt.trim(),
-        creatorId: f.creatorId.trim(),
-        creatorUrl: normalizeUrl(f.creatorUrl),
-        creatorName: f.creatorName.trim(),
-        coverUrl: f.coverUrl.trim(),
-        videoFileUrl: f.videoFileUrl.trim(),
-        // v4.37 新增 6 项：数字走 parseCount（千分位逗号自动去掉），
-        // 简介保留内部换行只收首尾空白，缺项就是空/0、不拦截。
-        kuaishouId: f.kuaishouId.trim(),
-        fansCount: parseCount(f.fansCount),
-        totalLikeCount: parseCount(f.totalLikeCount),
-        creatorBio: f.creatorBio.trim(),
-        commentCount: parseCount(f.commentCount),
-        collectedAt: f.collectedAt.trim(),
-        // 手动粘贴建卡：不带自动投递标记，命中删除墓碑先解除。
-        fromIntake: false,
-        // v6.21：到货来源写进达人状态（仅新建卡时服务端才写）。
-        collectSource: "手动粘贴",
-      });
-      if (!res.ok) {
-        setIntakeToast(
-          `${res.error ?? "没建卡，请检查粘贴内容。"} 框里的内容已保留，改好再粘一次。`,
-        );
-        return;
-      }
-      setPasteInput("");
-      setIntakeToast(
-        res.duplicated
-          ? "这条视频已经建过卡了，没有重复添加。"
-          : "已建卡 1 张",
-      );
-      invalidate();
-    } catch (e) {
-      setIntakeToast(
-        `没建卡：${describeThrownError(e)}。框里的内容已保留，再粘一次试试。`,
-      );
-    } finally {
-      pasteBusyRef.current = false;
-      setPasteBusy(false);
-    }
-  };
-
   // Excel 导入（v4.44）：本地解析 .xlsx（monitorxlsx）→ 按表头列名
   // 对 18 项（PASTE_FIELD_MAP，规范名与简称都认，列序不限、缺列
   // 留空）→ 逐行串行走 fetchMonitorVideo 同一管线（按达人链接归户、
-  // 同账号同视频ID/链接去重），口径与粘贴建卡、扩展上报完全一致。
+  // v6.24：同表另认「平台」列与抖音别名（达人UID / 抖音号），抖音
+  // 模板多出的 9 列（视频类型 / 收藏量等）认不出自动跳过。
+  // 同账号同视频ID/链接去重），口径与扩展上报完全一致。
   // 单行失败计 failed 并记首个原因，不拖垮整表；完成 toast 汇总
   // 新建 / 跳过重复 / 失败数。发布时间 / 采集时间若被表格存成了
   // 日期序列号（解析层没带样式没转回来的），在这里按字段兜底转。
@@ -4640,6 +5460,9 @@ export function MonitorBench({
             fromIntake: false,
             // v6.21：到货来源写进达人状态（仅新建卡时服务端才写）。
             collectSource: "Excel导入",
+            // v6.24：每行「平台」列的值透传；没有这一列的行留空，
+            // 靠服务端按链接域名推断（抖音模板靠 douyin.com 链接）。
+            platform: f.platform.trim(),
           });
           if (!res.ok) {
             failed++;
@@ -4829,9 +5652,30 @@ export function MonitorBench({
   // 日期缺失的排最后）；云端上传 = 清单里
   // 有的按存入时间倒序。每渲染同步进 ref，批量确认与全选都
   // 从 ref 取（与窗里看到的一致）。
+  // 发布日期筛选后的展示口径（#111602）：publishRange=0 时就是
+  // 原 accounts；开启时每位达人只保留最近 N 天内发布的作品（发
+  // 布时间缺失的不显示）。下方各视图渲染与批量存云端清单都走
+  // 这份口径，保证「看到的」与「批量操作的」一致；原始 accounts
+  // 不动（页首总数、云端计数、删达人等仍按全量）。
+  // v6.24：平台筛选先按账号平台过滤（platformFilter=all 时不过
+  // 滤），再叠发布日期筛选，两道筛选同走这份展示口径。
+  const displayNowMs = Date.now();
+  const platformAccounts: FeedAccount[] =
+    platformFilter === "all"
+      ? accounts
+      : accounts.filter((a) => a.platform === platformFilter);
+  const displayAccounts: FeedAccount[] =
+    publishRange === 0
+      ? platformAccounts
+      : platformAccounts.map((a) => ({
+          ...a,
+          videos: a.videos.filter((v) => withinPublishRange(v, publishRange, displayNowMs)),
+        }));
+  const displayVideoCount = displayAccounts.reduce((s, a) => s + a.videos.length, 0);
+
   const currentViewVideos = ((): { account: FeedAccount; video: FeedVideo }[] => {
     const flat: { account: FeedAccount; video: FeedVideo }[] = [];
-    for (const a of accounts) for (const v of a.videos) flat.push({ account: a, video: v });
+    for (const a of displayAccounts) for (const v of a.videos) flat.push({ account: a, video: v });
     if (viewMode === "collected") {
       // v6.09：按最新排列改按作品发布日期（publishedAt）倒序，
       // 离现在越近排越前面，不再按采集 / 入库时间排。发布日期
@@ -4863,14 +5707,14 @@ export function MonitorBench({
     if (viewMode === "latest5") {
       // v6.21：与「最新5条」视图渲染同一口径（见 latestFiveVideos）。
       const out: { account: FeedAccount; video: FeedVideo }[] = [];
-      for (const a of accounts) {
+      for (const a of displayAccounts) {
         for (const v of latestFiveVideos(a)) out.push({ account: a, video: v });
       }
       return out;
     }
     // creator（按达人分组）：有视频的达人依次拉平。
     const out: { account: FeedAccount; video: FeedVideo }[] = [];
-    for (const a of accounts) {
+    for (const a of displayAccounts) {
       if (a.videos.length === 0) continue;
       for (const v of a.videos) out.push({ account: a, video: v });
     }
@@ -4896,18 +5740,29 @@ export function MonitorBench({
         {feedQuery.data && (
           <p className="text-sm text-[var(--dim)]">
             {accounts.length} 位达人 · {totalVideos} 条视频卡片
+            {publishRange > 0 && (
+              <> · 最近 {publishRange} 天内发布的 {displayVideoCount} 条</>
+            )}
+            {platformFilter !== "all" && publishRange === 0 && (
+              <> · {platformFilter}平台共 {displayVideoCount} 条</>
+            )}
           </p>
         )}
         <span className="ml-auto flex flex-wrap items-center gap-2 self-center">
           <button
             type="button"
             className="btn btn-sm"
-            aria-label="下载 Excel 导入模板（只有18项表头的空表格）"
-            onClick={() =>
-              downloadMonitorTemplateXlsx(PASTE_FIELD_LABELS.map((f) => f.label))
-            }
+            style={{
+              background: "var(--olive)",
+              borderColor: "var(--olive)",
+              color: "#fff",
+              fontWeight: 600,
+            }}
+            aria-label="打开拆解提示词库（管理拆解提示词预设）"
+            aria-expanded={presetLibOpen}
+            onClick={() => setPresetLibOpen((v) => !v)}
           >
-            下载模板
+            拆解提示词库
           </button>
           <button
             type="button"
@@ -4987,7 +5842,7 @@ export function MonitorBench({
         </button>
         {guideOpen && (
           <p className="mt-1 text-[13px] leading-5 text-[var(--dim)]">
-            把整段信息粘到下面的框里就会自动解析建卡：一共 18 项（视频ID / 链接 / 时长 / 描述 / 点赞 / 播放 / 发布时间 / 达人ID / 达人链接 / 达人昵称 / 封面链接 / 视频文件链接 / 快手号 / 粉丝数 / 获赞 / 达人简介 / 评论量 / 采集时间），缺哪项留空就行，描述和简介可以占多行。下面可切换五种视图：「最新采集」按采集时间倒序、最新入库的排最前、「最新对比」每个达人只取最新一条横向排开、「按日期分组」按发布日期分组横向排列、「按达人分组」按达人分组发布时间倒序、「按作者分组」按你自定义的分组归类达人（在达人行上选分组或新建，没选的归「未分组」，分组存在服务端、换浏览器不丢）；没采到作品的达人在「最新对比」「按达人分组」「按作者分组」里先不显示，采到后自动出现；视图选择会记住。右上角「一键清除」删全部视频卡片，达人与分组设置保留。另有「3 天留存清理」：发布超过 3 天（没发布时间按入库时间算）、点赞不到 1000 且播放不到 5 万的卡片会被自动清掉（点赞或播放任一达标就留；点赞播放都没采到数据的先不删、列在清理记录的「无数据未判定」里），删卡时云端文件一起删；打开本页时服务端每天自动检查一次，也可以点右上角「立即清理」先看清单、确认后再删；删了哪些在页面上方「3 天留存清理」的记录里能查（删除不可恢复，日志只作备查）。「播放视频」在本页悬浮窗里播，点「详情」看封面、核心数据、视频与达人信息，长链接收在「更多链接」里，「复制」复制的仍是 18 项粘贴格式原文。社媒助手扩展采集后点「数据上报」，也会自动经本页建卡（重复的会跳过，完成后有提示）。也可以用 Excel 批量导入：点右上角「导入 Excel」选 .xlsx 文件，第一行按 18 项列名对齐即可（列顺序不限、缺哪列留空、按视频ID去重，重复的不重复建卡）；没有现成表格就先点「下载模板」拿只有表头的空表照着填。卡片版式点视图行右侧「版式」切换：三款设计（极简信息流 / 大图视觉 / 紧凑数据）加四档等比缩小（1x / 0.8x / 0.6x / 0.5x），点选即生效并记住；极简信息流与大图视觉两款的封面按 3:4 竖版裁切显示，紧凑数据款顶部是 16:9 窄封面条。每张卡片下方还有「🔄 刷新链接」：视频直链过期播不了时点它，会在新标签页打开这条视频的快手页，扩展在那个标签页抓到新链接后送回来、只换链接不建新卡；点了 10 秒还没回来就是刷新超时，检查扩展是否开启（标签页要在同一个浏览器里打开）。
+            把整段信息粘到下面的框里就会自动解析建卡：一共 18 项（视频ID / 链接 / 时长 / 描述 / 点赞 / 播放 / 发布时间 / 达人ID / 达人链接 / 达人昵称 / 封面链接 / 视频文件链接 / 快手号 / 粉丝数 / 获赞 / 达人简介 / 评论量 / 采集时间），缺哪项留空就行，描述和简介可以占多行。下面可切换五种视图：「最新采集」按采集时间倒序、最新入库的排最前、「最新对比」每个达人只取最新一条横向排开、「按日期分组」按发布日期分组横向排列、「按达人分组」按达人分组发布时间倒序、「按作者分组」按你自定义的分组归类达人（在达人行上选分组或新建，没选的归「未分组」，分组存在服务端、换浏览器不丢）；没采到作品的达人在「最新对比」「按达人分组」「按作者分组」里先不显示，采到后自动出现；视图选择会记住。右上角「一键清除」删全部视频卡片，达人与分组设置保留。另有「3 天留存清理」：发布超过 3 天（没发布时间按入库时间算）、点赞不到 1000 且播放不到 5 万的卡片会被自动清掉（点赞或播放任一达标就留；点赞播放都没采到数据的先不删、列在清理记录的「无数据未判定」里），删卡时云端文件一起删；打开本页时服务端每天自动检查一次，也可以点右上角「立即清理」先看清单、确认后再删；删了哪些在页面上方「3 天留存清理」的记录里能查（删除不可恢复，日志只作备查）。「播放视频」在本页悬浮窗里播，点「详情」看封面、核心数据、视频与达人信息，长链接收在「更多链接」里，「复制」复制的仍是 18 项粘贴格式原文。社媒助手扩展采集后点「数据上报」，也会自动经本页建卡（重复的会跳过，完成后有提示）。也可以用 Excel 批量导入：点右上角「导入 Excel」选 .xlsx 文件，第一行按 18 项列名对齐即可（列顺序不限、缺哪列留空、按视频ID去重，重复的不重复建卡）；没有现成表格就先点「下载模板」拿只有表头的空表照着填。抖音导出的表格也能直接导：它的「达人UID」「抖音号」两列都认，「平台」列可填抖音或快手、不填就按链接自动认（抖音链接认成抖音、快手链接认成快手）；抖音的表格没有播放量这一列，所以抖音卡片不参与按播放量的 3 天清理判定（不会因为没播放数据被删）。卡片版式点视图行右侧「版式」切换：三款设计（极简信息流 / 大图视觉 / 紧凑数据）加四档等比缩小（1x / 0.8x / 0.6x / 0.5x），点选即生效并记住；极简信息流与大图视觉两款的封面按 3:4 竖版裁切显示，紧凑数据款顶部是 16:9 窄封面条。每张卡片下方还有「🔄 刷新链接」：视频直链过期播不了时点它，会在新标签页打开这条视频的快手页，扩展在那个标签页抓到新链接后送回来、只换链接不建新卡；点了 10 秒还没回来就是刷新超时，检查扩展是否开启（标签页要在同一个浏览器里打开）。
           </p>
         )}
       </div>
@@ -5057,70 +5912,6 @@ export function MonitorBench({
         </div>
       )}
 
-      {/* 24 小时自动更新总开关（v6.21）：只是页面设置——间隔固定
-          24 小时；每位达人还要在达人行上单独打开「参与」才算数。
-          下次应更新时间只做提示：网页自己抓不了快手（要登录 +
-          页面签名），到点不会自动抓取，新作品仍靠粘贴 / 扩展上
-          报 / Excel 导入到货，到货后上次更新时间自动刷新。 */}
-      <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1" aria-label="24小时自动更新设置">
-        <span className="text-sm font-bold">24 小时自动更新</span>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={autoUpdateEnabled}
-          aria-label={`24小时自动更新总开关（当前${autoUpdateEnabled ? "已开" : "已关"}）`}
-          disabled={autoUpdateEnabledMut.isPending}
-          className={autoUpdateEnabled ? "btn btn-primary btn-sm" : "btn btn-sm"}
-          onClick={() => autoUpdateEnabledMut.mutate(!autoUpdateEnabled)}
-        >
-          {autoUpdateEnabled ? "已开" : "已关"}
-        </button>
-        <span className="text-xs leading-5 text-[var(--dim)]">
-          间隔固定 24 小时；下次应更新时间只做提示、不触发任何抓取（自动抓取还没接进来，新作品到货后上次更新时间会自动刷新）。
-        </span>
-        {autoUpdateToggleError && (
-          <span className="text-xs" style={{ color: "var(--bad)" }} role="alert">
-            {autoUpdateToggleError}
-          </span>
-        )}
-      </div>
-
-      {/* 填写区（精简版）：通栏单行输入框，粘贴整段「字段名：值」
-          即自动解析建卡。textarea 只为能完整接住多行粘贴文本：
-          视觉高度固定一行（42px）、resize:none 不可拉伸；底色用
-          深蓝灰 tint（#1f2c44 / 边框 #3a4f7a），与整体深色面板
-          一眼可分。 */}
-      <div className="mt-3" aria-label="填写视频信息">
-        <textarea
-          className="field w-full monitor-paste-field"
-          rows={1}
-          style={{
-            height: 42,
-            resize: "none",
-            overflowY: "auto",
-            background: "#1f2c44",
-            borderColor: "#3a4f7a",
-          }}
-          value={pasteInput}
-          disabled={pasteBusy}
-          onChange={(e) => setPasteInput(e.target.value)}
-          onPaste={(e) => {
-            const text = e.clipboardData.getData("text");
-            if (!text) return;
-            e.preventDefault();
-            setPasteInput(text);
-            void handlePastedText(text);
-          }}
-          placeholder="粘贴整段信息自动建卡（18 项），如：视频ID：3xnukh46rac9yww｜视频链接：https://www.kuaishou.com/short-video/…｜视频时长：2分13秒｜视频描述：…｜点赞量：671｜播放量：23,000｜发布时间：2026-11-03 17:59｜达人ID：…｜达人链接：https://www.kuaishou.com/profile/…｜达人昵称：…｜视频封面链接：https://…｜视频文件链接：https://…｜快手号：…｜粉丝数：…｜获赞：…｜达人简介：…｜评论量：…｜采集时间：…"
-          aria-label="粘贴视频信息（粘贴后自动建卡）"
-        />
-        {pasteBusy && (
-          <p className="mt-1 text-[13px] text-[var(--dim)]" role="status">
-            正在解析并建卡…
-          </p>
-        )}
-      </div>
-
       {/* 视图切换：按播放量排列 / 按达人分组 / 按最新排列 / 云端上传 / 最新5条（v6.21 新增，选择存 localStorage） */}
       <div className="mt-5 flex flex-wrap items-center gap-2" role="tablist" aria-label="监控视图切换">
         <span className="text-sm font-bold">视图</span>
@@ -5129,8 +5920,6 @@ export function MonitorBench({
             { key: "plays", label: "按播放量排列" },
             { key: "creator", label: "按达人分组" },
             { key: "collected", label: "按最新排列" },
-            { key: "cloud", label: "云端上传" },
-            { key: "latest5", label: "最新5条" },
           ] as { key: MonitorViewMode; label: string }[]
         ).map((opt) => (
           <button
@@ -5148,15 +5937,50 @@ export function MonitorBench({
             ) : null}
           </button>
         ))}
-        <button
-          type="button"
-          className="btn btn-sm"
-          aria-label="打开链接备忘录（悬浮列出储存的链接，点击复制）"
-          aria-expanded={linkMemoOpen}
-          onClick={() => setLinkMemoOpen(true)}
-        >
-          链接备忘录
-        </button>
+        <span className="flex items-center gap-1.5">
+          <label className="text-sm font-bold" htmlFor="monitor-publish-range">
+            发布日期
+          </label>
+          <select
+            id="monitor-publish-range"
+            className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-[13px]"
+            value={String(publishRange)}
+            aria-label="按发布日期筛选作品：全部、最近 3 天、最近 7 天、最近 15 天"
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (v === 3 || v === 7 || v === 15) setPublishRange(v);
+              else setPublishRange(0);
+            }}
+          >
+            {MONITOR_PUBLISH_RANGES.map((opt) => (
+              <option key={opt.key} value={String(opt.key)}>
+                {opt.key === 0 ? "全部" : `最近 ${opt.label}`}
+              </option>
+            ))}
+          </select>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <label className="text-sm font-bold" htmlFor="monitor-platform-filter">
+            平台
+          </label>
+          <select
+            id="monitor-platform-filter"
+            className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5 text-[13px]"
+            value={platformFilter}
+            aria-label="按平台筛选作品：全部、抖音、快手"
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "抖音" || v === "快手") setPlatformFilter(v);
+              else setPlatformFilter("all");
+            }}
+          >
+            {MONITOR_PLATFORM_FILTERS.map((opt) => (
+              <option key={opt.key} value={opt.key}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </span>
         <span className="ml-auto">
           <button
             type="button"
@@ -5171,7 +5995,6 @@ export function MonitorBench({
         <span className="text-xs text-[var(--dim)]">
           {viewMode === "plays" && "按播放量从高到低，播放量未知或为 0 的排在最后"}
           {viewMode === "creator" && "按达人分组显示"}
-          {viewMode === "collected" && "按作品发布日期排序，离现在越近排越前面"}
           {viewMode === "cloud" && "只显示云端已存的视频"}
           {viewMode === "latest5" && "按达人分组，每位达人只看最新发布的 5 条，置顶的除外"}
         </span>
@@ -5312,6 +6135,14 @@ export function MonitorBench({
           <p className="text-sm leading-5 text-[var(--dim)]">
             还没有卡片。把第一条视频的整段信息粘到上面的输入框里，就会自动生成第一张卡片。
           </p>
+        ) : publishRange > 0 && displayVideoCount === 0 ? (
+          <p className="text-sm leading-5 text-[var(--dim)]">
+            最近 {publishRange} 天内没有发布的作品（没有发布日期的作品也不在筛选里显示）。把上面「发布日期」换成更长的时间范围或者「全部」就能看到全部作品。
+          </p>
+        ) : platformFilter !== "all" && displayVideoCount === 0 ? (
+          <p className="text-sm leading-5 text-[var(--dim)]">
+            {platformFilter}平台暂时没有作品。把上面「平台」换成「全部」就能看到所有平台的作品。
+          </p>
         ) : viewMode === "cloud" ? (
           <section aria-label="云端上传">
             {(() => {
@@ -5323,7 +6154,7 @@ export function MonitorBench({
                 return <p className="text-sm text-[var(--dim)]">正在读取云端清单…</p>;
               }
               const items: { account: FeedAccount; video: FeedVideo; atMs: number }[] = [];
-              for (const a of accounts) {
+              for (const a of displayAccounts) {
                 for (const v of a.videos) {
                   const at = cloudSavedAt.get(v.videoId);
                   if (at !== undefined) {
@@ -5361,19 +6192,22 @@ export function MonitorBench({
                       key={v.id}
                       video={v}
                       creatorName={a.name}
+                      platform={a.platform}
                       cloudBadge
                       onPlay={(vid) =>
-                        setPlaying({ video: vid, creatorName: a.name, cloudOnly: true })
+                        setPlaying({ video: vid, creatorName: a.name, platform: a.platform, cloudOnly: true })
                       }
                       onDetail={(vid) =>
                         setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
                       }
-                      onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
+                      onReplicate={(vid) => openReplicatePicker(vid, a.name)}
                       onOpenDissected={handleOpenDissected}
                       dissected={dissectedByVideoId.get(v.videoId) ?? null}
                       onRefresh={handleRefreshVideo}
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
+                      downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      onEnqueueDownload={handleEnqueueDownload}
                     />
                   ))}
                   </div>
@@ -5387,7 +6221,7 @@ export function MonitorBench({
               // 全部视频拉平，按播放量从高到低：播放量未知（null）
               // 按 0 算，与真 0 一起排在最后；平铺不分组。
               const flat: { account: FeedAccount; video: FeedVideo }[] = [];
-              for (const a of accounts) for (const v of a.videos) flat.push({ account: a, video: v });
+              for (const a of displayAccounts) for (const v of a.videos) flat.push({ account: a, video: v });
               flat.sort((x, y) => (y.video.playCount ?? 0) - (x.video.playCount ?? 0));
               if (flat.length === 0) {
                 return <p className="text-sm text-[var(--dim)]">还没有视频卡片。</p>;
@@ -5400,16 +6234,19 @@ export function MonitorBench({
                       key={v.id}
                       video={v}
                       creatorName={a.name}
-                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
+                      platform={a.platform}
+                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name, platform: a.platform })}
                       onDetail={(vid) =>
                         setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
                       }
-                      onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
+                      onReplicate={(vid) => openReplicatePicker(vid, a.name)}
                       onOpenDissected={handleOpenDissected}
                       dissected={dissectedByVideoId.get(v.videoId) ?? null}
                       onRefresh={handleRefreshVideo}
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
+                      downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      onEnqueueDownload={handleEnqueueDownload}
                     />
                   ))}
                 </div>
@@ -5425,7 +6262,7 @@ export function MonitorBench({
               // 小值排最后、不丢掉（稳定排序，缺失项之间保持原相
               // 对顺序），不回退 createdAt。
               const flat: { account: FeedAccount; video: FeedVideo }[] = [];
-              for (const a of accounts) for (const v of a.videos) flat.push({ account: a, video: v });
+              for (const a of displayAccounts) for (const v of a.videos) flat.push({ account: a, video: v });
               const publishedTime = (v: FeedVideo) => {
                 const t = v.publishedAt ? new Date(v.publishedAt).getTime() : NaN;
                 return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
@@ -5445,17 +6282,20 @@ export function MonitorBench({
                       key={v.id}
                       video={v}
                       creatorName={a.name}
+                      platform={a.platform}
                       showCollected
-                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
+                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name, platform: a.platform })}
                       onDetail={(vid) =>
                         setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
                       }
-                      onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
+                      onReplicate={(vid) => openReplicatePicker(vid, a.name)}
                       onOpenDissected={handleOpenDissected}
                       dissected={dissectedByVideoId.get(v.videoId) ?? null}
                       onRefresh={handleRefreshVideo}
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
+                      downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      onEnqueueDownload={handleEnqueueDownload}
                     />
                   ))}
                 </div>
@@ -5469,7 +6309,7 @@ export function MonitorBench({
               // 只影响状态行文案、不影响显示）；每位达人只取
               // latestFiveVideos 口径的前 5 张（排除置顶、发布
               // 日期倒序、缺失排最后）。
-              const visibleAccounts = accounts.filter((a) => a.videos.length > 0);
+              const visibleAccounts = displayAccounts.filter((a) => a.videos.length > 0);
               if (visibleAccounts.length === 0) {
                 return (
                   <p className="text-sm leading-5 text-[var(--dim)]">
@@ -5527,17 +6367,20 @@ export function MonitorBench({
                             key={v.id}
                             video={v}
                             creatorName={a.name}
+                            platform={a.platform}
                             pinnedUnknown={v.isPinned === null}
-                            onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
+                            onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name, platform: a.platform })}
                             onDetail={(vid) =>
                               setDetail({ video: vid, creatorName: a.name, creatorId: a.creatorId, creatorUrl: a.url })
                             }
-                            onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
+                            onReplicate={(vid) => openReplicatePicker(vid, a.name)}
                             onOpenDissected={handleOpenDissected}
                             dissected={dissectedByVideoId.get(v.videoId) ?? null}
                             onRefresh={handleRefreshVideo}
                             refreshing={pendingRefresh.has(v.id)}
                             refreshFailed={refreshFailedIds.has(v.id)}
+                            downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                            onEnqueueDownload={handleEnqueueDownload}
                           />
                         ))}
                       </div>
@@ -5551,7 +6394,7 @@ export function MonitorBench({
           (() => {
             // 展示规则（v4.43）：没采到作品（0 条视频）的达人不
             // 显示——分组等设置都保留，采到作品后自动出现。
-            const visibleAccounts = accounts.filter((a) => a.videos.length > 0);
+            const visibleAccounts = displayAccounts.filter((a) => a.videos.length > 0);
             if (visibleAccounts.length === 0) {
               return (
                 <p className="text-sm leading-5 text-[var(--dim)]">
@@ -5624,7 +6467,8 @@ export function MonitorBench({
                       key={v.id}
                       video={v}
                       creatorName={a.name}
-                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name })}
+                      platform={a.platform}
+                      onPlay={(vid) => setPlaying({ video: vid, creatorName: a.name, platform: a.platform })}
                       onDetail={(vid) =>
                         setDetail({
                           video: vid,
@@ -5633,12 +6477,14 @@ export function MonitorBench({
                           creatorUrl: a.url,
                         })
                       }
-                      onAnalyze={(vid) => void handleAnalyze(vid, a.name)}
+                      onReplicate={(vid) => openReplicatePicker(vid, a.name)}
                       onOpenDissected={handleOpenDissected}
                       dissected={dissectedByVideoId.get(v.videoId) ?? null}
                       onRefresh={handleRefreshVideo}
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
+                      downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      onEnqueueDownload={handleEnqueueDownload}
                       onDelete={(vid) => {
                         setDeleteError(null);
                         setPendingVideo(vid);
@@ -5687,51 +6533,28 @@ export function MonitorBench({
         />
       )}
 
-      {/* v4.88：没存云端就点「发送到聊天解剖」时的提示窗——不复
-          制残缺指令、不入队，只讲清先存云端再点，并直接给出去
-          存云端的入口（打开既有批量勾选窗）。 */}
-      {dissectNoCloudTitle !== null && (
-        <div
-          className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70 p-3"
-          role="dialog"
-          aria-modal="true"
-          aria-label="先存云端再发送到聊天解剖"
-          onClick={() => setDissectNoCloudTitle(null)}
-        >
-          <div
-            className="card w-full max-w-md p-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <p className="font-display text-base font-bold">
-              先点存云端，再点分析
-            </p>
-            <p className="mt-2 text-sm leading-6 text-[var(--dim)]">
-              「{dissectNoCloudTitle}」还没存云端。聊天里的助手要直接读云端里的视频文件才能精修解剖，没存云端的视频发过去也解剖不了。先把这条存云端，再回来点「发送到聊天解剖」。
-            </p>
-            <div className="mt-4 flex flex-wrap justify-end gap-2">
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() => setDissectNoCloudTitle(null)}
-                aria-label="知道了，关闭提示"
-              >
-                知道了
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                onClick={() => {
-                  setDissectNoCloudTitle(null);
-                  openCloudBatch();
-                }}
-                aria-label="去存云端（打开批量存云端勾选窗）"
-              >
-                去存云端
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* v6.27 拆解提示词库悬浮窗：seedBody 把 DISSECT_CHAT_RULES
+          常量原样交给窗口做默认预设种子（逐字一致）。 */}
+      <DissectPresetLibrary
+        open={presetLibOpen}
+        onClose={() => setPresetLibOpen(false)}
+        seedBody={DISSECT_CHAT_RULES}
+      />
+
+      {/* v6.37 复刻预设选择窗：卡片 / 详情窗 / 播放窗点「复刻」后
+          开，选一条预设即拼指令复制 + 入待解剖队列（见
+          handleReplicatePick）；层级 z-[92] 压过详情窗 / 播放窗。 */}
+      <DissectPresetPicker
+        open={replicateTarget !== null}
+        videoTitle={
+          replicateTarget
+            ? splitDescription(replicateTarget.video.description).title ||
+              replicateTarget.video.videoId
+            : ""
+        }
+        onClose={() => setReplicateTarget(null)}
+        onSelect={(preset) => void handleReplicatePick(preset)}
+      />
 
       {/* v4.88：自动复制失败时的指令全文窗——把整段解剖指令摆
           出来让用户手动全选复制，绝不静默失败。 */}
@@ -5798,8 +6621,12 @@ export function MonitorBench({
         <VideoPlayerModal
           video={playing.video}
           creatorName={playing.creatorName}
+          platform={playing.platform ?? ""}
           cloudOnly={playing.cloudOnly ?? false}
           onClose={() => setPlaying(null)}
+          onReplicate={() =>
+            openReplicatePicker(playing.video, playing.creatorName)
+          }
         />
       )}
 
@@ -5810,6 +6637,11 @@ export function MonitorBench({
           creatorId={detail.creatorId}
           creatorUrl={detail.creatorUrl}
           onClose={() => setDetail(null)}
+          downloadTask={downloadTaskByVideoId.get(detail.video.videoId) ?? null}
+          onEnqueueDownload={handleEnqueueDownload}
+          onReplicate={() =>
+            openReplicatePicker(detail.video, detail.creatorName)
+          }
           onPinnedChanged={() => invalidate()}
           onPrefillAnalysis={
             onAnalyzeVideo

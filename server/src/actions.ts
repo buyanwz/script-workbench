@@ -59,6 +59,16 @@ mimeType: z.string().min(1).max(100),
 caption: z.string().max(200).optional(),
 });
 
+// v6.39 人物特征融合的四块输出（fuseCharacterFeatures 用）。
+const fusionResultOut = z
+  .object({
+    summary: z.string(),
+    promptZh: z.string(),
+    promptEn: z.string(),
+    negative: z.string(),
+  })
+  .nullable();
+
 // 人物资产图分片上传（无文件大小限制）：旧的单次 dataBase64 上限
 // 12,000,000 字符解码后只约 9MB 原图，10MB 以上的图必然被拒。人物
 // 资产图改走分片：客户端把原图字节按 384KiB 一片切开（每片 Base64
@@ -310,7 +320,9 @@ async function writeMonitorClearFloorMs(ctx: Ctx, ms: number): Promise<void> {
 //   删除   点赞 < 1000 且 播放 < 50000，两个都不达标才删；任一达标
 //          （点赞 ≥1000 或播放 ≥50000）就留。
 //   安全   点赞与播放均为 0（从未采到数据）的卡片不删，列入清理报
-//          告「无数据未判定」，等用户定。
+//          告「无数据未判定」，等用户定。v6.24 起抖音账号的卡片
+//          playCount=0 同样按「播放数据未知」进未判定（抖音导出
+//          没有播放量列，属结构性缺失）。
 //   同步   删卡走既有删除链路：留视频墓碑（自动上报不重建）+ 按
 //          videoId 同步删云端文件与 state.json 条目
 //          （syncDeleteCloudVideos）；云端里对不上监控卡片的视频
@@ -392,6 +404,7 @@ async function evaluateMonitorCleanup(
   const db = ctx.db<typeof schema>();
   const accounts = await db.select().from(schema.monitorAccounts);
   const nameById = new Map(accounts.map((a) => [a.id, a.name]));
+  const platformById = new Map(accounts.map((a) => [a.id, a.platform]));
   const rows = await db.select().from(schema.monitorVideos);
   const candidates: MonitorCleanupCandidate[] = [];
   const unjudged: MonitorCleanupCandidate[] = [];
@@ -416,6 +429,15 @@ async function evaluateMonitorCleanup(
     };
     if (r.likeCount === 0 && r.playCount === 0) {
       // 从未采到数据：先不删，进「无数据未判定」。
+      unjudged.push(item);
+    } else if (
+      // v6.24：抖音导出结构性没有播放量一列，抖音卡片 playCount=0
+      // 是「播放数据未知」而不是真 0——按缺失数据删卡会误删高播
+      // 放视频，故与 0/0 同口径进「无数据未判定」不删。快手卡片
+      // 判定一字不动。
+      platformById.get(r.accountId) === "抖音" &&
+      r.playCount === 0
+    ) {
       unjudged.push(item);
     } else if (
       r.likeCount < MONITOR_CLEANUP_MIN_LIKES &&
@@ -6263,6 +6285,373 @@ const promptCheckResponse = z.object({
   lookIntact: z.boolean(),
 });
 type PromptCheckResult = z.infer<typeof promptCheckResponse>;
+
+// v6.24：平台归一化（fetchMonitorVideo 新建账号时定平台用）。
+// 入参认得出的写法（抖音 / douyin / 抖音短视频 →「抖音」，快手 /
+// kuaishou →「快手」，大小写不敏感）优先；空或认不出时按达人链
+// 接 / 视频链接的域名推断（douyin.com → 抖音，kuaishou.com →
+// 快手）；都推不出默认「快手」（保住既有全部调用方的行为）。
+function normalizeMonitorPlatform(
+  raw: string,
+  creatorUrl: string,
+  videoUrl: string,
+): string {
+  const p = raw.trim().toLowerCase();
+  if (p === "抖音" || p === "douyin" || p === "抖音短视频") return "抖音";
+  if (p === "快手" || p === "kuaishou") return "快手";
+  const urls = `${creatorUrl} ${videoUrl}`.toLowerCase();
+  if (urls.includes("douyin.com")) return "抖音";
+  if (urls.includes("kuaishou.com")) return "快手";
+  return "快手";
+}
+
+// v6.36：卡片标题口径（与客户端 splitDescription 一致）——描述去
+// 掉 #话题、折叠空白后的首段文字；全空回退 videoId。下载任务建
+// 任务时快照用，取件与卡片显示都读这份快照、不回查卡片。
+function monitorCardTitle(description: string, videoId: string): string {
+  const title = description
+    .replace(/#[^\s#]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (title || videoId).slice(0, 300);
+}
+
+// v6.27 拆解提示词库共用出参形状（定义在 Actions 之外）。
+const dissectPresetOut = z.object({
+  id: z.number(),
+  slug: z.string(),
+  name: z.string(),
+  intro: z.string(),
+  body: z.string(),
+  category: z.string(),
+  kind: z.enum(["system", "custom"]),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+const dissectPresetSeedResponse = z.object({
+  ok: z.literal(true),
+  created: z.boolean(),
+});
+
+// v6.37 一次性简介同步用的旧版种子简介原文（v6.27 落库的那句，
+// 里面带已下线的入口名「发送到聊天解剖」）：库里的系统默认预设
+// 简介还一字不差是这句时，说明用户没在库里改过简介，seed 时把
+// 它换成客户端送来的新口径文案；用户改过的简介绝不覆盖。
+const LEGACY_DEFAULT_PRESET_INTRO =
+  "点卡片「发送到聊天解剖」时随指令一起复制的现行规则全文（14 节＋执行纪律）：核台词与时间轴、连续性审核、破绽修复与二次审核、H3 提示词与存档套用。";
+
+// v6.36 下载任务队列共用出参形状（定义在 Actions 之外）。
+const downloadTaskOut = z.object({
+  id: z.number(),
+  videoId: z.string(),
+  title: z.string(),
+  pageUrl: z.string(),
+  platform: z.string(),
+  creatorName: z.string(),
+  presetId: z.number(),
+  status: z.enum(["queued", "downloading", "done", "failed"]),
+  errorMessage: z.string(),
+  fileSizeBytes: z.number().nullable(),
+  durationMs: z.number().nullable(),
+  sha256: z.string(),
+  cloudPath: z.string(),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+  claimedAtMs: z.number().nullable(),
+  doneAtMs: z.number().nullable(),
+});
+
+type DownloadTaskRow = typeof schema.downloadTasks.$inferSelect;
+
+function downloadTaskToOut(r: DownloadTaskRow): z.infer<typeof downloadTaskOut> {
+  return {
+    id: r.id,
+    videoId: r.videoId,
+    title: r.title,
+    pageUrl: r.pageUrl,
+    platform: r.platform,
+    creatorName: r.creatorName,
+    presetId: r.presetId,
+    status: r.status,
+    errorMessage: r.errorMessage,
+    fileSizeBytes: r.fileSizeBytes ?? null,
+    durationMs: r.durationMs ?? null,
+    sha256: r.sha256,
+    cloudPath: r.cloudPath,
+    createdAtMs: r.createdAtMs,
+    updatedAtMs: r.updatedAtMs,
+    claimedAtMs: r.claimedAtMs ?? null,
+    doneAtMs: r.doneAtMs ?? null,
+  };
+}
+
+const enqueueDownloadTaskResponse = z.object({
+  ok: z.boolean(),
+  // created = 新建了排队任务；already_active = 已有排队中/下载中的
+  // 任务（回带那条，不重复建）；already_saved = 已有完成任务且云端
+  // 文件仍在（回带那条）；not_found = 监控页里找不到这张卡片。
+  outcome: z.enum(["created", "already_active", "already_saved", "not_found"]),
+  message: z.string(),
+  task: downloadTaskOut.nullable(),
+});
+
+const downloadTaskActionResponse = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  task: downloadTaskOut.nullable(),
+});
+
+// ---------------------------------------------------------------------------
+// v6.43 融合分析实现抽取：原 fuseCharacterFeatures 的整份实现（入参
+// 校验、dryRun 桩、指令拼装、ctx.inference 视觉调用、四块结果与报
+// 错口径）原样抽成普通函数，同步动作与新任务动作
+// （runFusionJobStep）共用同一套——任务制只换驱动方式，分析指令
+// 文字（v6.42 版式锁定段在内）与输出结构一字未改。
+// ---------------------------------------------------------------------------
+
+type FusionImageInput = {
+  dataBase64: string;
+  mimeType: string;
+  caption?: string;
+};
+
+type FusionResult = {
+  summary: string;
+  promptZh: string;
+  promptEn: string;
+  negative: string;
+};
+
+type FusionAnalysisArgs = {
+  mode: "dual" | "single";
+  style: "hyperreal" | "anime3d";
+  balance: "balanced" | "a" | "b";
+  textRequirement: string;
+  extraRequirement: string;
+  visionImages?: FusionImageInput[];
+  dryRun?: boolean;
+  dryRunLayout?: "three" | "multi" | "single";
+  // 沙箱验证专用（页面从不传）：慢分析桩延迟与失败桩开关。
+  dryRunDelayMs?: number;
+  dryRunFail?: boolean;
+};
+
+type FusionAnalysisOutcome = {
+  ok: boolean;
+  error: string | null;
+  result: FusionResult | null;
+};
+
+async function runFusionAnalysis(
+  ctx: Ctx,
+  args: FusionAnalysisArgs,
+): Promise<FusionAnalysisOutcome> {
+  const fail = (error: string) => ({ ok: false, error, result: null });
+  const images = (args.visionImages ?? [])
+    .filter((im) => im.mimeType === "image/jpeg" || im.mimeType === "image/png")
+    .map((im) => ({
+      dataBase64: im.dataBase64,
+      mimeType: im.mimeType as "image/jpeg" | "image/png",
+      caption: im.caption,
+    }));
+  if (args.mode === "dual" && images.length < 2) {
+    return fail("双图融合要两张参考图都读到：请确认参考图 A 和参考图 B 都已上传（只支持 JPG / PNG 图）。已上传的内容没有动，可以补上缺的那张再点一次。");
+  }
+  if (args.mode === "single" && images.length < 1) {
+    return fail("没读到参考图：请重新上传一张参考图（只支持 JPG / PNG 图）。你填的文字要求没有动，补上图再点一次就行。");
+  }
+  if (args.mode === "single" && !args.textRequirement.trim()) {
+    return fail("单图融合要写清文字要求：想给图里的人新增、替换、强化或修改哪些特征，写在文字要求里再点开始融合。");
+  }
+  const styleName = args.style === "hyperreal" ? "超写实" : "3D 动漫";
+  const balanceName =
+    args.balance === "a"
+      ? "以参考图 A 为主"
+      : args.balance === "b"
+        ? "以参考图 B 为主"
+        : "均衡融合";
+  if (args.dryRun && args.dryRunFail) {
+    // 沙箱验证专用失败桩：模拟模型报错，验任务制失败落库与页面
+    // 显示真错。页面从不传 dryRunFail。
+    return fail("融合失败：【桩·沙箱验证用】模拟的模型报错（dryRunFail）——真实失败时这里是模型回的真实报错原文。");
+  }
+  if (args.dryRun && (args.dryRunDelayMs ?? 0) > 0) {
+    // 沙箱验证专用慢分析桩：先睡满 dryRunDelayMs 再回桩结果，
+    // 模拟一次超过页面请求时限的慢分析（step 任务行已认领、结
+    // 果随后落库，页面靠轮询取回）。页面从不传 dryRunDelayMs。
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, Math.min(args.dryRunDelayMs ?? 0, 180_000)),
+    );
+  }
+  if (args.dryRun) {
+    // 沙箱验证专用桩结果：结构与真实结果同形，文字里写明是桩，
+    // 保证任何环境下都不会把桩结果误当成真实分析。
+    // v6.42：桩结果按 dryRunLayout 覆盖三种图 A 版式各一份（three
+    // 三视图 / multi 多视图 / single 单图构图），summary 写明识别
+    // 到的版式、中英文正向各带一段版式锁定句，供沙箱逐项验版式
+    // 锁定口径；不传 dryRunLayout 时按模式回落（双图=multi、单图
+    // =single），与 v6.41 以前的桩形状兼容。
+    const stubLayout = args.dryRunLayout ?? (args.mode === "dual" ? "multi" : "single");
+    const stubLayoutText =
+      stubLayout === "three"
+        ? {
+            summaryLayout:
+              "识别到的图 A 版式：三视图——3 个视图横向一排，依次是正面全身、侧面全身、背面全身，纯色浅灰背景，视图之间无分隔线。",
+            zhLock:
+              "【版式锁定】严格按参考图 A 的版式出图：三视图横向一排共 3 个视图，依次为正面全身、侧面全身、背面全身，三个视图是同一个人、同一套服装、同一发型，背景与图 A 一致的纯色浅灰背景，视图之间无分隔线。",
+            enLock:
+              "[Layout lock] Follow reference image A's layout exactly: a three-view character sheet, 3 views in one horizontal row — front full-body, side full-body, back full-body — the same person, same outfit and same hairstyle in every view, on the same plain light-gray background as image A, no divider lines between views.",
+          }
+        : stubLayout === "multi"
+          ? {
+              summaryLayout:
+                "识别到的图 A 版式：多视图——4 个视图横向一排，依次是头部特写、正面全身、侧面全身、背面全身，纯白背景，视图之间无分隔线。",
+              zhLock:
+                "【版式锁定】严格按参考图 A 的版式出图：多视图横向一排共 4 个视图，依次为头部特写、正面全身、侧面全身、背面全身，每个视图都是同一个人、同一套服装、同一发型，背景与图 A 一致的纯白背景，视图之间无分隔线。",
+              enLock:
+                "[Layout lock] Follow reference image A's layout exactly: a multi-view character sheet, 4 views in one horizontal row — head close-up, front full-body, side full-body, back full-body — the same person, same outfit and same hairstyle in every view, on the same plain white background as image A, no divider lines between views.",
+            }
+          : {
+              summaryLayout:
+                "识别到的参考图版式：单张构图——单个视图，人物正面半身，浅色纯色背景，无其他视图、无分隔。",
+              zhLock:
+                "【版式锁定】严格按参考图的构图出图：单张单视图，人物正面半身构图，背景与参考图一致的浅色纯色背景，不增加其他视图、不做多视图排版。",
+              enLock:
+                "[Layout lock] Follow the reference image's composition exactly: a single view, front-facing half-body framing, on the same light plain background as the reference image; do not add extra views or turn it into a multi-view sheet.",
+            };
+    return {
+      ok: true,
+      error: null,
+      result: {
+        summary: `【桩结果·沙箱验证用，不是真实分析】模式：${args.mode === "dual" ? "双参考图融合" : "单参考图＋文字融合"}；风格：${styleName}；主次：${balanceName}。${stubLayoutText.summaryLayout}真实结果会写明 A 保留了哪些特点、B 吸收了哪些特点、哪些特征做了融合重构、最终人物是什么视觉特点。`,
+        promptZh: `【桩结果】中文正向提示词占位：真实结果会是一段完整连贯、可直接用于生图的中文人物描述（主体定位、脸部结构、五官、发型、肤色皮肤、身材、服装、气质、构图、光影、风格与质量要求）。${stubLayoutText.zhLock}`,
+        promptEn: `[Stub result] English positive prompt placeholder: the real result is one coherent, generation-ready English description of the fused character. ${stubLayoutText.enLock}`,
+        negative: "【桩结果】负向提示词占位：真实结果会按所选风格列出要避免的融合问题（面部拼接、双重五官、五官错位、面部变形、多头、多余肢体、身体比例异常、风格混杂、塑料皮肤、模糊、低质量渲染等）。",
+      },
+    };
+  }
+  const styleBlock =
+    args.style === "hyperreal"
+      ? [
+          "【风格：超写实（Hyper-realistic）——按真人摄影的组织方式写】",
+          "正向提示词要写成真实人物摄影的质感：自然真实的面部结构与骨骼、真实五官比例、精细皮肤纹理（写清毛孔、细微汗毛、自然皮脂光泽、次表面散射这类可执行细节）、真实头发丝与发际线、服装的真实纤维织物细节、自然光影与反射、真实摄影作品感。",
+          "明确避免：塑料皮肤、蜡像感、过度磨皮、网红滤镜感。",
+          "负向提示词按超写实口径补：塑料皮肤、蜡像脸、过度磨皮、皮肤纹理缺失、假发感、五官比例失真等真人摄影类缺陷，再加融合通用项。",
+        ].join("\n")
+      : [
+          "【风格：3D 动漫（3D Anime）——按三维动画角色设计的组织方式写】",
+          "正向提示词要写成高品质 3D 动画角色设计：精致统一的面部结构、有辨识度的动漫化五官（在真实结构基础上适度风格化，不是真人比例照搬）、精细的头发造型与发丝层次、细腻但带三维质感的皮肤材质、真实三维体积感、自然的角色比例、精致的服装材质纹理、高质量三维渲染、电影级动画角色光影。",
+          "明确避免：低质量塑料模型感、五官比例混乱、廉价游戏建模感、面部崩坏、真人照片感混入。",
+          "负向提示词按 3D 动漫口径补：低质量塑料模型、廉价游戏建模感、面部崩坏、五官比例混乱、发丝结块、渲染噪点等三维动画类缺陷，再加融合通用项。",
+        ].join("\n");
+  const modeBlock =
+    args.mode === "dual"
+      ? [
+          "【融合模式：双参考图融合】附图共两张：第一张是参考图 A，第二张是参考图 B。",
+          `主次设置：${balanceName}。${args.balance === "balanced" ? "默认智能均衡融合，避免生硬叠加；哪边特征更适合统一到同一个人身上，就以哪边为准绳取舍。" : args.balance === "a" ? "整体以 A 的人物为底子：脸型轮廓、年龄感、气质优先保 A，B 只吸收能自然融进来的特征。" : "整体以 B 的人物为底子：脸型轮廓、年龄感、气质优先保 B，A 只吸收能自然融进来的特征。"}`,
+          "融合结果说明要分清：A 保留了哪些特点、B 吸收了哪些特点、哪些特征是融合重构出来的、最终人物是什么视觉特点。",
+          "版式只跟图 A 走（见下方【版式锁定】段）：出图的排版一律按参考图 A，哪怕主次选了以 B 为主也一样——主次只决定长相特征以谁为主，B 只贡献长相特征、绝不贡献排版。",
+        ].join("\n")
+      : [
+          "【融合模式：单参考图＋文字融合】附图只有一张，是参考图。",
+          "参考图定基础：人物的基础外貌、身体特征、原始轮廓与需要保留的视觉特点以图为准；文字要求定修改：新增、替换、强化、修改的具体特征以文字为准。",
+          "必须分清哪些特征来自图、哪些来自文字：用户在文字里明确要求保留的特征不得擅自改动，明确要求修改的特征不得遗漏。",
+          "融合结果说明要分清：图里保留了哪些特点、按文字改了哪些、新人物最终是什么视觉特点。",
+          "版式跟这张唯一的参考图走（见下方【版式锁定】段）：出图的排版与构图一律按这张参考图。",
+          `用户文字要求（必须逐条落实）：\n${args.textRequirement.trim()}`,
+        ].join("\n");
+  // v6.42 版式锁定段（两种模式、两种风格共用）：版式一律跟图 A
+  // （单图模式为唯一参考图）走，与主次无关；识别结果写进融合说
+  // 明，中英文正向各带一段版式锁定描述。
+  const layoutBlock = [
+    "【版式锁定：出图排版一律按图 A（硬性要求，与主次设置无关）】",
+    args.mode === "dual"
+      ? "版式来源只有参考图 A：先把图 A 的版式逐项看清——①有几个视图 ②怎么排列（横向一排 / 纵向一列 / 网格几行几列）③每个视图从左到右（网格按从左到右、从上到下）分别是什么角度与景别（正面 / 侧面 / 背面 / 头部特写 / 全身 / 半身等）④底色与背景是什么样 ⑤视图之间有没有分隔线或留白间隔。图 B 的排版完全不作数，哪怕主次选了以 B 为主，排版也只跟 A。"
+      : "版式来源只有这张唯一的参考图：先把它的版式逐项看清——①有几个视图（多视图就数清个数）②怎么排列（横向一排 / 纵向一列 / 网格几行几列）③每个视图从左到右（网格按从左到右、从上到下）分别是什么角度与景别（正面 / 侧面 / 背面 / 头部特写 / 全身 / 半身等）④底色与背景是什么样 ⑤视图之间有没有分隔线或留白间隔；如果它本身就是单张单视图，就看清它的构图（人物的角度、景别、站位与背景）。",
+    "识别到的版式必须写进融合结果说明（summary）的开头附近，用一两句说清：几个视图、怎么排、每个视图是什么角度与景别、什么背景、有无分隔——让用户一眼能核对认对了没有。认不清的细节按图里最接近的实际情况写，不许跳过不写。",
+    "中文正向提示词与英文正向提示词里都必须有一段版式锁定描述（中文写【版式锁定】、英文对应写 layout lock 语义），内容与识别结果一致，写明：严格按图 A 的版式出图、视图数量、排列方式、每个视图的角度与景别顺序、每个视图都是融合后的同一个人（同一张脸、同一套服装、同一发型）、背景与图 A 一致、视图之间的分隔与图 A 一致。",
+    "图 A 是三视图就写三视图（3 个视图、逐个写明角度与景别），是四视图或更多视图就按实际个数写多视图，不许把多视图写成三视图、也不许把三视图扩成多视图；图 A 是单张图时，版式锁定段按它的构图写（单视图、角度、景别、人物站位、背景），并写明不增加其他视图、不改成多视图排版。",
+    "版式锁定只管排版与构图，不改变融合人物的长相特征本身；多视图时每个视图里的人必须是融合后的同一个人，不许不同视图长得不一样。",
+  ].join("\n");
+  const prompt = [
+    "你是一名顶级的人物特征融合分析师，专长是把两个人物来源的外貌特征真正融合成一个全新、统一、可信的人物，并把融合结果写成可直接用于 AI 图片生成模型的高质量提示词。",
+    "",
+    modeBlock,
+    "",
+    layoutBlock,
+    "",
+    styleBlock,
+    "",
+    ...(args.extraRequirement.trim()
+      ? [`用户补充要求（优先级最高，与主次设置冲突时以补充要求为准）：\n${args.extraRequirement.trim()}`, ""]
+      : []),
+    "【工作方法：必须按这五步在内部完成，不许跳步】",
+    "第 1 步，分别识别参考素材：一张一张看清每张图里的人物到底有什么特征，不要混着看；同时先把图 A（单图模式为唯一参考图）的版式识别清楚（视图数、排列、各视图角度与景别、背景、分隔，见上方【版式锁定】段），这是出图排版的唯一依据。",
+    "第 2 步，提取核心特征，分九类逐项提取：①面部结构（脸型及面部轮廓）②五官特征（眉毛、眼睛、鼻子、嘴唇逐个看）③发型与发色（含发际线）④肤色与皮肤质感 ⑤年龄感 ⑥身材比例（身高感、肩宽、身体轮廓）⑦服装造型（含材质）⑧人物气质与辨识度 ⑨其他代表性外观特点。",
+    "第 3 步，判断融合关系：哪些特征能自然结合、哪些以某一张为主、哪些互相冲突、哪些不该同时保留。例如 A 脸圆眼大、B 鼻梁立体下颌清晰时：保留 A 柔和的面部轮廓与眼睛，吸收 B 立体的鼻梁与清晰的下颌，组成五官协调、有独立辨识度的新人物——冲突项必须取舍，不许两边都要。",
+    "第 4 步，统一人物结构：融合后必须是一张完整的脸、一套统一的五官、合理的骨骼比例、自然的身体结构、一致的发型与发际线、统一的肤色与皮肤质感、协调的服装造型——是一个人，不是两个人的拼贴。",
+    "第 5 步，生成最终图像提示词：把融合后的特征重新组织成完整连贯的描述，禁止把两张图的原始描述简单拼接起来，禁止把两张脸做简单平均，禁止出现左右半张脸分别来自不同人物的拼接效果，禁止多张脸、双重五官、双重身体、人物重叠。",
+    "",
+    "【正向提示词的组织（按内容决定详略，不机械填满，但每一项都要具体，不许只用漂亮、精致、高级这类空泛词）】",
+    "依次写：主体定位（身份、性别、年龄感、整体外观）→ 脸部结构 → 五官细节 → 发型 → 肤色与皮肤 → 身材 → 服装 → 人物气质 → 构图与版式锁定（按图 A 版式：视图数量、排列方式、各视图角度与景别、背景一致，见上方【版式锁定】段）→ 光影 → 风格（按所选风格写）→ 质量要求。",
+    "中文正向与英文正向内容必须一一对应：英文版是给生图模型用的地道英文提示词，不是生硬直译，中文版的全部特征都要写进去，版式锁定段中英文都要有、内容一致。",
+    "",
+    "【输出四块】",
+    "summary（融合结果说明）：开头附近先写明识别到的图 A 版式（几个视图、怎么排、各视图角度与景别、背景、有无分隔）；再说清来源各自保留 / 吸收了什么、哪些特征做了融合重构、最终人物的视觉特点；有冲突取舍的要写明怎么取舍的。",
+    "promptZh（中文正向提示词）：一段完整连贯、可直接复制去生图的描述，不是特征清单；必须包含一段【版式锁定】描述（按图 A 版式出图：视图数量、排列方式、各视图角度与景别、背景一致）。",
+    "promptEn（英文正向提示词）：与中文版一一对应的地道英文版；必须包含与中文版一致的版式锁定描述（layout lock）。",
+    "negative（负向提示词）：针对融合问题自动补全——面部拼接、双重五官、五官错位、面部变形、多头、多余肢体、身体比例异常、风格混杂、模糊、低质量等，再按所选风格补该风格专属的避免项（见上方风格段）；中英文混排或纯英文均可，但必须与所选风格对应、不许两个风格套同一份。负向不强制写版式内容。",
+  ].join("\n");
+  try {
+    const out = await ctx.inference.complete(prompt, {
+      schema: z.object({
+        summary: z
+          .string()
+          .describe("融合结果说明：开头写明识别到的图 A 版式（视图数、排列、各视图角度与景别、背景、有无分隔），再写各来源保留/吸收了哪些特点、哪些特征融合重构、最终人物的视觉特点"),
+        promptZh: z
+          .string()
+          .describe("中文正向提示词：一段完整连贯、可直接用于生图的融合后人物描述，必须含一段【版式锁定】（按图 A 版式出图：视图数量、排列方式、各视图角度与景别、背景一致）"),
+        promptEn: z
+          .string()
+          .describe("英文正向提示词：与中文版一一对应的地道英文版，必须含与中文版一致的版式锁定描述（layout lock）"),
+        negative: z
+          .string()
+          .describe("负向提示词：针对融合问题与所选风格的避免项"),
+      }),
+      system:
+        "你只输出符合结构要求的人物特征融合结果本身：融合说明、中英文正向提示词与负向提示词。融合后的人物必须是一个完整统一的人，不是两张图的描述拼接。",
+      images,
+      timeout_secs: 240,
+    });
+    const result = {
+      summary: out.summary.trim(),
+      promptZh: out.promptZh.trim(),
+      promptEn: out.promptEn.trim(),
+      negative: out.negative.trim(),
+    };
+    if (!result.promptZh && !result.promptEn) {
+      return fail("这次没融出正向提示词，参考图和你填的要求都没有动，请再点一次「开始融合」。");
+    }
+    return { ok: true, error: null, result };
+  } catch (e) {
+    if (InferenceSchemaError.is(e)) {
+      return fail("分析结果结构不完整，参考图和你填的要求都没有动，请再点一次「开始融合」重试。");
+    }
+    // 模型侧报错（如 model_not_found）原文透回给用户，不静默换模型。
+    return fail(`融合失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+
+const fusionJobPollResponse = z.object({
+  status: z.enum(["running", "done", "failed"]),
+  result: fusionResultOut,
+  error: z.string().nullable(),
+});
+
+type FusionJobPollResult = z.infer<typeof fusionJobPollResponse>;
+
 
 export const Actions = {
 listProjects: defineAction({
@@ -12693,6 +13082,500 @@ deleteModeSuggestion: defineAction({
   },
 }),
 
+// v6.27 拆解提示词库：监控页「拆解提示词库」悬浮窗的预设增删改查。
+// 默认预设由客户端在打开窗口时把代码常量 DISSECT_CHAT_RULES 全文
+// 经 seedDissectPreset 送来落库（保证与常量逐字一致、不在服务端
+// 再抄一份），slug 固定、只在不存在时插入一次（幂等）。
+// 系统预设（kind=system）可编辑、不可删，删除在服务端硬拦。
+// v6.37：卡片「复刻」点开预设选择窗选预设复制（视频信息头＋选中
+// 预设正文），预设自此也是复刻的实际数据源；默认预设简介里旧版
+// 入口名「发送到聊天解剖」改「复刻」口径，seedDissectPreset 对已
+// 落库行做一次性简介同步（见该动作注释）。
+listDissectPresets: defineAction({
+  description: "读取拆解提示词库的全部预设（系统预设在前，其余按最后修改时间倒序）。",
+  request: z.object({}),
+  response: z.object({ presets: z.array(dissectPresetOut) }),
+  async handler(ctx) {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.dissectPresets)
+      .orderBy(desc(schema.dissectPresets.updatedAt), asc(schema.dissectPresets.id));
+    const mapped = rows.map((r) => ({
+      id: r.id,
+      slug: r.slug ?? "",
+      name: r.name,
+      intro: r.intro,
+      body: r.body,
+      category: r.category,
+      kind: r.kind,
+      createdAt: r.createdAt.toISOString(),
+      updatedAt: r.updatedAt.toISOString(),
+    }));
+    mapped.sort((a, b) => {
+      const ka = a.kind === "system" ? 0 : 1;
+      const kb = b.kind === "system" ? 0 : 1;
+      if (ka !== kb) return ka - kb;
+      return b.updatedAt.localeCompare(a.updatedAt) || a.id - b.id;
+    });
+    return { presets: mapped };
+  },
+}),
+
+seedDissectPreset: defineAction({
+  description: "幂等写入一条系统默认预设：同 slug 已存在则不重复插入（正文由客户端从代码常量原样送来）；已落库的系统默认预设若简介还是旧版种子文案，顺带把简介同步成新口径（只改简介、正文不动）。",
+  request: z.object({
+    slug: z.string().trim().min(1).max(80),
+    name: z.string().trim().min(1).max(200),
+    intro: z.string().trim().max(500).default(""),
+    category: z.string().trim().min(1).max(40),
+    body: z.string().min(1).max(200_000),
+  }),
+  response: dissectPresetSeedResponse,
+  async handler(ctx, args): Promise<z.infer<typeof dissectPresetSeedResponse>> {
+    const db = ctx.db<typeof schema>();
+    const existing = await db
+      .select()
+      .from(schema.dissectPresets)
+      .where(eq(schema.dissectPresets.slug, args.slug))
+      .limit(1);
+    const existingRow = existing[0];
+    if (existingRow) {
+      // v6.37：简介口径一次性同步——只在简介还一字不差是旧版种子
+      // 文案时才换成新文案，正文 / 名称 / 分类一律不动。
+      if (
+        existingRow.kind === "system" &&
+        existingRow.intro === LEGACY_DEFAULT_PRESET_INTRO &&
+        args.intro !== "" &&
+        args.intro !== existingRow.intro
+      ) {
+        await db
+          .update(schema.dissectPresets)
+          .set({ intro: args.intro, updatedAt: new Date() })
+          .where(eq(schema.dissectPresets.id, existingRow.id));
+        ctx.invalidateQueries();
+      }
+      return { ok: true as const, created: false };
+    }
+    await db.insert(schema.dissectPresets).values({
+      slug: args.slug,
+      name: args.name,
+      intro: args.intro,
+      category: args.category,
+      body: args.body,
+      kind: "system",
+    });
+    ctx.invalidateQueries();
+    return { ok: true as const, created: true };
+  },
+}),
+
+createDissectPreset: defineAction({
+  description: "在拆解提示词库里新增一条用户自定义预设。",
+  request: z.object({
+    name: z.string().trim().min(1).max(200),
+    intro: z.string().trim().max(500).default(""),
+    category: z.string().trim().min(1).max(40),
+    body: z.string().trim().min(1).max(200_000),
+  }),
+  response: z.object({ ok: z.literal(true), id: z.number() }),
+  async handler(ctx, args): Promise<{ ok: true; id: number }> {
+    const db = ctx.db<typeof schema>();
+    const inserted = await db
+      .insert(schema.dissectPresets)
+      .values({
+        slug: null,
+        name: args.name,
+        intro: args.intro,
+        category: args.category,
+        body: args.body,
+        kind: "custom",
+      })
+      .returning({ id: schema.dissectPresets.id });
+    ctx.invalidateQueries();
+    return { ok: true as const, id: inserted[0]?.id ?? 0 };
+  },
+}),
+
+updateDissectPreset: defineAction({
+  description: "编辑一条拆解提示词预设（名称、简介、正文、分类；系统与自定义预设都可编辑，保存后更新原预设不新增）。",
+  request: z.object({
+    id: z.number().int().positive(),
+    name: z.string().trim().min(1).max(200),
+    intro: z.string().trim().max(500).default(""),
+    category: z.string().trim().min(1).max(40),
+    body: z.string().trim().min(1).max(200_000),
+  }),
+  response: z.object({ ok: z.literal(true) }),
+  async handler(ctx, args): Promise<{ ok: true }> {
+    const db = ctx.db<typeof schema>();
+    await db
+      .update(schema.dissectPresets)
+      .set({
+        name: args.name,
+        intro: args.intro,
+        category: args.category,
+        body: args.body,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.dissectPresets.id, args.id));
+    ctx.invalidateQueries();
+    return { ok: true as const };
+  },
+}),
+
+deleteDissectPreset: defineAction({
+  description: "删除一条用户自定义拆解提示词预设；系统默认预设不可删除（服务端硬拦并回原因）。",
+  request: z.object({ id: z.number().int().positive() }),
+  response: z.object({ ok: z.boolean(), message: z.string() }),
+  async handler(ctx, args): Promise<{ ok: boolean; message: string }> {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select({ kind: schema.dissectPresets.kind })
+      .from(schema.dissectPresets)
+      .where(eq(schema.dissectPresets.id, args.id))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return { ok: false, message: "这条预设已经不存在了。" };
+    if (row.kind === "system")
+      return { ok: false, message: "系统默认预设不能删除，只能编辑或复制。" };
+    await db
+      .delete(schema.dissectPresets)
+      .where(eq(schema.dissectPresets.id, args.id));
+    ctx.invalidateQueries();
+    return { ok: true, message: "已删除这条预设。" };
+  },
+}),
+
+// ---------------------------------------------------------------------------
+// v6.36 下载任务队列（下载线第一步）：监控页卡片「下载原片」按钮建
+// 任务，后台取件（独立 cron）只调这组动作推进状态机，不直写数据库：
+// listDownloadTasks 取 queued → claimDownloadTask 认领 → 下载并核对
+// 完整 → 存入云端库并记账 → completeDownloadTask；任一步失败调
+// failDownloadTask 写大白话原因。工作台不实现下载本身。
+// ---------------------------------------------------------------------------
+
+enqueueDownloadTask: defineAction({
+  description: "给一条监控视频建下载原片任务（监控页卡片「下载原片」按钮）：按 videoId 从卡片数据取标题/链接/平台/达人名建 queued 任务（presetId 固定 1）；已有排队中或下载中的同 videoId 任务时回带那条不重复建；已有完成任务且云端文件仍在时回已存好不重复建。",
+  request: z.object({ videoId: z.string().trim().min(1).max(120) }),
+  response: enqueueDownloadTaskResponse,
+  privileged: [privileged.cloudVideoStat],
+  async handler(
+    ctx,
+    args,
+  ): Promise<z.infer<typeof enqueueDownloadTaskResponse>> {
+    const db = ctx.db<typeof schema>();
+    const videoId = args.videoId;
+    // 1) 已有非终态（queued/downloading）任务 → 回带，不重复建。
+    const active = await db
+      .select()
+      .from(schema.downloadTasks)
+      .where(
+        and(
+          eq(schema.downloadTasks.videoId, videoId),
+          or(
+            eq(schema.downloadTasks.status, "queued"),
+            eq(schema.downloadTasks.status, "downloading"),
+          ),
+        ),
+      )
+      .orderBy(asc(schema.downloadTasks.createdAtMs), asc(schema.downloadTasks.id))
+      .limit(1);
+    const activeRow = active[0];
+    if (activeRow) {
+      return {
+        ok: true,
+        outcome: "already_active",
+        message:
+          activeRow.status === "queued"
+            ? "这条已经在排队了，不用重复点。"
+            : "这条正在下载中，不用重复点。",
+        task: downloadTaskToOut(activeRow),
+      };
+    }
+    // 2) 已有 done 任务 → 云端文件还在才算已存好（经特权层查真实
+    //    文件；查不了时以任务状态为准）。文件没了就往下走、重新建
+    //    一条任务再下载。
+    const doneRows = await db
+      .select()
+      .from(schema.downloadTasks)
+      .where(
+        and(
+          eq(schema.downloadTasks.videoId, videoId),
+          eq(schema.downloadTasks.status, "done"),
+        ),
+      )
+      .orderBy(desc(schema.downloadTasks.createdAtMs), desc(schema.downloadTasks.id))
+      .limit(1);
+    const doneRow = doneRows[0];
+    if (doneRow) {
+      let fileStillThere = true;
+      if (CLOUD_VIDEO_ID_RE.test(videoId)) {
+        try {
+          const stat = await ctx.executePrivileged(privileged.cloudVideoStat, {
+            videoId,
+          });
+          fileStillThere = stat.exists;
+        } catch {
+          // 查不到就以任务状态为准（done = 已存好）。
+          fileStillThere = true;
+        }
+      }
+      if (fileStillThere) {
+        return {
+          ok: true,
+          outcome: "already_saved",
+          message: "这条已经存好了，不用重复下载。",
+          task: downloadTaskToOut(doneRow),
+        };
+      }
+    }
+    // 3) 从卡片数据取快照建任务。同一 videoId 理论上只在一张卡上，
+    //    万一有多张取最早建的那张。
+    const cardRows = await db
+      .select({
+        video: schema.monitorVideos,
+        account: schema.monitorAccounts,
+      })
+      .from(schema.monitorVideos)
+      .innerJoin(
+        schema.monitorAccounts,
+        eq(schema.monitorVideos.accountId, schema.monitorAccounts.id),
+      )
+      .where(eq(schema.monitorVideos.videoId, videoId))
+      .orderBy(asc(schema.monitorVideos.id))
+      .limit(1);
+    const card = cardRows[0];
+    if (!card) {
+      return {
+        ok: false,
+        outcome: "not_found",
+        message: "没找到这条视频的卡片，可能已经被删掉了，刷新一下页面再试。",
+        task: null,
+      };
+    }
+    const now = Date.now();
+    const inserted = await db
+      .insert(schema.downloadTasks)
+      .values({
+        videoId,
+        title: monitorCardTitle(card.video.description, videoId),
+        pageUrl: card.video.videoUrl,
+        platform: card.account.platform,
+        creatorName: card.account.name,
+        presetId: 1,
+        status: "queued",
+        errorMessage: "",
+        sha256: "",
+        cloudPath: "",
+        createdAtMs: now,
+        updatedAtMs: now,
+      })
+      .returning();
+    const row = inserted[0];
+    if (!row) {
+      return {
+        ok: false,
+        outcome: "not_found",
+        message: "任务没建成，请再点一次试试。",
+        task: null,
+      };
+    }
+    ctx.invalidateQueries();
+    return {
+      ok: true,
+      outcome: "created",
+      message: "已加入下载队列。",
+      task: downloadTaskToOut(row),
+    };
+  },
+}),
+
+listDownloadTasks: defineAction({
+  description: "列出下载任务（按创建时间从早到晚）：传 status 只列该状态（取件每轮取 queued），不传列全部（监控页据此显示每张卡的最新状态）。",
+  request: z.object({
+    status: z
+      .enum(["queued", "downloading", "done", "failed"])
+      .optional(),
+  }),
+  response: z.object({ tasks: z.array(downloadTaskOut) }),
+  async handler(ctx, args) {
+    const db = ctx.db<typeof schema>();
+    const base = db.select().from(schema.downloadTasks);
+    const rows = args.status
+      ? await base
+          .where(eq(schema.downloadTasks.status, args.status))
+          .orderBy(asc(schema.downloadTasks.createdAtMs), asc(schema.downloadTasks.id))
+      : await base.orderBy(
+          asc(schema.downloadTasks.createdAtMs),
+          asc(schema.downloadTasks.id),
+        );
+    return { tasks: rows.map(downloadTaskToOut) };
+  },
+}),
+
+claimDownloadTask: defineAction({
+  description: "取件认领一条下载任务：仅当任务还是 queued 时才改成 downloading 并记认领时间（条件更新，防两轮取件重复认领同一条）；已被认领或已处理完时回 ok=false 并带回当前任务。",
+  request: z.object({ id: z.number().int().positive() }),
+  response: downloadTaskActionResponse,
+  async handler(
+    ctx,
+    args,
+  ): Promise<z.infer<typeof downloadTaskActionResponse>> {
+    const db = ctx.db<typeof schema>();
+    const now = Date.now();
+    const updated = await db
+      .update(schema.downloadTasks)
+      .set({ status: "downloading", claimedAtMs: now, updatedAtMs: now })
+      .where(
+        and(
+          eq(schema.downloadTasks.id, args.id),
+          eq(schema.downloadTasks.status, "queued"),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (row) {
+      ctx.invalidateQueries();
+      return { ok: true, message: "已认领。", task: downloadTaskToOut(row) };
+    }
+    const existing = await db
+      .select()
+      .from(schema.downloadTasks)
+      .where(eq(schema.downloadTasks.id, args.id))
+      .limit(1);
+    const cur = existing[0];
+    if (!cur) return { ok: false, message: "这个任务不存在了。", task: null };
+    return {
+      ok: false,
+      message:
+        cur.status === "downloading"
+          ? "这个任务已经被领走、正在下载了。"
+          : "这个任务已经处理完了，不能再认领。",
+      task: downloadTaskToOut(cur),
+    };
+  },
+}),
+
+completeDownloadTask: defineAction({
+  description: "取件回写下载完成：仅 downloading 的任务可改成 done，记文件大小（字节）、时长（毫秒）、SHA-256 与云端存放路径，并记完成时间。",
+  request: z.object({
+    id: z.number().int().positive(),
+    fileSizeBytes: z.number().int().nonnegative(),
+    durationMs: z.number().int().nonnegative(),
+    sha256: z.string().trim().max(128).default(""),
+    cloudPath: z.string().trim().min(1).max(500),
+  }),
+  response: downloadTaskActionResponse,
+  async handler(
+    ctx,
+    args,
+  ): Promise<z.infer<typeof downloadTaskActionResponse>> {
+    const db = ctx.db<typeof schema>();
+    const now = Date.now();
+    const updated = await db
+      .update(schema.downloadTasks)
+      .set({
+        status: "done",
+        errorMessage: "",
+        fileSizeBytes: args.fileSizeBytes,
+        durationMs: args.durationMs,
+        sha256: args.sha256,
+        cloudPath: args.cloudPath,
+        doneAtMs: now,
+        updatedAtMs: now,
+      })
+      .where(
+        and(
+          eq(schema.downloadTasks.id, args.id),
+          eq(schema.downloadTasks.status, "downloading"),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (row) {
+      ctx.invalidateQueries();
+      return { ok: true, message: "已记为下载完成。", task: downloadTaskToOut(row) };
+    }
+    const existing = await db
+      .select()
+      .from(schema.downloadTasks)
+      .where(eq(schema.downloadTasks.id, args.id))
+      .limit(1);
+    const cur = existing[0];
+    if (!cur) return { ok: false, message: "这个任务不存在了。", task: null };
+    return {
+      ok: false,
+      message: "这个任务现在不是下载中状态，没法记完成。",
+      task: downloadTaskToOut(cur),
+    };
+  },
+}),
+
+failDownloadTask: defineAction({
+  description: "取件回写下载失败：仅 downloading 的任务可改成 failed，errorMessage 写大白话失败原因（会显示在卡片上，用户可点按钮重试）。",
+  request: z.object({
+    id: z.number().int().positive(),
+    errorMessage: z.string().trim().min(1).max(500),
+  }),
+  response: downloadTaskActionResponse,
+  async handler(
+    ctx,
+    args,
+  ): Promise<z.infer<typeof downloadTaskActionResponse>> {
+    const db = ctx.db<typeof schema>();
+    const now = Date.now();
+    const updated = await db
+      .update(schema.downloadTasks)
+      .set({
+        status: "failed",
+        errorMessage: args.errorMessage,
+        updatedAtMs: now,
+      })
+      .where(
+        and(
+          eq(schema.downloadTasks.id, args.id),
+          eq(schema.downloadTasks.status, "downloading"),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (row) {
+      ctx.invalidateQueries();
+      return { ok: true, message: "已记为下载失败。", task: downloadTaskToOut(row) };
+    }
+    const existing = await db
+      .select()
+      .from(schema.downloadTasks)
+      .where(eq(schema.downloadTasks.id, args.id))
+      .limit(1);
+    const cur = existing[0];
+    if (!cur) return { ok: false, message: "这个任务不存在了。", task: null };
+    return {
+      ok: false,
+      message: "这个任务现在不是下载中状态，没法记失败。",
+      task: downloadTaskToOut(cur),
+    };
+  },
+}),
+
+getDownloadTaskStatus: defineAction({
+  description: "查一条视频最新一条下载任务的状态（监控页卡片显示用）：没有任务时 task 为 null。",
+  request: z.object({ videoId: z.string().trim().min(1).max(120) }),
+  response: z.object({ task: downloadTaskOut.nullable() }),
+  async handler(ctx, args) {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.downloadTasks)
+      .where(eq(schema.downloadTasks.videoId, args.videoId))
+      .orderBy(desc(schema.downloadTasks.createdAtMs), desc(schema.downloadTasks.id))
+      .limit(1);
+    const row = rows[0];
+    return { task: row ? downloadTaskToOut(row) : null };
+  },
+}),
+
 // v4.25 监控账号：用户在「监控账号」页维护的对标账号名单。
 // 只存名单（平台 / 账号名 / 主页链接 / 备注），不存任何监控结果
 // 或登录凭证；助手侧按这份名单跑监控。新增时校验链接必须是
@@ -12957,7 +13840,7 @@ listMonitorFeed: defineAction({
 }),
 
 fetchMonitorVideo: defineAction({
-  description: "把一条快手视频原始信息（18 项：原 12 项 + 快手号/粉丝数/获赞/达人简介/评论量/采集时间）整理成视频卡片存下（按达人主页归入账号、同一视频不重复存）。fromIntake=true 的自动投递命中删除墓碑按重复跳过；手动入口命中墓碑先解除再建卡。",
+  description: "把一条快手/抖音视频原始信息（18 项：原 12 项 + 快手号/粉丝数/获赞/达人简介/评论量/采集时间）整理成视频卡片存下（按达人主页归入账号、同一视频不重复存）。fromIntake=true 的自动投递命中删除墓碑按重复跳过；手动入口命中墓碑先解除再建卡。",
   request: z.object({
     videoId: z.string().trim().max(80).default(""),
     videoUrl: z.string().trim().max(2000).default(""),
@@ -12995,6 +13878,10 @@ fetchMonitorVideo: defineAction({
     collectSource: z
       .enum(["手动粘贴", "扩展上报", "Excel导入"])
       .optional(),
+    // v6.24：平台（只在新建账号时定，见 normalizeMonitorPlatform）：
+    // 粘贴文本 / Excel「平台」列透传；不传或认不出时按链接域名
+    // 推断、再不行默认快手。已有账号的平台永不改写。
+    platform: z.string().trim().max(20).default(""),
   }),
   response: z.object({
     ok: z.boolean(),
@@ -13005,6 +13892,10 @@ fetchMonitorVideo: defineAction({
     // v4.61：duplicated=true 时若顺带把链接字段刷新了（刷新链接
     // 回程），updated=true，其余字段一字未动。
     updated: z.boolean().optional(),
+    // v6.46：duplicated=true 时若顺带把点赞 / 播放更新了（取大
+    // 口径：入参大于 0 且大于现值才写、只升不降），
+    // countsUpdated=true。链接与点赞/播放可同时更新。
+    countsUpdated: z.boolean().optional(),
   }),
   async handler(ctx, args) {
     if (!args.videoUrl && !args.videoId) {
@@ -13105,7 +13996,11 @@ fetchMonitorVideo: defineAction({
       const inserted = await db
         .insert(schema.monitorAccounts)
         .values({
-          platform: "快手",
+          platform: normalizeMonitorPlatform(
+            args.platform,
+            args.creatorUrl,
+            args.videoUrl,
+          ),
           name: args.creatorName,
           creatorId,
           url: args.creatorUrl,
@@ -13131,9 +14026,13 @@ fetchMonitorVideo: defineAction({
       // 新链接」后扩展重新采集、经 intake 发回）时不再只是「重复
       // 跳过」——只更新链接相关字段（视频文件链接 / 封面链接 /
       // 视频链接，入参非空且与现值不同才写），让过期的
-      // video_play_url 换成新签名链接；描述 / 点赞 / 播放 / 发布
-      // 时间等其余字段一律不动，也不建新卡。普通重复上报带的链
-      // 接与现值相同（或为空）时不写库，行为与此前一致。
+      // video_play_url 换成新签名链接；描述 / 发布时间等其余字段
+      // 一律不动，也不建新卡。普通重复上报带的链接与现值相同
+      // （或为空）时不写库，行为与此前一致。
+      // v6.46：点赞 / 播放也顺带更新——扩展每次上报都带了最新数，
+      // 此前没往库里写。口径取大：入参是大于 0 的数字且大于现值
+      // 才写（只升不降），入参为空 / 为 0 / 不大于现值一律不动，
+      // 不拿空数或旧数盖掉已有的数。
       const linkPatch: {
         videoFileUrl?: string;
         coverUrl?: string;
@@ -13148,15 +14047,30 @@ fetchMonitorVideo: defineAction({
       if (args.videoUrl && args.videoUrl !== dup.videoUrl) {
         linkPatch.videoUrl = args.videoUrl;
       }
+      const countsPatch: { likeCount?: number; playCount?: number } = {};
+      if (args.likeCount > 0 && args.likeCount > dup.likeCount) {
+        countsPatch.likeCount = args.likeCount;
+      }
+      if (args.playCount > 0 && args.playCount > dup.playCount) {
+        countsPatch.playCount = args.playCount;
+      }
       const updated = Object.keys(linkPatch).length > 0;
-      if (updated) {
+      const countsUpdated = Object.keys(countsPatch).length > 0;
+      if (updated || countsUpdated) {
         await db
           .update(schema.monitorVideos)
-          .set(linkPatch)
+          .set({ ...linkPatch, ...countsPatch })
           .where(eq(schema.monitorVideos.id, dup.id));
-        console.log(
-          `[refresh] 视频 ${args.videoId || dup.videoId} 链接已刷新（只更新链接字段）`,
-        );
+        if (updated) {
+          console.log(
+            `[refresh] 视频 ${args.videoId || dup.videoId} 链接已刷新（只更新链接字段）`,
+          );
+        }
+        if (countsUpdated) {
+          console.log(
+            `[refresh] 视频 ${args.videoId || dup.videoId} 点赞/播放已更新（取大口径，只升不降）`,
+          );
+        }
       }
       ctx.invalidateQueries();
       return {
@@ -13165,6 +14079,7 @@ fetchMonitorVideo: defineAction({
         videoDbId: dup.id,
         duplicated: true as const,
         updated,
+        countsUpdated,
       };
     }
     const insertedVid = await db
@@ -13871,6 +14786,124 @@ saveCloudVideo: defineAction({
       already_saved: r.alreadySaved,
       size_bytes: r.sizeBytes,
     };
+  },
+}),
+
+// v6.28 卡片「传文件」（方案三·发文件直拆）：浏览器把用户选的
+// mp4 按 384KiB 一片（单片请求体约 512KiB，远低于通道约 1MB 上
+// 限）逐片送 uploadCloudVideoChunk 暂存到宿主机 video-cloud/
+// uploads/<uploadId>/，finishCloudVideoUpload 在特权层拼回、做
+// 完整性校验（大小 > 0 + MP4 文件头 + ffprobe 时长；没 ffprobe
+// 只验大小与文件头并如实回 verified_by=size-header）、通过才落
+// videos/{videoId}.mp4 并按既有锁协议记账 state.json。校验不过
+// 不记账、不留文件、旧存档不动。覆盖与否由客户端在选文件前用
+// 既有云端清单判定 + 二次确认，服务端完成动作只管落盘。
+uploadCloudVideoChunk: defineAction({
+  description: "上传一个监控视频文件的一个分片（卡片「传文件」分片上传用，384KiB 一片暂存到云端库的 uploads 暂存区，不记账）。",
+  request: z.object({
+    uploadId: z.string().min(8).max(80).regex(/^[A-Za-z0-9_-]+$/),
+    chunkIndex: z.number().int().min(0).max(2000),
+    totalChunks: z.number().int().min(1).max(2000),
+    dataBase64: z.string().min(1).max(800_000),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    received: z.number(),
+    error: z.string().optional(),
+  }),
+  privileged: [privileged.cloudVideoUploadChunk],
+  async handler(
+    ctx,
+    args,
+  ): Promise<{ ok: boolean; received: number; error?: string }> {
+    const r = await ctx.executePrivileged(privileged.cloudVideoUploadChunk, {
+      uploadId: args.uploadId,
+      chunkIndex: args.chunkIndex,
+      totalChunks: args.totalChunks,
+      dataBase64: args.dataBase64,
+    });
+    if (!r.ok) {
+      return {
+        ok: false as const,
+        received: 0,
+        error: r.error ?? "这一片没传上去，请重试。",
+      };
+    }
+    return { ok: true as const, received: r.received };
+  },
+}),
+
+finishCloudVideoUpload: defineAction({
+  description: "完成一次卡片「传文件」上传：把暂存分片拼回并做完整性校验（大小大于 0、MP4 文件头、ffprobe 可读时长；本机没 ffprobe 时只验大小与文件头、verified_by 如实回 size-header），通过才写入云端库 videos/{videoId}.mp4（覆盖旧存档）并按 state.json 锁协议记账 {file, size, at}；校验不过删临时文件与暂存、不记账、旧存档不动，回 ok=false 与原因。单文件上限 500MB。videoId 只允许字母数字下划线中划线。",
+  request: z.object({
+    uploadId: z.string().min(8).max(80).regex(/^[A-Za-z0-9_-]+$/),
+    videoId: z.string().trim().min(1).max(120),
+    totalChunks: z.number().int().min(1).max(2000),
+    expectedSize: z.number().int().min(0),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    size_bytes: z.number(),
+    duration_sec: z.number().nullable(),
+    verified_by: z.enum(["ffprobe", "size-header", "none"]),
+    error: z.string().optional(),
+  }),
+  privileged: [privileged.cloudVideoUploadFinish],
+  async handler(
+    ctx,
+    args,
+  ): Promise<{
+    ok: boolean;
+    size_bytes: number;
+    duration_sec: number | null;
+    verified_by: "ffprobe" | "size-header" | "none";
+    error?: string;
+  }> {
+    if (!CLOUD_VIDEO_ID_RE.test(args.videoId)) {
+      return {
+        ok: false as const,
+        size_bytes: 0,
+        duration_sec: null,
+        verified_by: "none" as const,
+        error: "视频ID不合法（只允许字母、数字、下划线、中划线）。",
+      };
+    }
+    const r = await ctx.executePrivileged(privileged.cloudVideoUploadFinish, {
+      uploadId: args.uploadId,
+      videoId: args.videoId,
+      totalChunks: args.totalChunks,
+      expectedSize: args.expectedSize,
+    });
+    if (!r.ok) {
+      return {
+        ok: false as const,
+        size_bytes: 0,
+        duration_sec: null,
+        verified_by: "none" as const,
+        error: r.error ?? "存入云端失败，请重新传一次。",
+      };
+    }
+    return {
+      ok: true as const,
+      size_bytes: r.sizeBytes,
+      duration_sec: r.durationSec,
+      verified_by: r.verifiedBy,
+    };
+  },
+}),
+
+discardCloudVideoUpload: defineAction({
+  description: "丢弃一次未完成的卡片「传文件」上传：清掉云端库 uploads 暂存区里这次上传的全部分片，不产生任何存档与记账。",
+  request: z.object({
+    uploadId: z.string().min(8).max(80).regex(/^[A-Za-z0-9_-]+$/),
+  }),
+  response: z.object({ ok: z.literal(true) }),
+  privileged: [privileged.cloudVideoUploadDiscard],
+  async handler(ctx, args): Promise<{ ok: true }> {
+    await ctx.executePrivileged(privileged.cloudVideoUploadDiscard, {
+      uploadId: args.uploadId,
+    });
+    return { ok: true as const };
   },
 }),
 
@@ -16215,6 +17248,334 @@ description: "用 AI 优化一段生图提示词。",
         optimizedEn: null,
       };
     }
+  },
+}),
+
+// v6.39 人物特征融合（图片生成工作台新功能，用户主聊亲发十节规格）：
+// 用户上传两张人物参考图（双图融合），或一张参考图 + 文字要求（单图
+// 融合），AI 按五步机制（分别识别 → 九类特征提取 → 判断融合关系 →
+// 统一人物结构 → 重新组织成完整提示词）把两边特征真正融合重构，产
+// 出四块：融合结果说明、中文正向提示词、英文正向提示词、负向提示
+// 词（按所选风格分别组织）。第一阶段只生成提示词、不直接生成图片，
+// 不提交任何生图任务、不写任何数据。调用链路与现有图片分析同一走
+// 法（ctx.inference 视觉通道、图片以 base64 内联随调用走，同
+// analyzeCharacter / analyzePresetAppearance）；模型报错原文透回，
+// 不静默换模型。dryRun=true 时不调用模型、回固定桩结果（沙箱验证
+// 专用，页面从不传这个参数）。
+// v6.42 融合结果按图 A 版式排版（用户主聊直派，原话「融合之后生成
+// 的图片按照图a布局排版去生成图片，图a三视图那么生成的就是三视
+// 图，图a多视图生成的就是多视图」）：只改本动作发给模型的分析指
+// 令文字——第一步先识别图 A（单图模式为唯一参考图）的版式（视图
+// 数 / 排列 / 各视图角度与景别 / 背景 / 分隔），识别结果写进融合说
+// 明；中英文正向提示词里都必须带一段版式锁定描述，写明按图 A 版
+// 式出图。版式一律跟图 A 走、与主次（融合权重）无关：哪怕以 B 为
+// 主，排版还是 A 的，B 只贡献长相特征；单图模式跟唯一参考图走。
+// 输出仍是四块、不新增块，负向不强制加版式内容；界面、预览、带入
+// 素材与提交链路一字不动。
+
+fuseCharacterFeatures: defineAction({
+  description:
+    "人物特征融合：分析一张或两张人物参考图（可带文字要求），融合成一段完整生图提示词（融合说明＋中英文正向＋负向）；出图版式一律按参考图 A（单图模式为唯一参考图）的版式锁定、写进融合说明与中英文正向。只生成提示词、不提交生图。",
+  request: z.object({
+    mode: z.enum(["dual", "single"]),
+    style: z.enum(["hyperreal", "anime3d"]),
+    balance: z.enum(["balanced", "a", "b"]).default("balanced"),
+    textRequirement: z.string().max(2000).default(""),
+    extraRequirement: z.string().max(2000).default(""),
+    visionImages: z.array(imageInput).max(2).optional(),
+    dryRun: z.boolean().optional(),
+    // v6.42 沙箱验证专用：仅 dryRun 时生效，选桩结果里的图 A 版式
+    // （three 三视图 / multi 多视图 / single 单图构图），页面从不传。
+    dryRunLayout: z.enum(["three", "multi", "single"]).optional(),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    error: z.string().nullable(),
+    result: fusionResultOut,
+  }),
+  async handler(ctx, args) {
+    return runFusionAnalysis(ctx, args);
+  },
+}),
+
+// ---------------------------------------------------------------------------
+// v6.43 人物特征融合任务制（修「开始融合」一直网关超时）：原同步动
+// 作一次请求里等视觉分析跑完才返回，一次分析经常超过页面服务链
+// 路约 30 秒的单次请求墙钟上限，请求半路被切断、页面只拿到网关
+// 超时（用户真机多次重试每次都报）。改法照 flor 总结优化 v34 与
+// 本台封面分析任务制（start/step/poll）：
+//   ① startFusionJob 只建一条 fusion_jobs 任务行（模式 / 风格 /
+//      主次 / 两份文字要求 / 参考图 1024px 副本 JSON 内联随任务
+//      行存好，做法与 flor 优化任务内联附图一致）、秒回任务号，
+//      不跑任何推理；入参缺图 / 缺文字要求在这一步就按原同步动
+//      作的原话拒绝、不建任务。
+//   ② runFusionJobStep 在服务端跑那一次分析（runFusionAnalysis，
+//      与同步动作共用实现，指令文字一字未改），结果先落
+//      resultJson 再回；真失败把真实报错落 error。认领窗口
+//      （FUSION_JOB_STEP_CLAIM_MS）内重复推进直接回 running、不
+//      重复跑分析；单次 step 请求就算被网关掐断，分析若在服务
+//      端跑完、结果已落库，轮询照样取得。
+//   ③ pollFusionJob 只读任务行（毫秒级、必然在时限内返回），页
+//      面每 3 秒轮询取结果；轮询本身永不触发分析。
+// 任务号跟图片生成面板草稿一起存本机：关窗 / 最小化 / 刷新后重
+// 开面板，凭任务号接着同一个任务取结果，不从头重跑。
+// dryRun / dryRunLayout / dryRunDelayMs / dryRunFail 只供沙箱验
+// 证（页面从不传）：dryRun 时 step 回桩结果、不调模型；
+// dryRunDelayMs 让桩结果延迟落库模拟慢分析；dryRunFail 让 step
+// 落一条桩失败验失败口径。
+// ---------------------------------------------------------------------------
+
+
+startFusionJob: defineAction({
+  description:
+    "人物特征融合任务（启动）：把融合条件与参考图副本存成一条后台任务并立刻回任务号，不跑分析；分析由 runFusionJobStep 推进、pollFusionJob 轮询取结果。",
+  request: z.object({
+    mode: z.enum(["dual", "single"]),
+    style: z.enum(["hyperreal", "anime3d"]),
+    balance: z.enum(["balanced", "a", "b"]).default("balanced"),
+    textRequirement: z.string().max(2000).default(""),
+    extraRequirement: z.string().max(2000).default(""),
+    visionImages: z.array(imageInput).max(2).optional(),
+    dryRun: z.boolean().optional(),
+    dryRunLayout: z.enum(["three", "multi", "single"]).optional(),
+    dryRunDelayMs: z.number().int().min(0).max(180_000).optional(),
+    dryRunFail: z.boolean().optional(),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    error: z.string().nullable(),
+    jobId: z.number().nullable(),
+  }),
+  async handler(ctx, args) {
+    const images = (args.visionImages ?? []).filter(
+      (im) => im.mimeType === "image/jpeg" || im.mimeType === "image/png",
+    );
+    // 与原同步动作同一套入参校验、同一句原话：条件不齐直接拒绝、
+    // 不建任务，用户补齐后再点一次即可。
+    if (args.mode === "dual" && images.length < 2) {
+      return {
+        ok: false,
+        error:
+          "双图融合要两张参考图都读到：请确认参考图 A 和参考图 B 都已上传（只支持 JPG / PNG 图）。已上传的内容没有动，可以补上缺的那张再点一次。",
+        jobId: null,
+      };
+    }
+    if (args.mode === "single" && images.length < 1) {
+      return {
+        ok: false,
+        error:
+          "没读到参考图：请重新上传一张参考图（只支持 JPG / PNG 图）。你填的文字要求没有动，补上图再点一次就行。",
+        jobId: null,
+      };
+    }
+    if (args.mode === "single" && !args.textRequirement.trim()) {
+      return {
+        ok: false,
+        error:
+          "单图融合要写清文字要求：想给图里的人新增、替换、强化或修改哪些特征，写在文字要求里再点开始融合。",
+        jobId: null,
+      };
+    }
+    const db = ctx.db<typeof schema>();
+    const ins = await db
+      .insert(schema.fusionJobs)
+      .values({
+        mode: args.mode,
+        style: args.style,
+        balance: args.balance,
+        textRequirement: args.textRequirement,
+        extraRequirement: args.extraRequirement,
+        imagesJson: JSON.stringify(
+          images.map((im) => ({
+            dataBase64: im.dataBase64,
+            mimeType: im.mimeType,
+            caption: im.caption,
+          })),
+        ),
+        status: "running",
+        dryRun: args.dryRun ? 1 : 0,
+        dryRunLayout: args.dryRunLayout ?? "",
+        dryRunDelayMs: args.dryRunDelayMs ?? 0,
+        dryRunFail: args.dryRunFail ? 1 : 0,
+      })
+      .returning({ id: schema.fusionJobs.id });
+    return { ok: true, error: null, jobId: ins[0]?.id ?? null };
+  },
+}),
+
+runFusionJobStep: defineAction({
+  description:
+    "人物特征融合任务（推进）：在服务端跑任务的那一次视觉分析并把四块结果（或真实报错）落库后返回任务最新状态；认领窗口内重复推进直接回 running，不重复跑分析。",
+  request: z.object({
+    jobId: z.number().int().positive(),
+  }),
+  response: fusionJobPollResponse,
+  async handler(ctx, args): Promise<FusionJobPollResult> {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.fusionJobs)
+      .where(eq(schema.fusionJobs.id, args.jobId))
+      .limit(1);
+    const job = rows[0];
+    if (!job) {
+      return {
+        status: "failed",
+        result: null,
+        error: "融合任务不存在（可能已被清理），请重新点一次「开始融合」。",
+      };
+    }
+    const parseStored = (json: string): FusionResult | null => {
+      if (!json) return null;
+      try {
+        const o = JSON.parse(json) as Partial<FusionResult>;
+        if (
+          typeof o.summary !== "string" ||
+          typeof o.promptZh !== "string" ||
+          typeof o.promptEn !== "string" ||
+          typeof o.negative !== "string"
+        ) {
+          return null;
+        }
+        return {
+          summary: o.summary,
+          promptZh: o.promptZh,
+          promptEn: o.promptEn,
+          negative: o.negative,
+        };
+      } catch {
+        return null;
+      }
+    };
+    if (job.status === "done") {
+      return {
+        status: "done",
+        result: parseStored(job.resultJson),
+        error: null,
+      };
+    }
+    if (job.status === "failed") {
+      return {
+        status: "failed",
+        result: null,
+        error: job.error || "融合失败，参考图和你填的要求都没有动，请再点一次「开始融合」。",
+      };
+    }
+    // 认领窗口：上一次执行刚开始不久，多半还在服务端跑——直接回
+    // running 让页面继续轮询，不要并发再跑一次同样的分析。窗口
+    // 取 300 秒：真实分析的推理时限是 240 秒，窗口必须比它长，
+    // 免得分析还没跑完就被当成死了重跑一遍。
+    const FUSION_JOB_STEP_CLAIM_MS = 300_000;
+    const startedMs = job.stepStartedAt ?? 0;
+    if (startedMs && Date.now() - startedMs < FUSION_JOB_STEP_CLAIM_MS) {
+      return { status: "running", result: null, error: null };
+    }
+    await db
+      .update(schema.fusionJobs)
+      .set({ stepStartedAt: Date.now(), updatedAt: new Date() })
+      .where(eq(schema.fusionJobs.id, job.id));
+    let images: FusionImageInput[] = [];
+    try {
+      const parsed = JSON.parse(job.imagesJson || "[]") as FusionImageInput[];
+      if (Array.isArray(parsed)) images = parsed;
+    } catch {
+      images = [];
+    }
+    const res = await runFusionAnalysis(ctx, {
+      mode: job.mode === "single" ? "single" : "dual",
+      style: job.style === "anime3d" ? "anime3d" : "hyperreal",
+      balance:
+        job.balance === "a" || job.balance === "b" ? job.balance : "balanced",
+      textRequirement: job.textRequirement,
+      extraRequirement: job.extraRequirement,
+      visionImages: images,
+      dryRun: job.dryRun === 1 ? true : undefined,
+      dryRunLayout:
+        job.dryRunLayout === "three" ||
+        job.dryRunLayout === "multi" ||
+        job.dryRunLayout === "single"
+          ? job.dryRunLayout
+          : undefined,
+      dryRunDelayMs: job.dryRunDelayMs > 0 ? job.dryRunDelayMs : undefined,
+      dryRunFail: job.dryRunFail === 1 ? true : undefined,
+    });
+    if (!res.ok || !res.result) {
+      const error =
+        res.error ?? "融合失败，参考图和你填的要求都没有动，请再点一次「开始融合」。";
+      await db
+        .update(schema.fusionJobs)
+        .set({
+          status: "failed",
+          error,
+          stepStartedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.fusionJobs.id, job.id));
+      return { status: "failed", result: null, error };
+    }
+    await db
+      .update(schema.fusionJobs)
+      .set({
+        status: "done",
+        resultJson: JSON.stringify(res.result),
+        stepStartedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.fusionJobs.id, job.id));
+    return { status: "done", result: res.result, error: null };
+  },
+}),
+
+pollFusionJob: defineAction({
+  description:
+    "人物特征融合任务（轮询）：只读任务行回当前状态，完成时带四块融合结果、失败时带真实报错；不跑任何分析、不提交生图。",
+  request: z.object({ jobId: z.number().int().positive() }),
+  response: fusionJobPollResponse,
+  async handler(ctx, args): Promise<FusionJobPollResult> {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.fusionJobs)
+      .where(eq(schema.fusionJobs.id, args.jobId))
+      .limit(1);
+    const job = rows[0];
+    if (!job) {
+      return {
+        status: "failed",
+        result: null,
+        error: "融合任务不存在（可能已被清理），请重新点一次「开始融合」。",
+      };
+    }
+    if (job.status === "done") {
+      let result: FusionResult | null = null;
+      try {
+        const o = JSON.parse(job.resultJson || "") as Partial<FusionResult>;
+        if (
+          typeof o.summary === "string" &&
+          typeof o.promptZh === "string" &&
+          typeof o.promptEn === "string" &&
+          typeof o.negative === "string"
+        ) {
+          result = {
+            summary: o.summary,
+            promptZh: o.promptZh,
+            promptEn: o.promptEn,
+            negative: o.negative,
+          };
+        }
+      } catch {
+        result = null;
+      }
+      return { status: "done", result, error: null };
+    }
+    if (job.status === "failed") {
+      return {
+        status: "failed",
+        result: null,
+        error: job.error || "融合失败，参考图和你填的要求都没有动，请再点一次「开始融合」。",
+      };
+    }
+    return { status: "running", result: null, error: null };
   },
 }),
 

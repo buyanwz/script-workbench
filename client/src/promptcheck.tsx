@@ -39,16 +39,16 @@
 import { useMemo, useState } from "react";
 import { api, type ApiResponse } from "./api";
 import {
-  describeThrownError,
-  isGatewayTimeoutError,
-  isGatewayTimeoutText,
+describeThrownError,
+isGatewayTimeoutError,
+isGatewayTimeoutText,
 } from "./gateway";
 import { copyText } from "./scriptlib";
 import {
-  COPYRIGHT_GUARD_BUILTIN,
-  COPYRIGHT_GUARD_STATEMENT,
-  loadCopyrightGuardCustom,
-  type CopyrightGuardPair,
+COPYRIGHT_GUARD_BUILTIN,
+COPYRIGHT_GUARD_STATEMENT,
+loadCopyrightGuardCustom,
+type CopyrightGuardPair,
 } from "./copyrightguard";
 
 type CheckResult = ApiResponse<typeof api, "checkPromptCopyright">;

@@ -408,6 +408,58 @@ export const privileged = definePrivilegedContracts({
     }),
     timeoutMs: 120_000,
   },
+  // v6.28 卡片「传文件」（方案三·发文件直拆的工作台入口）：用户在
+  // 自己电脑上选一个已下好的 mp4，浏览器按 384KiB 一片分片送上来
+  // （单片请求体约 512KiB，远低于动作通道约 1MB 上限，口径同人物
+  // 图分片 v6.10），本层逐片落到 video-cloud/uploads/<uploadId>/
+  // 暂存；完成时按片号拼回临时文件 → 完整性校验（大小 > 0、MP4
+  // 文件头 ftyp、ffprobe 能读出时长；本机没有 ffprobe 时只验大小
+  // 与文件头并如实回 verifiedBy="size-header"）→ 校验通过才
+  // rename 成 videos/{videoId}.mp4（覆盖旧存档）并按既有锁协议
+  // upsertCloudDownloaded 记账 {file, size, at}；校验不过删临时
+  // 文件与暂存、不记账、旧存档一字不动。单文件上限 500MB 与下载
+  // 路径一致（拼装时累计字节双拦）。uploadId / videoId 一律先过
+  // 白名单正则，防目录穿越。
+  cloudVideoUploadChunk: {
+    request: z.object({
+      uploadId: z.string().min(8).max(80),
+      chunkIndex: z.number().int().min(0).max(2000),
+      totalChunks: z.number().int().min(1).max(2000),
+      dataBase64: z.string().min(1).max(800_000),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      received: z.number(),
+      error: z.string().nullable(),
+    }),
+    timeoutMs: 60_000,
+  },
+  cloudVideoUploadFinish: {
+    request: z.object({
+      uploadId: z.string().min(8).max(80),
+      videoId: z.string().min(1).max(120),
+      totalChunks: z.number().int().min(1).max(2000),
+      expectedSize: z.number().int().min(0),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      sizeBytes: z.number(),
+      durationSec: z.number().nullable(),
+      verifiedBy: z.enum(["ffprobe", "size-header", "none"]),
+      error: z.string().nullable(),
+    }),
+    timeoutMs: 300_000,
+  },
+  cloudVideoUploadDiscard: {
+    request: z.object({
+      uploadId: z.string().min(8).max(80),
+    }),
+    response: z.object({
+      ok: z.boolean(),
+      error: z.string().nullable(),
+    }),
+    timeoutMs: 30_000,
+  },
   // v4.75 AI解剖场景切分：对云端视频文件做内容感知场景检测，
   // 切分点（秒）供解剖第 2 步当节拍窗边界，替代均匀时间窗。
   // 检测走 SCENE_DETECT_PY：优先 PySceneDetect（ContentDetector），
@@ -2656,6 +2708,197 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
     }
     return { ok: true, alreadySaved: false, sizeBytes: total, error: null };
   },
+  // v6.28「传文件」分片暂存：一片一个文件（<chunkIndex>.part）落
+  // uploads/<uploadId>/，同片重送直接覆盖（客户端逐片重试口径），
+  // 不拼装、不记账，完成与丢弃由下面两个契约收尾。
+  async cloudVideoUploadChunk(args) {
+    const fail = (error: string) => ({ ok: false, received: 0, error });
+    if (!CLOUD_UPLOAD_ID_RE.test(args.uploadId)) {
+      return fail("上传编号不合法，没有保存这一片。");
+    }
+    if (args.chunkIndex >= args.totalChunks) {
+      return fail("分片序号不对，没有保存这一片。");
+    }
+    try {
+      const dir = cloudUploadStagingDir(args.uploadId);
+      await fs.mkdir(dir, { recursive: true });
+      const bytes = Buffer.from(args.dataBase64, "base64");
+      if (bytes.length === 0 && args.dataBase64.replace(/=+$/, "").length > 0) {
+        return fail("这一片的内容解不开，没有保存。");
+      }
+      await fs.writeFile(path.join(dir, `${args.chunkIndex}.part`), bytes);
+      return { ok: true, received: args.chunkIndex + 1, error: null };
+    } catch (e) {
+      return fail(
+        "这一片没存下来：" + (e instanceof Error ? e.message : String(e)),
+      );
+    }
+  },
+  // v6.28「传文件」完成：按片号拼回临时文件 → 完整性校验 → 通过
+  // 才 rename 成正式存档 + 记账。校验不过：删临时文件与暂存、不
+  // 记账、旧存档不动，回 ok=false 与大白话原因让用户重传。
+  async cloudVideoUploadFinish(args) {
+    const fail = (
+      error: string,
+    ): {
+      ok: false;
+      sizeBytes: number;
+      durationSec: null;
+      verifiedBy: "none";
+      error: string;
+    } => ({ ok: false, sizeBytes: 0, durationSec: null, verifiedBy: "none", error });
+    if (!CLOUD_UPLOAD_ID_RE.test(args.uploadId)) {
+      return fail("上传编号不合法，没有存入云端。");
+    }
+    if (!CLOUD_VIDEO_ID_RE.test(args.videoId)) {
+      return fail("视频ID不合法（只允许字母、数字、下划线、中划线），没有存入云端。");
+    }
+    const MAX_BYTES = 500 * 1024 * 1024; // 单文件上限 500MB，与下载路径一致
+    const stagingDir = cloudUploadStagingDir(args.uploadId);
+    const finalPath = cloudVideoFilePath(args.videoId);
+    const tmpPath =
+      finalPath + `.upload-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const cleanup = async () => {
+      try {
+        await fs.unlink(tmpPath);
+      } catch {
+        // 临时文件不在不报错。
+      }
+      try {
+        await fs.rm(stagingDir, { recursive: true, force: true });
+      } catch {
+        // 暂存不在不报错。
+      }
+    };
+    try {
+      await fs.mkdir(path.dirname(finalPath), { recursive: true });
+    } catch (e) {
+      await cleanup();
+      return fail(
+        "云端目录建不出来：" + (e instanceof Error ? e.message : String(e)),
+      );
+    }
+    // 按片号顺序拼回：缺任何一片都算没传完，不拼半截文件。
+    let total = 0;
+    let fh: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      fh = await fs.open(tmpPath, "w");
+      for (let i = 0; i < args.totalChunks; i += 1) {
+        let part: Buffer;
+        try {
+          part = await fs.readFile(path.join(stagingDir, `${i}.part`));
+        } catch {
+          await fh.close().catch(() => undefined);
+          fh = null;
+          await cleanup();
+          return fail(
+            `上传没传完（第 ${i + 1} / ${args.totalChunks} 片没到），没有存入云端，请重新传一次。`,
+          );
+        }
+        total += part.length;
+        if (total > MAX_BYTES) {
+          await fh.close().catch(() => undefined);
+          fh = null;
+          await cleanup();
+          return fail("这个视频文件超过 500MB 上限，没有存入云端。");
+        }
+        await fh.write(part);
+      }
+      await fh.close();
+      fh = null;
+    } catch (e) {
+      if (fh) await fh.close().catch(() => undefined);
+      await cleanup();
+      return fail(
+        "文件拼不回来：" + (e instanceof Error ? e.message : String(e)),
+      );
+    }
+    if (args.expectedSize > 0 && total !== args.expectedSize) {
+      await cleanup();
+      return fail(
+        `传上来的大小对不上（应有 ${args.expectedSize} 字节、实际拼出 ${total} 字节），没有存入云端，请重新传一次。`,
+      );
+    }
+    // 完整性校验①：大小 > 0 且是 MP4 文件头（第 5–8 字节为 ftyp）。
+    if (total <= 0) {
+      await cleanup();
+      return fail("传上来的是空文件，没有内容，没有存入云端，请换一个文件重传。");
+    }
+    try {
+      const headFh = await fs.open(tmpPath, "r");
+      try {
+        const head = Buffer.alloc(12);
+        const { bytesRead } = await headFh.read(head, 0, 12, 0);
+        if (
+          bytesRead < 8 ||
+          head.subarray(4, 8).toString("latin1") !== "ftyp"
+        ) {
+          await headFh.close().catch(() => undefined);
+          await cleanup();
+          return fail("这个文件不是有效的 MP4（文件头对不上），没有存入云端，请确认选的是下好的 mp4 视频文件。");
+        }
+      } finally {
+        await headFh.close().catch(() => undefined);
+      }
+    } catch (e) {
+      await cleanup();
+      return fail(
+        "文件校验没做成：" + (e instanceof Error ? e.message : String(e)),
+      );
+    }
+    // 完整性校验②：ffprobe 读包时长。探针在本机存在且跑得通时，
+    // 读不出时长 = 文件损坏 / 没下完整 → 拦下；探针本身不在
+    // （ENOENT）才回落「只验大小与文件头」并如实标注。
+    const probe = await probeMp4Duration(tmpPath);
+    if (probe.status === "bad") {
+      await cleanup();
+      return fail("这个文件读不出可播时长，像是坏的或没下完整的 MP4，没有存入云端，请重新下载完整文件再传。");
+    }
+    const verifiedBy: "ffprobe" | "size-header" =
+      probe.status === "ok" ? "ffprobe" : "size-header";
+    const durationSec = probe.status === "ok" ? probe.durationSec : null;
+    // 校验全过：rename 成正式存档（覆盖旧文件），再按既有锁协议
+    // 记账（字段与下载路径一致：file / size / at）。
+    try {
+      await fs.rename(tmpPath, finalPath);
+    } catch (e) {
+      await cleanup();
+      return fail(
+        "文件校验过了但存入云端目录失败：" +
+          (e instanceof Error ? e.message : String(e)),
+      );
+    }
+    try {
+      await upsertCloudDownloaded(args.videoId, {
+        file: `${args.videoId}.mp4`,
+        size: total,
+        at: cloudNowStamp(),
+      });
+    } catch (e) {
+      await cleanup();
+      return fail(
+        "文件已经存入云端，但清单（state.json）没更新成：" +
+          (e instanceof Error ? e.message : String(e)),
+      );
+    }
+    await cleanup();
+    return { ok: true, sizeBytes: total, durationSec, verifiedBy, error: null };
+  },
+  // v6.28「传文件」放弃：清掉这次上传的暂存分片，不留半截东西。
+  async cloudVideoUploadDiscard(args) {
+    if (!CLOUD_UPLOAD_ID_RE.test(args.uploadId)) {
+      return { ok: false, error: "上传编号不合法。" };
+    }
+    try {
+      await fs.rm(cloudUploadStagingDir(args.uploadId), {
+        recursive: true,
+        force: true,
+      });
+    } catch {
+      // 暂存清不掉不拦放弃本身。
+    }
+    return { ok: true, error: null };
+  },
   // v4.75：对云端视频文件跑 SCENE_DETECT_PY 做场景切分（优先
   // PySceneDetect、回落 ffmpeg 内容感知），只读文件、不写任何东西。
   async cloudSceneDetect(args) {
@@ -3526,6 +3769,80 @@ function cloudStatePath(): string {
 
 function cloudVideoFilePath(videoId: string): string {
   return path.join(cloudBaseDir(), "videos", videoId + ".mp4");
+}
+
+// v6.28「传文件」分片暂存目录：video-cloud/uploads/<uploadId>/，
+// uploadId 由客户端随机生成（白名单同 videoId 口径 + 长度下限，
+// 拼路径前双检，防目录穿越）。
+const CLOUD_UPLOAD_ID_RE = /^[A-Za-z0-9_-]+$/;
+
+function cloudUploadStagingDir(uploadId: string): string {
+  return path.join(cloudBaseDir(), "uploads", uploadId);
+}
+
+// v6.28 完整性校验：ffprobe 读 MP4 时长（-show_entries format=
+// duration）。三种结果如实区分——ok = 读出正时长；bad = ffprobe
+// 在但读不出（文件损坏 / 截断）；missing = 本机没有 ffprobe
+// （spawn ENOENT），调用方回落只验大小与文件头并如实标注。
+function probeMp4Duration(
+  filePath: string,
+): Promise<
+  | { status: "ok"; durationSec: number }
+  | { status: "bad" }
+  | { status: "missing" }
+> {
+  return new Promise((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=noprint_wrappers=1:nokey=1",
+          filePath,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+    } catch {
+      resolve({ status: "missing" });
+      return;
+    }
+    let out = "";
+    let settled = false;
+    const done = (r: { status: "ok"; durationSec: number } | { status: "bad" } | { status: "missing" }) => {
+      if (settled) return;
+      settled = true;
+      resolve(r);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // 进程已退出不报错。
+      }
+      done({ status: "bad" });
+    }, 30_000);
+    child.stdout?.on("data", (d: Buffer) => {
+      out += d.toString("utf8");
+    });
+    child.on("error", (e: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      done(e && e.code === "ENOENT" ? { status: "missing" } : { status: "bad" });
+    });
+    child.on("close", () => {
+      clearTimeout(timer);
+      const sec = Number.parseFloat(out.trim());
+      if (Number.isFinite(sec) && sec > 0) {
+        done({ status: "ok", durationSec: Math.round(sec * 10) / 10 });
+      } else {
+        done({ status: "bad" });
+      }
+    });
+  });
 }
 
 // state.json 里 at 的既有格式：本机时间「YYYY-MM-DD HH:mm」

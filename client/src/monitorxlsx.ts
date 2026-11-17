@@ -259,8 +259,9 @@ function colName(idx: number): string {
   return s;
 }
 
-// 生成只有一行表头的空模板 .xlsx（列名 = 传入的 18 项规范名），
-// 并以固定文件名触发一次下载。
+// 生成只有一行表头的空模板 .xlsx（列名 = 调用方传入的表头：
+// v6.24 起为首列「平台」+ 18 项规范名），并以固定文件名触发
+// 一次下载。
 export function downloadMonitorTemplateXlsx(headers: string[]): void {
   const enc = new TextEncoder();
   const headerCells = headers
