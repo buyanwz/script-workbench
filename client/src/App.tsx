@@ -23,6 +23,7 @@ import { ConfirmDialog } from "./confirm";
 import { ScriptImportDialog } from "./scriptimport";
 import { GenProgress } from "./genprogress";
 import { ImageGenPanelHost, openImageGenPanel } from "./imagegen";
+import { VideoGenPanelHost, openVideoGenPanel } from "./videogen";
 import { SettingsDock } from "./settingsfloat";
 import { CoverBench } from "./coverbench";
 import { PreviewImg } from "./previewimg";
@@ -278,7 +279,7 @@ const RATES = [3, 4, 5, 6, 7];
 // 条目里配 highlightSteps（标题、说明、目标选择器、位置说明、要先切到
 // 哪个窗口）。v3.57 起按用户要求：任何引导一律不再自动弹出——无论
 // 版本号是否变化、刷新还是重开，都只从顶部「新功能」「新手引导」
-// 按钮或「指引档案」里手动打开；顶部按钮的未看红点只是提醒，绝不
+// 按钮手动打开（「指引档案」入口已于 v6.47 删除）；顶部按钮的未看红点只是提醒，绝不
 // 等于自动弹。已看 / 已删按编号记本机（GUIDE_SEEN_IDS_KEY /
 // 已删列表），刷新、重开、版本变化都不会让看过或删过的指引复活。
 // 目标找不到时跳过高光、气泡居中写明位置，绝不指到空白处。
@@ -492,15 +493,18 @@ const WHATS_NEW_STEPS_V331: HighlightStepDef[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// 指引档案（v3.31 起）：每条新功能指引有唯一固定编号 ZY-YYYYMMDD-NN
+// 指引记录（v3.31 起）：每条新功能指引有唯一固定编号 ZY-YYYYMMDD-NN
 // （ZY=指引，中间是上线日期，后面是当天序号，从 01 起）。同一功能只
 // 对应一个编号：改标题 / 说明 / 步骤只升修订号 rev、编号不变；删除后
-// 编号不复用、不留空号误导。档案数据结构化保存：种子记录在代码里
-// （GUIDE_SEED_RECORDS，发版时新增一条带编号的记录即自动进档案并成为
-// 当版高光），用户在本机的编辑 / 删除 / 新增保存为覆盖层存本机
+// 编号不复用、不留空号误导。数据结构化保存：种子记录在代码里
+// （GUIDE_SEED_RECORDS，发版时新增一条带编号的记录即成为当版高光），
+// 用户在本机的编辑 / 删除 / 新增保存为覆盖层存本机
 // （GUIDE_ARCHIVE_STORE_KEY），与种子按编号合并——种子更新不会冲掉
 // 本机改过的内容，本机删过的编号也不会被种子复活。已看 / 未看按
 // 编号记本机（GUIDE_SEEN_IDS_KEY），不再按版本一刀切。
+// v6.47 起：「指引档案」顶栏入口与档案面板已按用户要求删除，本段的
+// 种子记录、覆盖层读取与已看记账保留（聚光灯导览播放器仍靠它们取
+// 当版指引），本机存量覆盖层数据不删不清、备份包仍照常带这些键。
 // ---------------------------------------------------------------------------
 
 type GuideRecord = {
@@ -700,15 +704,7 @@ function loadGuideArchiveStore(): GuideArchiveStore {
   }
 }
 
-function saveGuideArchiveStore(store: GuideArchiveStore) {
-  try {
-    window.localStorage.setItem(GUIDE_ARCHIVE_STORE_KEY, JSON.stringify(store));
-  } catch {
-    /* private mode */
-  }
-}
-
-/** 档案排序键：创建时间（ISO）。存量旧记录没有 createdAt 时，用
+/** 指引排序键：创建时间（ISO）。存量旧记录没有 createdAt 时，用
  * 日期 + 编号当天序号兜底推导（同日序号越大、加得越晚），保证老
  * 数据也能按「今天最后加的在最前」排，不会因为缺字段乱序。 */
 function guideCreatedKey(r: GuideRecord): string {
@@ -727,7 +723,7 @@ function compareGuideCreatedDesc(a: GuideRecord, b: GuideRecord): number {
 }
 
 /** 种子 + 本机覆盖层合并出有效指引列表（删过的编号不复活），
- * 按创建时间倒序返回：最新加的在最前、今天新加的在最顶部。 */
+ * 按创建时间倒序返回：最新加的在最前。 */
 function mergeGuideRecords(store: GuideArchiveStore): GuideRecord[] {
   const deleted = new Set(store.deletedIds);
   const byId = new Map<string, GuideRecord>();
@@ -738,23 +734,6 @@ function mergeGuideRecords(store: GuideArchiveStore): GuideRecord[] {
   return [...byId.values()]
     .filter((r) => !deleted.has(r.id))
     .sort(compareGuideCreatedDesc);
-}
-
-/** 下一个可用编号：当天序号取全部已知编号（种子 + 覆盖 + 已删）的最大值 +1，删掉的号不复用。 */
-function nextGuideId(store: GuideArchiveStore, date: string): string {
-  const ymd = date.replaceAll("-", "");
-  const prefix = `ZY-${ymd}-`;
-  let max = 0;
-  const consider = (id: string) => {
-    if (id.startsWith(prefix)) {
-      const n = Number(id.slice(prefix.length));
-      if (Number.isFinite(n) && n > max) max = n;
-    }
-  };
-  GUIDE_SEED_RECORDS.forEach((r) => consider(r.id));
-  Object.keys(store.overrides).forEach(consider);
-  store.deletedIds.forEach(consider);
-  return `${prefix}${String(max + 1).padStart(2, "0")}`;
 }
 
 function loadGuideSeenIds(): string[] {
@@ -904,28 +883,28 @@ export function App() {
   // 全站只有 theme.css :root 的一套深色色板，没有 data-theme 覆盖、
   // 没有本机主题存值要读。本机若还留着旧的 scriptbench.uiTheme 存值，
   // 从此无人读取、自然失效，不需要迁移也不会卡在任何主题上。
-  // ---- 新功能高光引导 + 指引档案 --------------------------------------
+  // ---- 新功能高光引导 --------------------------------------------------
   // 指引以编号为身份（见 GUIDE_SEED_RECORDS）：当版指引 = CURRENT_GUIDE_ID
-  // 对应的记录；档案里的任意一条都能播放。已看 / 未看按编号记本机。
-  const [guideStore, setGuideStore] = useState<GuideArchiveStore>(() => loadGuideArchiveStore());
+  // 对应的记录。已看 / 未看按编号记本机。「指引档案」入口与面板已于
+  // v6.47 按用户要求删除；种子指引、本机覆盖层读取（scriptbench.
+  // guideArchive.v1）与已看记账保留不动，聚光灯导览播放器保留。
+  const [guideStore] = useState<GuideArchiveStore>(() => loadGuideArchiveStore());
   const guideRecords = mergeGuideRecords(guideStore);
   // 删除永久生效（v3.32 修复）：当版指引只从合并后的有效列表里取，
   // 绝不再回退到种子记录——v3.31 时这里的种子回退会把用户刚删掉的
   // 当版指引（ZY-…-07 等）重新拼回来播放，删除等于没删。现在删过的
-  // 编号在种子、当版、自动弹出、已看记账四条路上都被过滤掉，只有
-  // 用户在档案里手动「+ 新增指引」建一条新编号的指引才能替代它。
+  // 编号在种子、当版、自动弹出、已看记账四条路上都被过滤掉。
   const currentGuideDeleted = guideStore.deletedIds.includes(CURRENT_GUIDE_ID);
   const currentGuide: GuideRecord | undefined = currentGuideDeleted
     ? undefined
     : guideRecords.find((r) => r.id === CURRENT_GUIDE_ID);
-  const [guideSeenIds, setGuideSeenIds] = useState<string[]>(() => loadGuideSeenIds());
-  const [activeGuideId, setActiveGuideId] = useState<string>(CURRENT_GUIDE_ID);
+  const [, setGuideSeenIds] = useState<string[]>(() => loadGuideSeenIds());
+  const [activeGuideId] = useState<string>(CURRENT_GUIDE_ID);
   const activeGuide: GuideRecord | undefined =
     guideRecords.find((r) => r.id === activeGuideId) ?? currentGuide;
   const whatsNewSteps: HighlightStepDef[] = activeGuide?.steps ?? [];
   const [whatsNewOpen, setWhatsNewOpen] = useState(false);
   const [whatsNewStep, setWhatsNewStep] = useState(0);
-  const [guideArchiveOpen, setGuideArchiveOpen] = useState(false);
   const markGuideSeen = (id: string) => {
     setGuideSeenIds((prev) => {
       if (prev.includes(id)) return prev;
@@ -947,76 +926,6 @@ export function App() {
       /* private mode */
     }
   };
-  const playGuide = (record: GuideRecord) => {
-    // 已删编号永不播放：哪怕调用方拿着旧记录，也直接拒绝。
-    if (guideStore.deletedIds.includes(record.id)) return;
-    if (!guideRecords.some((r) => r.id === record.id)) return;
-    setGuideArchiveOpen(false);
-    setActiveGuideId(record.id);
-    setWhatsNewStep(0);
-    setWhatsNewOpen(true);
-  };
-  const saveGuideRecord = (record: GuideRecord) => {
-    setGuideStore((prev) => {
-      // 保存也不能复活已删编号：已删列表只进不出。编辑的都是档案里
-      // 现存的记录（编号不在已删列表里），新增的是全新编号（由
-      // nextGuideId 跳过全部已删编号生成），两条路都不会撞上这里。
-      if (prev.deletedIds.includes(record.id)) return prev;
-      const next: GuideArchiveStore = {
-        overrides: { ...prev.overrides, [record.id]: record },
-        deletedIds: prev.deletedIds,
-      };
-      saveGuideArchiveStore(next);
-      return next;
-    });
-  };
-  const deleteGuideRecord = (record: GuideRecord) => {
-    setGuideStore((prev) => {
-      const overrides = { ...prev.overrides };
-      delete overrides[record.id];
-      const next: GuideArchiveStore = {
-        overrides,
-        deletedIds: prev.deletedIds.includes(record.id)
-          ? prev.deletedIds
-          : [...prev.deletedIds, record.id],
-      };
-      saveGuideArchiveStore(next);
-      return next;
-    });
-    // 删了就不再算未看：把编号记入已看，红点与自动弹都不再找它。
-    markGuideSeen(record.id);
-    if (activeGuideId === record.id) {
-      setWhatsNewOpen(false);
-      setActiveGuideId(CURRENT_GUIDE_ID);
-    }
-  };
-  const addGuideRecord = (): GuideRecord => {
-    const now = new Date();
-    const today = now.toISOString().slice(0, 10);
-    const record: GuideRecord = {
-      id: nextGuideId(guideStore, today),
-      date: today,
-      version: WORKSPACE_VERSION,
-      title: "新指引",
-      summary: "",
-      rev: 1,
-      updatedAt: today,
-      // 创建时间精确到秒：档案按它倒序，新加的这条会直接排到
-      // 今天分组的最顶部，打开档案就能看到，不用刷新或手动排序。
-      createdAt: now.toISOString(),
-      steps: [
-        {
-          title: "新功能",
-          body: "",
-          target: '[data-tour="whats-new"]',
-          location: "页面顶部",
-          prepare: "none",
-        },
-      ],
-    };
-    saveGuideRecord(record);
-    return record;
-  };
   // 高光步骤展示前要先切到的窗口：review = 剧本审查（确认按钮在
   // 那），library = 人物资产储存库（分类管理在那）。
   const prepareWhatsNew = (prepare: HighlightPrepare | undefined) => {
@@ -1031,11 +940,11 @@ export function App() {
   // 在版本变化后首次打开时自动弹当版新功能引导（图1里每次打开都
   // 出现的就是它，弹的是 ZY-20261027-03）。现已整段删除——从此
   // 新功能引导与新手引导一律不自动弹：无论版本号是否变化、刷新
-  // 还是重开，都只从顶部「新功能」「新手引导」按钮或「指引档案」
-  // 手动打开。已看标记按编号存本机（GUIDE_SEEN_IDS_KEY）、已删编号
-  // 在种子合并 / 当版取用 / 保存 / 播放各处永久过滤（v3.32 规则
-  // 不变），不会因版本变化或重开复活。顶部按钮的未看红点保留，
-  // 只作提醒、不触发任何弹出。
+  // 还是重开，都只从顶部「新功能」「新手引导」按钮手动打开
+  // （「指引档案」入口已于 v6.47 删除）。已看标记按编号存本机
+  // （GUIDE_SEEN_IDS_KEY）、已删编号在种子合并 / 当版取用 / 播放
+  // 各处永久过滤（v3.32 规则不变），不会因版本变化或重开复活。
+  // 顶部按钮的未看红点保留，只作提醒、不触发任何弹出。
 
 
   // Unsaved-draft tracking across the two benches: both benches stay
@@ -1276,7 +1185,7 @@ export function App() {
 
       {/* 顶部紧凑导航条（v3.99 布局大改：导航上移，删除左侧宽导航栏）：
           左 = 工作台切换 + 项目选择器；中 = 六个步骤横排标签页（当前
-          步骤电光蓝下划线）；右 = 指引档案 / 生图等次要入口。窄屏时
+          步骤电光蓝下划线）；右 = 生图等次要入口。窄屏时
           标签页整排落到第二行横向滚动、不换行；顶栏常驻不随内容滚动，
           内容区占满剩余全部空间。 */}
       <header
@@ -1387,14 +1296,16 @@ export function App() {
           </nav>
           <div className="ml-auto flex min-w-0 items-center gap-2 lg:ml-0">
 
+            {/* v6.48 「生成视频」：位于原「指引档案」的位置（「生图」
+                之前），点开全页覆盖窗口跑牢络生成平台（videogen.tsx
+                + laoluo/ 平台单元），关闭回到工作台、状态不受影响。 */}
             <button
               type="button"
-              data-tour="guide-archive"
               className="btn btn-sm shrink-0 font-bold"
-              aria-label={`打开指引档案（共 ${guideRecords.length} 条指引，按日期保存）`}
-              onClick={() => { setWhatsNewOpen(false); setGuideArchiveOpen(true); }}
+              aria-label="打开生成视频窗口（牢络生成平台，MiniMax H3 视频生成）"
+              onClick={() => openVideoGenPanel()}
             >
-              指引档案
+              生成视频
             </button>
             <button
               type="button"
@@ -1713,6 +1624,11 @@ export function App() {
           都是它；只手动打开、绝不自动弹，挂载在这里常驻待命。 */}
       <ImageGenPanelHost activeProjectId={activeId} />
 
+      {/* 生成视频全页覆盖窗口（v6.48）：顶栏「生成视频」按钮打开，
+          里面是牢络生成平台（同源 iframe 承载 laoluo/ 平台单元），
+          关闭回到工作台；只手动打开、绝不自动弹，常驻待命。 */}
+      <VideoGenPanelHost />
+
       {/* 左下角悬浮「设置」（v5.88）：常驻左下角，点开向上展开；
           里面是全站唯一一份生图接口总设置（API 地址 + 密钥），
           从生图面板顶部整份搬来，存储与生效顺序不变。 */}
@@ -1731,18 +1647,6 @@ export function App() {
         />
       )}
 
-      {guideArchiveOpen && (
-        <GuideArchivePanel
-          records={guideRecords}
-          seenIds={guideSeenIds}
-          onClose={() => setGuideArchiveOpen(false)}
-          onPlay={playGuide}
-          onSave={saveGuideRecord}
-          onDelete={deleteGuideRecord}
-          onAdd={addGuideRecord}
-        />
-      )}
-
     </div>
   );
 }
@@ -1751,412 +1655,11 @@ export function App() {
 // 未来版首屏总览：只在未来版出现，固定 6 个模块，每个模块都是
 // 现有内容的只读汇总 + 一个进入对应原窗口的按钮，不新增窗口、不改数据。
 /**
- * 指引档案（v3.31）：保存全部新功能指引，按日期倒序分组展示。
- * 每条显示编号 / 日期 / 版本 / 功能名 / 一句话说明 / 步骤数 / 修订号 /
- * 已看未看；点「播放」用同一套聚光灯导览重播；点「编辑」可改标题、
- * 说明与每一步（说明、目标选择器、位置、先切窗口），保存后编号不变、
- * 修订号 +1、修改日期更新，并可立即重播验证；删除走二次确认，编号
- * 删除后不复用；「新增指引」按当天最大序号 +1 自动生成新编号。
- */
-function GuideArchivePanel({
-  records,
-  seenIds,
-  onClose,
-  onPlay,
-  onSave,
-  onDelete,
-  onAdd,
-}: {
-  records: GuideRecord[];
-  seenIds: string[];
-  onClose: () => void;
-  onPlay: (record: GuideRecord) => void;
-  onSave: (record: GuideRecord) => void;
-  onDelete: (record: GuideRecord) => void;
-  onAdd: () => GuideRecord;
-}) {
-  const [editing, setEditing] = useState<GuideRecord | null>(null);
-  const [freshId, setFreshId] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<GuideRecord | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-  // 打开即聚焦面板本身：键盘焦点不丢、屏幕阅读器与自动核对都能
-  // 第一时间定位到这个对话框（v3.32 修复档案面板打开渲染核对）。
-  useEffect(() => {
-    panelRef.current?.focus();
-  }, []);
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !pendingDelete) {
-        if (editing) setEditing(null);
-        else onClose();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [editing, pendingDelete, onClose]);
-
-  // 档案排序（v3.33）：默认按创建时间倒序（最新在前、今天新加的
-  // 在今天分组顶部）；可在顶部切换「最早在前」，选择记本机。
-  // records 进来时已是创建时间倒序（mergeGuideRecords），正序就是
-  // 把同一比较器反过来，不按编号排——编号只用于定位 / 修改。
-  const [sortOrder, setSortOrder] = useState<"desc" | "asc">(() => {
-    try {
-      return window.localStorage.getItem("scriptbench.guideArchiveSort.v1") === "asc"
-        ? "asc"
-        : "desc";
-    } catch {
-      return "desc";
-    }
-  });
-  const applySortOrder = (o: "desc" | "asc") => {
-    setSortOrder(o);
-    try {
-      window.localStorage.setItem("scriptbench.guideArchiveSort.v1", o);
-    } catch {
-      /* private mode */
-    }
-  };
-  const ordered =
-    sortOrder === "desc"
-      ? records
-      : [...records].sort((a, b) => compareGuideCreatedDesc(b, a));
-  const dates = [...new Set(ordered.map((r) => r.date))];
-  // 每组日期的「最新一条是几点加的」（只取真有创建时间的时间）。
-  const latestTimeByDate = new Map<string, string>();
-  for (const d of dates) {
-    const times = ordered
-      .filter((r) => r.date === d && r.createdAt)
-      .map((r) => r.createdAt!.slice(11, 16))
-      .sort();
-    const t = times[times.length - 1];
-    if (t) latestTimeByDate.set(d, t);
-  }
-  const today = new Date().toISOString().slice(0, 10);
-
-  const startEdit = (record: GuideRecord, fresh = false) => {
-    setFreshId(fresh ? record.id : null);
-    setEditing(JSON.parse(JSON.stringify(record)) as GuideRecord);
-  };
-  const saveEdit = (replay: boolean) => {
-    if (!editing) return;
-    const saved: GuideRecord = {
-      ...editing,
-      title: editing.title.trim() || editing.id,
-      rev: freshId === editing.id ? editing.rev : editing.rev + 1,
-      updatedAt: today,
-      steps: editing.steps.map((s) => ({
-        ...s,
-        title: s.title.trim() || "新功能",
-        target: s.target.trim() || '[data-tour="whats-new"]',
-      })),
-    };
-    onSave(saved);
-    setEditing(null);
-    setFreshId(null);
-    if (replay) onPlay(saved);
-  };
-  const patchStep = (i: number, patch: Partial<HighlightStepDef>) => {
-    setEditing((prev) =>
-      prev
-        ? { ...prev, steps: prev.steps.map((s, j) => (j === i ? { ...s, ...patch } : s)) }
-        : prev,
-    );
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-[70] flex items-end justify-center p-3 sm:items-center"
-      style={{ background: "rgba(3, 5, 9, 0.62)", paddingBottom: "max(0.75rem, env(safe-area-inset-bottom))" }}
-      role="dialog"
-      aria-modal="true"
-      aria-label="指引档案"
-      data-guide-archive-panel="true"
-      onClick={onClose}
-    >
-      <div
-        ref={panelRef}
-        tabIndex={-1}
-        className="flex max-h-[92vh] w-full max-w-3xl flex-col overflow-hidden rounded-[14px] border outline-none"
-        style={{ borderColor: "var(--border)", background: "var(--surface)", boxShadow: "var(--shadow-card)" }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex flex-wrap items-center gap-2 border-b p-4" style={{ borderColor: "var(--border)" }}>
-          <div className="min-w-0 flex-1">
-            <p className="font-display text-lg font-bold">指引档案</p>
-            <p className="text-xs leading-5 text-[var(--dim)]">
-              编号规则：ZY-日期-序号（如 ZY-20261026-01），同一功能编号不变，改内容只升修订号 rev；删除后编号不复用。共 {records.length} 条。
-            </p>
-            <p className="text-xs leading-5 text-[var(--dim)]">
-              排序：按时间倒序，最新在前，今天新加的在最顶部（按创建时间排，编号不参与排序）。
-            </p>
-            <div className="seg mt-2" role="group" aria-label="指引档案排序切换">
-              <button
-                type="button"
-                aria-pressed={sortOrder === "desc"}
-                aria-label="指引档案排序：最新在前"
-                onClick={() => applySortOrder("desc")}
-              >
-                最新在前
-              </button>
-              <button
-                type="button"
-                aria-pressed={sortOrder === "asc"}
-                aria-label="指引档案排序：最早在前"
-                onClick={() => applySortOrder("asc")}
-              >
-                最早在前
-              </button>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="新增一条指引（自动生成新编号）"
-            onClick={() => startEdit(onAdd(), true)}
-          >
-            + 新增指引
-          </button>
-          <button type="button" className="btn btn-sm" aria-label="关闭指引档案" onClick={onClose}>
-            关闭
-          </button>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {editing ? (
-            <div aria-label={`编辑指引 ${editing.id}`}>
-              <p className="text-sm font-bold">
-                编辑指引 <span className="tc">{editing.id}</span>
-                <span className="ml-2 text-xs font-medium text-[var(--dim)]">
-                  编号不变 · 保存后修订号 {freshId === editing.id ? `保持 rev${editing.rev}` : `升到 rev${editing.rev + 1}`} · 修改日期更新为 {today}
-                </span>
-              </p>
-              <label className="mt-3 block text-xs font-bold text-[var(--dim)]" htmlFor="guide-edit-title">功能名（标题）</label>
-              <input
-                id="guide-edit-title"
-                className="field mt-1"
-                value={editing.title}
-                onChange={(e) => setEditing({ ...editing, title: e.target.value })}
-              />
-              <label className="mt-3 block text-xs font-bold text-[var(--dim)]" htmlFor="guide-edit-summary">一句话说明</label>
-              <textarea
-                id="guide-edit-summary"
-                className="field mt-1"
-                rows={2}
-                value={editing.summary}
-                onChange={(e) => setEditing({ ...editing, summary: e.target.value })}
-              />
-              <div className="mt-3 flex flex-wrap gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-[var(--dim)]" htmlFor="guide-edit-version">对应版本</label>
-                  <input
-                    id="guide-edit-version"
-                    className="field mt-1 w-28"
-                    value={editing.version}
-                    onChange={(e) => setEditing({ ...editing, version: e.target.value })}
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-[var(--dim)]" htmlFor="guide-edit-date">日期</label>
-                  <input
-                    id="guide-edit-date"
-                    className="field mt-1 w-36"
-                    value={editing.date}
-                    onChange={(e) => setEditing({ ...editing, date: e.target.value })}
-                  />
-                </div>
-              </div>
-              <p className="mt-4 text-sm font-bold">步骤（共 {editing.steps.length} 步）</p>
-              {editing.steps.map((s, i) => (
-                <div key={i} className="mt-2 rounded-[var(--radius)] border p-3" style={{ borderColor: "var(--border)" }}>
-                  <p className="text-xs font-bold text-[var(--dim)]">第 {i + 1} 步</p>
-                  <label className="mt-2 block text-xs font-bold text-[var(--dim)]" htmlFor={`guide-step-title-${i}`}>步骤标题</label>
-                  <input
-                    id={`guide-step-title-${i}`}
-                    className="field mt-1"
-                    value={s.title}
-                    onChange={(e) => patchStep(i, { title: e.target.value })}
-                  />
-                  <label className="mt-2 block text-xs font-bold text-[var(--dim)]" htmlFor={`guide-step-body-${i}`}>步骤说明</label>
-                  <textarea
-                    id={`guide-step-body-${i}`}
-                    className="field mt-1"
-                    rows={3}
-                    value={s.body}
-                    onChange={(e) => patchStep(i, { body: e.target.value })}
-                  />
-                  <label className="mt-2 block text-xs font-bold text-[var(--dim)]" htmlFor={`guide-step-target-${i}`}>目标入口（选择器）</label>
-                  <input
-                    id={`guide-step-target-${i}`}
-                    className="field tc mt-1"
-                    value={s.target}
-                    onChange={(e) => patchStep(i, { target: e.target.value })}
-                  />
-                  <label className="mt-2 block text-xs font-bold text-[var(--dim)]" htmlFor={`guide-step-location-${i}`}>位置说明（目标不在页面时气泡里写明）</label>
-                  <input
-                    id={`guide-step-location-${i}`}
-                    className="field mt-1"
-                    value={s.location}
-                    onChange={(e) => patchStep(i, { location: e.target.value })}
-                  />
-                  <label className="mt-2 block text-xs font-bold text-[var(--dim)]" htmlFor={`guide-step-prepare-${i}`}>播放前先切到</label>
-                  <select
-                    id={`guide-step-prepare-${i}`}
-                    className="field mt-1"
-                    value={s.prepare ?? "none"}
-                    onChange={(e) => patchStep(i, { prepare: e.target.value as HighlightPrepare })}
-                  >
-                    <option value="none">不切换</option>
-                    <option value="review">剧本审查页</option>
-                    <option value="library">人物资产储存库</option>
-                  </select>
-                  {editing.steps.length > 1 && (
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-danger-ghost mt-2"
-                      aria-label={`删除第 ${i + 1} 步`}
-                      onClick={() =>
-                        setEditing({ ...editing, steps: editing.steps.filter((_, j) => j !== i) })
-                      }
-                    >
-                      删除这一步
-                    </button>
-                  )}
-                </div>
-              ))}
-              <button
-                type="button"
-                className="btn btn-sm mt-3"
-                aria-label="给这条指引加一步"
-                onClick={() =>
-                  setEditing({
-                    ...editing,
-                    steps: [
-                      ...editing.steps,
-                      { title: "新功能", body: "", target: '[data-tour="whats-new"]', location: "页面顶部", prepare: "none" },
-                    ],
-                  })
-                }
-              >
-                + 加一步
-              </button>
-              <div className="mt-4 flex flex-wrap justify-end gap-2">
-                <button type="button" className="btn" aria-label="取消编辑指引" onClick={() => { setEditing(null); setFreshId(null); }}>
-                  取消
-                </button>
-                <button type="button" className="btn" aria-label="保存指引修改" onClick={() => saveEdit(false)}>
-                  保存（编号不变）
-                </button>
-                <button type="button" className="btn btn-primary" aria-label="保存指引修改并立即重播验证" onClick={() => saveEdit(true)}>
-                  保存并重播验证
-                </button>
-              </div>
-            </div>
-          ) : records.length === 0 ? (
-            <p className="py-10 text-center text-sm text-[var(--dim)]">
-              档案里还没有指引。点右上角「+ 新增指引」建第一条，编号会自动生成。
-            </p>
-          ) : (
-            dates.map((date) => (
-              <section key={date} aria-label={`${date} 的指引`} className="mb-5">
-                <h3 className="text-sm font-bold" style={{ color: "var(--terra)" }}>
-                  {date}
-                  <span className="ml-2 text-xs font-medium text-[var(--dim)]">
-                    共 {ordered.filter((r) => r.date === date).length} 条
-                    {latestTimeByDate.get(date)
-                      ? ` · 最新一条 ${latestTimeByDate.get(date)} 加的`
-                      : ""}
-                  </span>
-                </h3>
-                <div className="mt-2 flex flex-col gap-2">
-                  {ordered
-                    .filter((r) => r.date === date)
-                    .map((r) => {
-                      const seen = seenIds.includes(r.id);
-                      return (
-                        <article
-                          key={r.id}
-                          className="rounded-[var(--radius)] border p-3"
-                          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-                          aria-label={`指引 ${r.id} ${r.title}`}
-                          data-guide-record={r.id}
-                        >
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="tc text-sm font-bold">{r.id}</span>
-                            <span className="text-xs text-[var(--dim)]">{r.version}</span>
-                            {r.rev > 1 && <span className="text-xs text-[var(--dim)]">rev{r.rev}</span>}
-                            <span
-                              className="chip-check"
-                              data-state={seen ? "ok" : "bad"}
-                              aria-label={seen ? "已看" : "未看"}
-                            >
-                              {seen ? "已看" : "未看"}
-                            </span>
-                            <span className="text-xs text-[var(--dim)]">{r.steps.length} 步{r.createdAt ? ` · ${r.createdAt.slice(11, 16)} 加的` : ""} · 修改于 {r.updatedAt}</span>
-                          </div>
-                          <p className="mt-1 text-base font-bold leading-6">{r.title}</p>
-                          {r.summary && <p className="mt-0.5 text-sm leading-6 text-[var(--dim)]">{r.summary}</p>}
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-primary"
-                              aria-label={`播放指引 ${r.id} ${r.title}`}
-                              onClick={() => onPlay(r)}
-                            >
-                              播放
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-sm"
-                              aria-label={`编辑指引 ${r.id} ${r.title}`}
-                              onClick={() => startEdit(r)}
-                            >
-                              编辑
-                            </button>
-                            <button
-                              type="button"
-                              className="btn btn-sm btn-danger-ghost"
-                              aria-label={`删除指引 ${r.id} ${r.title}`}
-                              onClick={() => setPendingDelete(r)}
-                            >
-                              删除
-                            </button>
-                          </div>
-                        </article>
-                      );
-                    })}
-                </div>
-              </section>
-            ))
-          )}
-        </div>
-      </div>
-      {pendingDelete && (
-        <ConfirmDialog
-          title={`删除指引 ${pendingDelete.id}？`}
-          body={
-            <p>
-              将删除「{pendingDelete.title}」（{pendingDelete.version}，共 {pendingDelete.steps.length} 步）。
-              编号 <span className="tc font-bold">{pendingDelete.id}</span> 删除后不会再被复用，后来的指引会继续往后编号，不留空号误导。删除后这条指引不会再出现在档案里，也不会再被播放或自动弹出（删了就不算未看）；想再要同功能的指引，只能在档案里手动「+ 新增指引」建一条新编号的。删除只影响本机的指引档案，不影响任何功能和项目数据。
-            </p>
-          }
-          confirmLabel="删除这条指引"
-          onConfirm={() => {
-            onDelete(pendingDelete);
-            setPendingDelete(null);
-          }}
-          onCancel={() => setPendingDelete(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-/**
  * 新功能高光引导（Coach Marks）：全屏压暗 + 聚光高亮当前步的真实
  * 入口 + 就近气泡卡。与 BeginnerGuide 分开：那个讲全流程（侧边面板），
  * 这个只讲本版新功能（聚光灯导览）。不锁屏、不强制走完：Esc / 跳过 /
- * × 随时关。v3.57 起从不自动弹，只从顶部「新功能」按钮或指引档案
- * 手动打开（关闭时由 App 的 closeWhatsNew 按编号记已看）。
+ * × 随时关。v3.57 起从不自动弹，只从顶部「新功能」按钮手动打开
+ * （「指引档案」入口已于 v6.47 删除；关闭时由 App 的 closeWhatsNew 按编号记已看）。
  * 每步先 onPrepare 切到目标所在窗口，再轮询定位目标：找到就滚动到
  * 它、加发光描边并挖出聚光洞；1.6 秒内找不到（如没有剧本稿时拍摄
  * 模式卡还没出现）就跳过高光、气泡居中写明位置，绝不指到空白处。
@@ -2419,7 +1922,7 @@ function WhatsNewTour({
             </button>
           )}
           <span className="text-xs leading-5 text-[var(--dim)]">
-            按 Esc 也能关；引导从不自动弹，从「指引档案」可回放任意一条。
+            按 Esc 也能关；引导从不自动弹。
           </span>
         </div>
       </div>
@@ -12566,7 +12069,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v6.21";
+const WORKSPACE_VERSION = "v6.50";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12574,13 +12077,188 @@ const WORKSPACE_CHANGELOG: {
   features: string;
   current?: boolean;
   /** 新功能高光引导的步骤配置（只有 current 条目配）：v3.57 起引导
-   * 不再自动弹；v3.63 起顶部「新功能」按钮已删除，这份配置只留在指引档案里手动回放。 */
+   * 不再自动弹；v3.63 起顶部「新功能」按钮已删除；v6.47 起「指引档案」
+   * 入口与面板也已删除，这份配置随聚光灯导览播放器一并保留在代码里。 */
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
+    version: "v6.50",
+    date: "2026-11-17",
+    current: true,
+    text: "上一版把「生成视频」改成独立地址打开后，你那边刷新了还是加载不出来，而且连报错提示都没见着。这一版先不猜原因，给这个窗口装上了一双眼睛：打开平台的每一步——页面打开、平台脚本启动、界面挂载、真正显示出来——都摆在明面上，卡在哪一步直接写在窗口里，还把抓到的报错和安全拦截一并列出来，下面有「复制全部诊断」按钮，你点一下、把诊断粘到聊天里发我，就能对着它继续查到底卡在哪。另外窗口右上角和诊断面板里都加了「新窗口打开」：点它平台会在一个单独的浏览器窗口里打开，绕开嵌进工作台的这一层——要是新窗口里能打开、嵌着打不开，就说明问题出在嵌入这一层；诊断面板里的「重新挂载」就是原来的重试，点一下重新打开一次。这版交付的是「让问题看得见」的工具，还不能说已经修好：你点开「生成视频」，平台出来了就正常用；要是出来的是诊断面板，把诊断复制发我，再点「新窗口打开」看看能不能单独打开。",
+    features: "「生成视频」加载诊断版（v6.50，用户主聊直派，无 flor 编号，用户已点头按其 ChatGPT 对话里 GPT 的办法修：加载过程可观测 + 独立新窗口备用入口；纯客户端 laoluo/diagnostics.js 新增 + laoluo/prepare.mjs 注入 + laoluo/platform.html 重新生成 + videogen.tsx wrapper 诊断面板与新窗口入口 + laoluo/README.md 同步 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证提交真实生成任务；本版交付的是让问题看得见的诊断工具，不声称已修好真机加载失败）：【背景】v6.49 改独立文档地址后用户 2026-11-17 21:02 真机回报刷新后依旧加载不出来、且未见到 v6.49 的错误提示层；GPT 结论：换独立地址只解决 srcDoc 继承 CSP 一处，父页面 frame-src、子页面 frame-ancestors/X-Frame-Options、平台自身 CSP、sandbox、静态资源返回、JS 启动异常、存储分区都还可能拦，最优先把加载过程做成可观测（子页面分阶段上报 + 窗口内可见诊断面板 + securitypolicyviolation 捕获），另加独立新窗口备用入口绕开 iframe；响应头是 Muse 平台定的、工作台侧改不了，本版只做工作台代码内能做的三件事。【一、子页面诊断上报】新增 client/src/laoluo/diagnostics.js（工作台侧工具、非平台本体）：prepare.mjs 生成 platform.html 时把它以内联 <script> 注入 <head> 末尾、跑在平台主程序之前（注入后实测：去掉注入块，产物与 source.html 逐字节一致；DEFAULT_TOKEN 强制置空保险与找不到赋值报错停下不变）。脚本职责：捕获 window.onerror（带 message/文件名/行列）与 unhandledrejection；监听子页面 document 的 securitypolicyviolation（带指令与被拦地址）；localStorage 探查（只写自己的测试键 __laoluo_diag_probe__ 随即删除、不读任何业务数据）；上报 boot（存储探查结果/视口/UA/路径）；每 500ms 轮询观测平台根节点 #app（只看存在/子节点数/尺寸等通用结构，不依赖平台内部类名文案），确认渲染后上报 app-ready，20 秒未渲染上报 render-timeout 带最后观测状态。postMessage 固定 channel laoluo-diag + build v6.50，父页面校验 event.source（必须是本 iframe 的 contentWindow）与 event.origin（工作台自身来源或平台资源来源）后才采信。【注入方式与理由】选内联注入、不用外联 script src：platform.html 打包后是带内容哈希的 assets 资源（platform-<hash>.html），外联诊断文件同理会被打包器改成哈希名，而 prepare.mjs 在打包之前运行、算不出哈希，写进 platform.html 的相对地址必然对不上、迟早 404——内联是这条构建管线里唯一可重复的做法。若平台文档自身 CSP 连内联脚本都拦，诊断脚本同样跑不起来，但「iframe 已导航、boot 没到」本身就是 wrapper 能判读的明确信号（平台主程序同为内联脚本、同命），面板照实显示卡在该阶段。【二、wrapper 诊断面板】videogen.tsx：加载拆成四阶段显示（1 iframe 导航 load 事件 → 2 诊断脚本 boot → 3 挂载观测（wrapper 每 500ms 直读同源 #app 状态 + 子页面观测，两路并行）→ 4 app-ready 渲染确认）；未确认渲染时窗口内显示诊断面板：各阶段状态（已触发/进行中/未确认）、最后到达阶段、捕获到的报错与 CSP 违规（子页面上报 + 父页面 document 的 securitypolicyviolation 监听两路，frame-src 等父页面拦截也能记下）、环境信息（带 build 缓存戳的 iframe 地址、浏览器 UA、协议、诊断 build 号）。面板由 wrapper 自己的 setTimeout 硬截止驱动（挂载后 15 秒未确认渲染必转面板），不依赖 iframe 的任何事件——专堵 v6.49 错误层在真机没出现的缺口；iframe onError 不再作为失败判据（浏览器通常不派发）。面板三按钮：复制全部诊断（拼纯文本：阶段/最后阶段/报错/CSP/环境，navigator.clipboard 优先、失败退回临时文本框复制，再失败提示截图）、重新挂载（attempt 自增重挂 iframe、诊断状态清零）、新窗口打开。平台确认渲染后面板与加载层自动消失；原有加载提示、Esc、滚动锁、保活（首次打开后保持挂载只切可见性）全部保留；子页面 window.onerror 的 wrapper 直挂监听保留为并行兜底一路。【三、新窗口备用入口】覆盖窗头部（关闭按钮左侧）加「新窗口打开」按钮，诊断面板里同名按钮一个：在用户点击手势里 window.open(同一带缓存戳的平台地址, _blank, noopener)，绕开 iframe 嵌入限制，既是备用入口也是诊断手段；打开后不改变工作台状态。【保持不动】平台本体 source.html 一字未动；可替换结构不破坏（换 source.html → 跑 prepare.mjs → 重建验证 → 上线，prepare 现自动多做诊断注入一步、README 已同步）；Token 强制置空保险、密钥对话框与 llpub-* 存取逻辑、演示模式一字未动。【不动】五个现有工作台的页面/数据/模型调用逻辑一字未动；监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层（资源仍全在 client/src 内）。基线升 v6.50（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：①点开「生成视频」：平台出来了就正常用；如出现诊断面板，把诊断信息复制发来或截图，再点「新窗口打开」看平台能不能单独打开；②诊断面板出现时点「重新挂载」看能否加载出来；③平台能打开后建卡绑图、填自己的 autodl Token 与 DeepSeek Key 亲手跑一次真生成。",
+  },
+  {
+    version: "v6.49",
+    date: "2026-11-17",
+    text: "这一版修好了「生成视频」窗口打开一片黑的问题。原因是装平台的方式不对：之前是把平台整个网页塞进窗口里嵌着打开，工作台页面自带的一条安全规矩（不让嵌在里面的网页直接跑自带脚本）把平台的脚本整段拦下了，平台界面就一直出不来，只剩它自己的黑底——窗口头是好的、里面全黑，就是你截图里那样。这一版换成给平台一个自己的独立地址打开，这条规矩就管不到它了，画布、卡片、工具栏都会正常出来。另外加了一个兜底：以后万一平台没能打开，窗口里会直接写清楚出了什么问题，下面带「重试」按钮点一下重新打开，不会再是一片黑、什么都不说。平台本身、密钥填法、演示模式都没动。真机等你验：点开「生成视频」看画布和卡片是不是都出来了，再顺手建张卡绑张图、填上你自己的两个密钥亲手跑一次真生成。",
+    features: "修复「生成视频」覆盖窗内容区全黑（v6.49，用户主聊直派，无 flor 编号，用户 2026-11-17 20:36 真机截图：Windows Chrome 打开已上线 v6.48 点「生成视频」，头部标题/副标题/关闭按钮正常、内容区全黑，刷新重开仍黑；纯客户端 videogen.tsx wrapper 承载方式更换 + laoluo/prepare.mjs 与 platform 产物形式更换 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证提交真实生成任务）：【根因（实测复现，非猜测）】v6.48 用 iframe srcDoc 把整份平台 HTML 当字符串塞进 iframe——srcDoc 文档按浏览器规范继承宿主文档（工作台页面）的内容安全策略（CSP）；线上工作台页面的 script-src 不允许内联脚本（工作台自己的脚本都是外链文件，所以工作台本身不受影响、五台全正常），平台唯一的那段内联 <script> 被整段拦下，平台 #app 永远渲染不出来，窗口里只剩平台 body 的 #0a0a0a 黑底。构建方在本机用与线上同版本 Chromium 做了对照实验并留证：给承载页加上 script-src 'self' 'nonce-…'（只放行承载页自己的脚本）后，srcDoc 里的平台脚本被拦、控制台报错为「Executing inline script violates the following Content Security Policy directive 'script-src 'self' 'nonce-testnonce123''. Either the 'unsafe-inline' keyword, a hash ('sha256-QHvlyufvO7hqiGbFAMo7fpp+oylvcK0dNT5qSeDWuY8='), or a nonce ('nonce-...') is required to enable inline execution. The action has been blocked.」（url=about:srcdoc，nonce 与 hash 为实验页自设值），#app 子节点数为 0、截图与用户真机一样头部正常内容全黑；不加这条 CSP 时同一份字符串渲染完整。【沙箱与真机矛盾的解释】沙箱审计走的是守护进程直供页面、没有线上那条 CSP，所以 v6.48 探针截图里平台是完整渲染的——代码同一份、页面响应头不同，仅此而已；上一单「探针进不了 iframe 内部」的缺口也因此没能提前发现。【其余嫌疑逐一实测排除】①iframe sandbox 属性：现行 wrapper 根本没给 iframe 加 sandbox；实验里给平台 iframe 加 sandbox=allow-scripts（无 allow-same-origin）、以及外层 iframe 加同款 sandbox 形成不透明源双层嵌套，平台照样完整渲染（平台对 localStorage/IndexedDB 的访问全有 try/catch 兜底）；②localStorage/IndexedDB 在嵌套里抛错：同上，抛错被平台自己的兜底接住、不影响渲染；③srcDoc 字符串转义/截断：v6.48 已验转换往返逐字节一致，本轮对照实验用同一份字符串渲染成功，排除；④平台访问 top/parent：平台源码全文无 window.top/window.parent 访问，排除；⑤iframe 尺寸/显隐：用户截图里覆盖窗与头部尺寸正常、iframe 是 flex-1 满高，排除。【修法（根因层）】承载方式由 srcDoc 字符串改为独立文档地址：prepare.mjs 改为输出 platform.html（仍只做 DEFAULT_TOKEN 强制置空一件事、其余字节与 source.html 原样一致；本版实测源与产物逐字节相同、因原件 Token 本就为空），打包时经 Bun 文件资源导入（videogen.tsx 以 import … with { type: \"file\" } 引用，bun-types 把该导入标成 HTMLBundle、按运行时实际值收口为地址字符串）作为 assets 静态资源发出，iframe 改用 src 指向该地址——独立文档只受自己响应头的策略约束，不再继承工作台页面 CSP。对照实验同证：blob: 地址创建的文档同样继承创建者 CSP（加 CSP 时一样黑）不可用；src 独立地址在同一 CSP 承载页下渲染完整。【防黑屏兜底（硬性要求已落地）】wrapper 新增三件：①渲染确认轮询——iframe 挂载后每 500ms 查平台文档 #app 是否已有子节点，渲染出来才算打开成功，12 秒到期仍为空转错误态；②错误捕获——iframe onLoad 时给平台 window 挂 error / unhandledrejection 监听，报错全文写控制台（前缀 [生成视频]），渲染成功前报错直接转错误态并把错误信息写进提示，成功后的报错只记控制台不打断使用；③错误界面——覆盖窗内容区显示大白话说明 + 具体错误信息 + 「重试」按钮（点按重新挂载 iframe、attempt 自增），加载中另有「正在打开生成平台…」提示层，任何情况下不留静默黑屏。【保持不动】平台本体 source.html 一字未动（仍是单一独立单元）；密钥对话框与 localStorage（llpub-*）存取逻辑、演示模式逻辑一字未动；Token 剥离保险（prepare.mjs 找不到 DEFAULT_TOKEN 赋值语句仍报错停下）不动；替换流程仍是「换 source.html → 跑 prepare.mjs → 重建验证 → 上线」，README 已同步改写（产物由 platform.ts 改为 platform.html、承载由 srcDoc 改为独立文档地址并写明原因）；旧产物 platform.ts 已删除。iframe 首次打开后保持挂载只切可见性、顶栏按钮/打开总线/头部/关闭/Esc/锁背景滚动全部照旧。【不动】五个现有工作台的页面/数据/模型调用逻辑一字未动；监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层（平台资源仍全在 client/src 内、exe 同步可原样带走）；不提交生图、不用用户凭证。基线升 v6.49（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：点开「生成视频」确认平台界面（画布/卡片/工具栏/设置）真正出来、建卡绑图确认交互、填自己的 autodl Token 与 DeepSeek Key 亲手跑一次真实生成确认出视频与下载正常。",
+  },
+  {
+    version: "v6.48",
+    date: "2026-11-17",
+    text: "这一版在顶栏加了「生成视频」按钮，就在原来「指引档案」的位置、「生图」左边。点开是一个全页窗口，里面就是牢络生成平台：画布上摆卡片、拉连线把参考图和参考音频绑到角色和场景上、写描述词、挑分辨率和时长、点生成出 MiniMax H3 视频，历史记录、播放、下载都在里面，关掉窗口就回到工作台，工作台里做到一半的事一点不受影响。密钥各填各的：平台右上角「密钥」里，autodl Token 和 DeepSeek Key 自己填自己的，只存在你这台电脑的浏览器里，不进工作台的数据库、也不进备份；你发来的这个公开版文件里，默认 Token 的位置本来就是空的，接入时又加了一道保险：以后每次换新版打包，都会再强制清空一次，永远不会带上别人的 Token；没填 Token 的时候是演示模式，只走一遍流程、不出真视频、不花钱。真机等你验：填上你自己的 Token 和 Key，亲手跑一次真实生成，确认能出视频、历史和下载都正常。",
+    features: "顶栏新增「生成视频」接入牢络生成平台（v6.48，用户主聊直派，无 flor 编号，用户 2026-11-17 20:11 发来单文件「牢络生成平台公开版 · 优化 v2（LibTV 贝塞尔连线）」、20:13 确认要接进工作台且后续生成视频在工作台里跑；纯客户端新增 laoluo/ 平台单元 + videogen.tsx wrapper + App.tsx 顶栏按钮与挂载 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证提交真实生成任务）：【接入方式】选 B（iframe 承载）：平台原件大量用内联事件属性与全局函数、直接操作自己的 document，且有 html/body 级全局样式——放进同源 iframe（srcDoc）后功能原样工作、样式只作用于 iframe 内部、JS 只碰自己的 document，工作台五个台的外观与状态零影响；srcDoc 与工作台同源，平台的 localStorage（llpub-* 键名一字未改）、IndexedDB（ll-platform-pub 素材库）、下载与剪贴板均正常；autodl 与 DeepSeek 跨域预检已由主代理亲测放行、浏览器直连、不需要服务端代理。【可替换结构】平台本体保持单一独立单元：client/src/laoluo/source.html 是接入副本（与用户原件逐字节一致），构建期转换脚本 client/src/laoluo/prepare.mjs 读它生成 platform.ts（导出整份 HTML 字符串），wrapper videogen.tsx 只管顶栏按钮总线 openVideoGenPanel（与 openImageGenPanel 同制式）、全页覆盖窗口（fixed inset-0 z-[96]、顶部一条 wrapper 栏带「关闭」按钮、打开锁背景滚动、Esc 可关、首次打开后保持挂载只切可见性，平台里在跑的演示/轮询不因关窗中断）、同源 iframe 承载；替换流程写在 laoluo/README.md：用户发新版文件 → 覆盖 source.html → 跑 prepare.mjs → 重建验证（演示模式＋数据回读）→ 上线，替换时不动工作台其他代码。【密钥处理】内嵌默认 Token 已移除（实读原件：DEFAULT_TOKEN 常量当前值长度为 0、公开版已置空，全文另扫 JWT/sk- 形态与 ≥28 位裸字面量零命中）：转换脚本 prepare.mjs 每次转换仍把 DEFAULT_TOKEN 的值强制替换为空字符串（幂等、可重复，新版文件带了值也会被剥掉；找不到该赋值语句时脚本报错停下提醒人工核对），任何 Token 值不出现在代码/注释/日志/备份里；密钥对话框与 localStorage 存取逻辑与原件一字未动，用户第一次打开时在平台右上角「密钥」里填自己的 autodl Token 与 DeepSeek Key、各管各、只存本机；演示模式逻辑不动（无 Token 点生成只走演示流程、不出真视频）。【平台功能原样保留】画布＋卡片＋贝塞尔连线（拖拽/缩放适配/右键菜单/双击传图/F 适配）、四线并行、角色卡/场景卡与参考图（最多 9 张）/参考音频（最多 3 段）绑定（右键绑定/拖拽绑定/一键绑定/未绑定提醒）、提示词描述框、分辨率六档（768p/480p × 横/竖/1:1）、时长、种子、DeepSeek 一键转写（deepseek-flash 多模态、六段式 H3 改写、应用到描述框；没填 Key 时退回复制请求到任意 AI 助手）、提交 autodl.art 的 ComfyUI 工作流 minimax_h3_zm_u24、3 秒轮询取结果、历史记录/播放/下载视频/复制素材、密钥对话框。【顶栏落点】「生成视频」按钮（btn btn-sm、aria-label 写明打开生成视频窗口）加在顶栏右侧原「指引档案」位置、「生图」按钮之前，两者相邻、无多余空白；VideoGenPanelHost 常驻挂载在 ImageGenPanelHost 旁。【不动】五个现有工作台的页面/数据/模型调用逻辑一字未动；监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层（平台资源全在 client/src 内、exe 同步可原样带走）；不提交生图、不用用户凭证。基线升 v6.48（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：填自己的 autodl Token 与 DeepSeek Key 后亲手跑一次真实生成，确认出视频、历史与下载正常；打开覆盖窗看画布与卡片、关窗回工作台确认状态无恙。",
+  },
+  {
+    version: "v6.47",
+    date: "2026-11-17",
+    text: "这一版只做一件事：把顶栏的「指引档案」删掉。你截图里红箭头指的那个按钮已经不在了，点开后的那个档案窗口也一并下线——里面按日期分组的指引列表、最新/最早排序切换、每条指引的播放、编辑、删除、新增，都跟着删干净；原来的位置不留空位、不留占位文字，「生图」按钮直接挨过来，顶栏其他入口一个没动，五个工作台和所有页面照常。删的只是这个入口和窗口：指引的记录本身、你在本机改过和删过的指引状态、看没看过的记录，都原样留在本机没清、没改；那个聚光灯高光导览播放器也还留着，只是现在顶栏上没有能打开它的按钮了（「新功能」按钮早在之前的版本里就已经删掉，这次没有把它加回来）。打包备份和导入备份一点没变：以前导出的备份包照样能导入，不会报错。你后面要放到这个位置的那个 HTML 生成视频平台，等你把文件发过来再单独做，这一版不留占位。真机等你验：打开工作台看一眼顶栏，确认「指引档案」没了、「生图」还在、其他页面都能照常打开使用。",
+    features: "删除顶栏「指引档案」入口及档案面板（v6.47，用户主聊直派，无 flor 编号，用户 2026-11-17 18:06 发顶栏截图、红箭头指「指引档案」按钮下令删除；纯客户端 App.tsx 删除 + backup.tsx / replication.ts 说明文字同步 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删了什么】①顶栏「指引档案」按钮（data-tour=guide-archive，原位于顶栏右侧、「生图」按钮之前；按钮上没有未看红点，红点逻辑早随 v3.63「新功能」按钮删除而不存在，无红点残留）；②指引档案面板 GuideArchivePanel 整体（按日期倒序分组列表、最新在前/最早在前排序切换 scriptbench.guideArchiveSort.v1 的读写、条目播放/编辑/删除二次确认/+ 新增指引）及其在 App 里的渲染挂载；③只被面板引用的死代码：guideArchiveOpen 状态、saveGuideRecord / deleteGuideRecord / addGuideRecord / playGuide 四个处理函数、nextGuideId 编号生成、saveGuideArchiveStore 写回函数、setGuideStore / setActiveGuideId / guideSeenIds 读值（状态本体与本机记账保留、只去掉无人再读的解构项）。【留了什么·行为不动】①聚光灯导览播放器 WhatsNewTour 组件与挂载渲染、closeWhatsNew / markGuideSeen / prepareWhatsNew 全部保留；②种子指引 GUIDE_SEED_RECORDS 与 CURRENT_GUIDE_ID、mergeGuideRecords 合并与已删过滤、loadGuideSeenIds 已看迁移逻辑保留（当版指引取用口径不变）；③localStorage 键 scriptbench.guideArchive.v1 / scriptbench.guideSeenIds.v1 / scriptbench.whatsNewSeenVersion 不删、不清、不改名，本机存量覆盖层与已看数据原样；④打包备份/导入备份包格式与行为一字未动：LOCAL_SETTING_KEYS 白名单仍含指引三键与排序键，旧包（含指引档案状态）导入照常写回、不报错不拦包，只改了 backup.tsx 打包说明与导入注释里提到已删入口的文字；⑤WORKSPACE_CHANGELOG 历史条目原文一字未改；⑥replication.ts 规格同步：顶栏布局两处改「右生图/版本号」、「指引档案」功能规则条目改写为「已于 v6.47 删除，复刻时不要加回来」并写明保留的底层数据、验收清单布局行与本机状态行同步。【现状说明】现行顶栏本就没有「新功能」按钮（v3.63 已删除），指引回放此前只剩档案面板一条入口；本版删面板后播放器暂无界面入口，按 brief 口径不复活「新功能」按钮、播放器与种子/已看逻辑原样保留待后续（用户将在原位置放 HTML 生成视频平台，另立单）。导览气泡底部原有一句「从指引档案可回放任意一条」已随删除改为只写「引导从不自动弹」。种子指引里三条讲指引档案本身的历史指引（ZY-20261026-07/08/09）与页底回归清单里的指引档案分组条目属历史记录，按 brief 保留原文不动。【不动】监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层；不提交生图、不用用户凭证。基线升 v6.47（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：打开工作台看顶栏确认「指引档案」消失、「封面」「生图」相邻正常、无多余空白；导入一个旧备份包确认不报错。",
+  },
+  {
+    version: "v6.46",
+    date: "2026-11-17",
+    text: "这一版改的是监控页的一个老毛病：同一条视频被扩展重复上报时，以前只会换一下链接，点赞数和播放量一直停在第一次入库时的数字、不跟着涨——你截图那轮 48 条里，23 张只换了链接、13 张什么都没动，两拨的点赞播放都没更新。现在补上了：重复上报时，除了链接照旧刷新，点赞和播放也会跟着更新，但有个规矩——只往上涨、不往下降：新报上来的数比卡上现有的大才写进去；报上来的是 0、是空的、或者比现有的小，一律不动，不会拿旧数把新数盖掉。卡片的标题、描述、发布时间这些还是不动，也不会重复建卡；删过的视频照样不会被上报建回来。上报完成的那句提示也多了一类计数：链接没变、只是点赞播放涨了的，会单独报一句「更新数据 X 张」，比如「收到扩展上报 48 条，新建卡 12 张，刷新链接 23 张，更新数据 5 张，跳过 8 张重复」；没有这类更新时，提示跟以前一字一样。Excel 导入和手动获取走的是同一条路，重复导入时点赞播放也会同样只升不降地更新。真机等你验：等扩展下一次上报后，看老卡片的点赞播放有没有跟着涨、上报提示里有没有「更新数据」那一段。",
+    features: "重复上报也更新点赞和播放量（v6.46，用户主聊直派，无 flor 编号，用户 2026-11-17 17:19 发监控页截图问「重复的会不会更新点赞和播放量」、主代理核实旧行为后用户 17:21 点选「改，重复上报也更新点赞和播放」；服务端 actions.ts 的 fetchMonitorVideo duplicated 分支 + 回执字段 + 客户端 monitorbench.tsx intake 计数与 toast + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【背景】v6.45 之前 duplicated 分支只更新视频文件链接 / 封面链接 / 视频链接三个字段（入参非空且与现值不同才写），描述 / 点赞 / 播放 / 发布时间等其余字段一律不动；扩展每次上报都带了最新点赞播放，只是服务端没往库里写。用户截图那轮 48 条＝新建 12＋刷新链接 23＋跳过 13，两拨的点赞播放都没更新。【1·服务端】duplicated 分支新增 countsPatch：入参 likeCount / playCount 是大于 0 的数字且大于现值时才写进库（取大口径：只升不降），入参为空 / 为 0 / 小于等于现值一律不动；与 linkPatch 合并成一次 update 写库。回执新增 countsUpdated（本次是否更新了点赞/播放），updated 口径不变（只指链接）。其余字段（描述、发布时间、时长、达人信息等）继续一律不动；不建新卡；删除墓碑分支一字未动（命中墓碑照样跳过、一个字不写）；v6.21 到货状态口径不动（重复上报不算到货，lastCollectedAt / lastCollectStatus 不写）。【2·客户端】intake 计数新增一类：duplicated 且 updated 计「刷新链接」（原口径不变，链接与数据同时更新也只计这一类、不重复计）；链接没更新、只 countsUpdated 时计「更新数据」；两者都没更新才计「跳过重复」。toast 改为按段拼装：「刷新链接」段与「更新数据」段都只在大于 0 时出现，两段都为 0 时与原 toast 一字一样；四类数（新建＋刷新链接＋更新数据＋跳过）之和等于上报总条数。【3·不动】refreshMonitorVideoLinks 动作未动（_refreshVideoId 回程只带 id + 链接、没有点赞播放可更新）；Excel 导入、手动「获取」走同一 duplicated 分支，行为自动一致、未另改；监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层；不提交生图、不用用户凭证。基线升 v6.46（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：扩展下一次真实上报后看老卡点赞播放是否跟着涨、toast 是否出现「更新数据」段且四类数之和等于总条数。",
+  },
+  {
+    version: "v6.45",
+    date: "2026-11-17",
+    text: "这一版把分镜页 MiniMax H3 两版提示词的拼法，整体对齐你定的 H3 技能标准（六段式中文规范）。本来就合标准的没动：六段顺序和英文段名、定义句「<Subject N> 是 <Picture N> 中的……」的句式、保留段里每人出场的镜头和正文逐镜对得上、台词写成 <d>[Chinese] 原文</d> 逐字照搬、多人齐声用一个复合编号 (S1,S2)、运镜用英文词、每镜一个主要动作配一个能停住的结束姿态、没有配乐就写 N/A。这次改了四处对不上的：一是音色原来接在定义句末尾，现在改成紧跟在每个人的定义句后面单独成一行——技能里那句英文音色参考句是给真有音频文件时用的，工作台里音色是文字、没有音频文件，就没有硬编一个不存在的音频编号，这条怎么处理留给你定夺；二是切镜后的停顿垫字以前只有上一镜留了结尾画面时才写，现在每一镜（第一镜除外）都先写「先停顿约半秒，再开始本镜的主要动作」，再出对白；三是没有台词的镜头，环境音那段不再假称「对白清楚」，改成写明这一镜没人说话、只有环境底噪；四是保留段里参考图那一行的说法小调了一下。分镜页 H3 区顶部的说明文字也跟着改成了新口径。切分镜头的规矩一点没变：按剧情版还是一拍一镜、10–15 秒版还是攒够 10 秒逢转折点换镜、同一个动作没做完不切；台词、镜数、时间码、身高锚点、人物锁定都照旧。技能里有几条和工作台现行规矩对不上的（比如技能要求单段 4–15 秒、每镜 2.5 秒起步，和一拍一镜对不上；一句台词跨切才用的标记，工作台的节拍里不会出现这种情况），这次按「切分不动、写法贴技能」处理，逐条列在回执里等你定夺。这一版没有提交任何生图或视频生成。真机等你亲验：打开项目 49 或 46 的分镜页，展开 H3 任一镜头，看定义段里音色是不是单独一行、第二镜起正文是不是先停顿再出对白。",
+    features: "H3 两版拼装严格对齐 minimax-h3-zh-prompt 技能标准（v6.45，用户主聊直派，无 flor 编号，用户 2026-11-17 发分镜页截图指 H3 区、原话「以后我们的minimaxh3就严格按照这样的规则标准去写」；纯客户端 scriptlib.ts 的 buildH3TextForGroup 拼装文字四处 + App.tsx 分镜页 H3 区顶部说明文字一处 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【逐条对齐清单·原本已符合、保留不动】六段固定顺序与英文段名、段间空一行；定义句「<Subject N> 是 <Picture N> 中的{身份首段}，{canonical 造型}。」句式（无资产图不写 <Picture N>、不虚构）；summary 以 [reference generation] 开头写成片目标（含时长、不新开参考标签，从不用 [text to video]）；retention_analysis 的「<Subject N> (appears in [Shot N], …): fully_preserved - …」格式、appears in 与正文实际 [Shot N] 同源计算＋正文并集兜底、本段不写 (Sx)；detailed_description 风格开场在 [Shot 1] 之前、[Shot 1] 不带时间、第 2 镜起 At MM:SS.mmm 切点且小于总时长；台词结构 = 主体标签 + (Sx) + 中文发声动词（语气在 <d> 外、emotion 确定性映射）+ <d>[Chinese] 台词原文</d>，(Sx) 按发声顺序编号全程复用；齐声 = 多个主体标签以「和」连接 + 复合编号 (S1,S2) + 齐声说出；运镜英文枚举不翻译（Push In / Static Shot 等、认不出回 Static Shot）；无故不标 off-screen（认不到主体的说话人按剧本原名引用不断台词）；每拍一个主要动作、一个运镜、一个能停住的结束姿态（末帧句 / 停住类词 / 通用停住句三级口径）；overall_soundscape 同一地点连续底噪＋同步拟音汇总、不写配乐不重复台词；non_diegetic_music 恒 N/A。【改了四处】①音色单独成行：subject_definitions 里音色不再以「音色是{音色}。」接在定义句尾，改为紧跟该人物定义句单独一行「<Subject N> 的音色：{音色原文}。」；身高锚点仍原样追加在定义句末尾（在音色行之前落位，v6.12 口径不变）。②切镜垫字补齐：第 2 拍起恒写「先停顿约半秒，再开始本镜的主要动作。」（上一拍有末帧文本时承接句在前、停顿句紧跟其后；原来只有上一拍有末帧文本时才写停顿句），台词永不做一镜第一句。③环境音：底噪句「切镜时不断」改「换镜头时底噪不断」；本镜头无任何台词时不再写「对白贴近、清楚，带一点现场的自然回声。」，改写「本镜头无人说话，只有环境底噪持续。」（沉默写出来、不假称有对白）。④retention 的 <Picture N> 行角色说明由「(人物 <Subject N> 的参考图)」改「(<Subject N> 的人物参考图)」（技能口径：Picture 行写它担任的角色、不写 appears in；本台图是人物参考图而非首帧，不写「首帧」）。【页面说明】分镜页「MiniMax H3 提示词（两版）」节首段说明按改后口径重写（六段标准、定义句句式、音色单独成行、appears in 对正文、切镜垫字、齐声复合编号、连续底噪、无台词写明安静、配乐 N/A），两版各自的版说明（切分口径）一字未动。【张力点（切分与硬规则优先、写法贴技能，待用户定夺）】(1) 技能时长镜数表（单段 4.0–15.0 秒、每镜 2.5–4.0 秒、禁止 1 秒碎切、4–15 秒最多 5 镜）vs 工作台一拍一镜（单拍可短于 2.5 秒）与按剧情版整段成段（一段可超 15 秒、[Shot] 数可多于 5）：切分逻辑按 brief 保留不动。(2) 音色参考句：技能是给真实音频素材的英文整句「<Audio N> is the voice-timbre reference for <Subject M> (Sx). …」，工作台无音频素材、音色为中文文字——不虚构 <Audio N>（技能硬约束：只能引用实际提供的素材序号）、不机翻用户文字，故只做到单独成行＋中文原文。(3) <scenetrans> / <cutoff>：触发条件（一句台词跨切、台词在结尾被截断）在节拍数据模型里不出现（一拍一句完整台词、从不拆句跨镜、无截断标记字段），不虚构标记（与 v6.12 结论一致、本版按技能原文复核后维持）。(4) 每镜光线：技能要求逐镜写光源与相对镜头方向，节拍数据无逐镜光源字段，只保留开场场景句「同一场光线方向保持一致」＋ summary 全片光向不变句（v6.12 口径），不编窗光方向。(5) 台词标点：技能允许补句末 . ? !，「台词一字不差」硬规则优先、逐字保留不补。(6) 技能外叠加的硬规则保留：retention 场景行（无标签行、带光线方向保持不变）、summary 末尾身高／站位／光线不变句、逐拍尺度锁句与平视机位句、人物锁定与全局头口径。(7) 技能「信息量 350–500 词」：模板化拼装由项目数据决定，不为凑词数编造。【不动】分镜切分逻辑（按剧情版一拍一镜不删不并、10–15 秒版攒够 10 秒逢转折点换镜／满 15 秒兜底／动作链整段同进同出）、镜数与时间码、Seedance 三版、通用版、导出、剧本与台词原文、人物—参考图按出场顺序绑定、每镜头总时长与单次上限显示；监控数据、DISSECT_CHAT_RULES、预设库、下载任务、3 天清理与清除下限、封面／项目／分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层；不提交生图、不用用户凭证。基线升 v6.45（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE + H3 规则④改音色行口径并补⑨、DATA-PLAN 本条）。真机待核：项目 49 / 46 分镜页展开 H3 两版逐镜核对定义段音色行、切镜垫字、齐声编号与配乐段；真实 H3 生成须用户亲手在桌面端粘贴提交。",
+  },
+  {
+    version: "v6.44",
+    date: "2026-11-17",
+    text: "这一版只修了一处看不见的代码小毛病，页面长相、功能、数据全没变。昨晚工作台往电脑版（exe）同步时，自动检查在监控页的代码里挑出一处类型对不上：扩展上报新视频建卡的那一下，少带了一个「平台」信息——工作台自己这边检查不出来（这边按宽松口径查、服务端也有默认值兜底，一直能正常跑），但电脑版那边按严格口径查就过不去，同步只能停下。这一版把这个信息补上：上报时本来就会先算出这条视频是快手还是抖音，现在把算好的结果顺手带给建卡那一步。监控页打开、卡片显示、筛选排序都跟以前一模一样，今晚同步可以接着往下走。",
+    features: "修复监控页 intake 调用点类型错（v6.44，用户主聊直派，无 flor 编号，用户 2026-11-17 亲选「修好这 1 处，今晚同步」；纯客户端 monitorbench.tsx 的 mapIntakeRow 返回值补 platform 字段一处 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无界面/行为/文案变更；NO real image/video generation submitted）：【背景】2026-11-16 22:00 每日 exe 同步卡在客户端类型检查，共 4 处错全在 monitorbench.tsx：3 处未用入参（v6.30 删卡片第二排后 onRefresh/refreshing/refreshFailed 只解构不读取）已于 v6.43 顺手改下划线别名修掉（本版实读代码核实三处别名在位）；剩第 4 处——intake 回调调 api.fetchMonitorVideo({...mapIntakeRow(row, p.platform), fromIntake: true}) 缺 platform。根因：本工作台 SDK 客户端按 zod input 口径给请求定型（.default 字段可省），本地 bun run typecheck 两路（client/server）全量跑均干净、照不出这一处；exe 移植工程按 zod output（z.infer）口径，platform 必传才报 TS2345。本版在沙箱用临时验证文件按 output 口径单独验这一处：修前复现出同类错误原文（TS2741: Property 'platform' is missing in type '{ fromIntake: true; ...; isPinned: number | undefined; }' but required in type '{ ...; platform: string; ... }'，与同步证据的 TS2345 同因同位），修后干净；临时验证文件验完即删、未进构建产物。【改法】按 brief 二选一取「mapIntakeRow 返回值补字段」：该函数内部本已用同一原始值算出归一化 platform（douyin/kuaishou/xiaohongshu/空）拼链接，返回值新增 platform 一项，intake 调用点展开后自然带上；调用点本身、服务端 schema 与 handler 一字未动。服务端拿到后仍走 normalizeMonitorPlatform 自行归一化（认 douyin/kuaishou，认不出再按域名推断、默认快手），与此前不传时走 .default(\"\") 再推断的结果等价；xiaohongshu/空仍走域名推断，与旧行为一致。【验证】修后 bun run typecheck 两路退出码 0 无输出；output 口径临时验证修前 1 错、修后 0 错。electron 路本工作台无此工程、跑不了，留今晚同步流程在移植工程内复验。【不动】监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层；不提交生图、不用用户凭证。基线升 v6.44（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：无界面变化可核；今晚 22:00 同步时看类型检查是否顺利通过。",
+  },
+  {
+    version: "v6.43",
+    date: "2026-11-17",
+    text: "这一版修好人物特征融合一直报「网关超时」的问题。毛病出在老做法：点「开始融合」后，页面要在一次请求里一直等到图片分析完才有回音，可一次分析经常要几十秒、超过了页面通道单次等待的上限，请求半路被掐断，每次都只剩一句超时——你重试多少次都一样。现在换了做法：点「开始融合」先建一个后台任务、马上就回话，分析在后台慢慢跑，页面每隔几秒去问一次结果，问到了就把融合说明、中英文提示词、负向四块摆出来。分析期间按钮显示「正在分析…」，窗口可以关掉、最小化、刷新，回来打开面板会接着同一个任务取结果，不用守着、也不会从头重跑。万一分析真的失败，页面会把真实原因写出来，参考图和你填的要求都原样留着，再点一次「开始融合」就能重试。融合的分析要求（包括按图 A 版式出图那套）、四块结果、带图规则和生成图片的流程都没变。",
+    features: "融合分析改后台任务＋轮询修网关超时（v6.43，用户主聊直派，原话「一直出现这个网关超时的问题，请你进行修复，可以换一个思路去做，避免出现报错的问题」；服务端 actions.ts 把 fuseCharacterFeatures 的实现原样抽成 runFusionAnalysis 共用函数、新增 startFusionJob / runFusionJobStep / pollFusionJob 三个任务动作 + schema.ts 新增 fusion_jobs 表 + 迁移 0049；客户端 imagegen.tsx 的 runFusion 改为建任务＋driveFusionJob 每 3 秒推进与轮询、任务号 jobId 进 fusion 草稿、挂载时恢复驱动、按钮文案改「正在分析…」；分析指令文字（含 v6.42 版式锁定段）、四块输出、融合界面与预览区、带入素材与 A/B 角标、提交链路、复制、「使用此提示词」规则、两种风格组织方式一字未动；NO real image/video generation submitted、沙箱未跑真实视觉调用）：【根因】同步动作在一次请求里等 ctx.inference 视觉分析跑完才返回，单次请求有约 30 秒墙钟上限，一次分析常超 30 秒被切断（与 flor 总结优化 v34 前、封面分析 v5.08 前同类结构问题）。【新路】start 只建任务行（条件与参考图 1024px 副本 JSON 内联随任务行存）、秒回任务号，入参校验沿用原同步动作原话；step 在服务端跑 runFusionAnalysis、结果先落 resultJson 再回、真失败落真实报错，300 秒认领窗口内重复推进回 running 不重跑；poll 只读任务行毫秒级返回、永不触发分析。【页面】每 3 秒 step＋poll 驱动，最多约 10 分钟，到顶保留任务号下次打开续取；关窗/最小化/刷新凭草稿里的 jobId 恢复：已完成直接摆结果、已失败摆真错、进行中接着驱动。【桩验证】dryRun 桩加 dryRunDelayMs 慢分析桩（延迟 50 秒落库）与 dryRunFail 失败桩（页面从不传），沙箱验：建任务立刻返回、慢桩全程轮询不报错拿到四块且带版式锁定段、失败桩落真错可重试建新任务、双图与单图各一轮。真实视觉调用留真机。基线升 v6.43（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：用之前那组双图（超写实、以 A 为主、补充要求换服装）点一次开始融合，等出四块结果；分析中关窗再打开看能不能接着取到结果。",
+  },
+  {
+    version: "v6.42",
+    date: "2026-11-17",
+    text: "这一版让人物特征融合出的图按图 A 的排版来出。以前融合只管把两边人物的长相融到一起、写成提示词，出图是单张还是几视图、怎么排，全看生图模型自己发挥——图 A 明明是多视图排版，出来的可能只是一张单人照。现在融合分析第一步会先把图 A 的版式看清楚：几个视图、横排还是竖排还是网格排、每个视图是正面、侧面、背面还是头部特写、全身还是半身、什么底色背景、视图之间有没有分隔线；看清楚的结果会写在融合结果说明的前面，你一眼就能核对它认对了没有。然后中文正向和英文正向两份提示词里都会加上一段版式锁定，写明就按图 A 这个版式出图：图 A 是三视图就出三视图，是四视图、多视图就出对应的多视图，每个视图都是融合后的同一个人、同一张脸、同一套服装、同一个发型，背景跟图 A 一致。图 A 要是本身就是一张单图，就按它原来的构图走（全身、半身还是特写、什么角度、什么背景），不会自作主张变成多视图。有一条要说清：版式永远只跟图 A 走，跟融合时选的主次没关系——哪怕你选了「以 B 为主」，那也只是长相以 B 为主，出图的排版还是图 A 的，图 B 只贡献长相、不贡献排版；单图加文字模式就跟那张唯一的参考图走。融合的界面、传图、预览、结果四块、复制、「使用此提示词」带图这些全没动，负向提示词也不强制加版式内容，输出还是原来四块、没有多出一块。真机等你亲验：拿一张三视图或多视图的图当图 A 融一次，看融合说明里写的版式对不对、中英文提示词里有没有版式锁定那一段；再点「使用此提示词」回创作页生成一次，看出来的图是不是按图 A 的版式排的（点生成图片会花 Geeknow 账户的钱，沙箱没有代跑）。",
+    features: "融合结果按图 A 版式排版（v6.42，用户主聊直派，原话「融合之后生成的图片按照图a布局排版去生成图片，图a三视图那么生成的就是三视图，图a多视图生成的就是多视图」；只改服务端 actions.ts 的 fuseCharacterFeatures 分析指令文字与 dryRun 桩结果 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无界面/提交链路变更；NO real image/video generation submitted、未跑真实视觉调用）：【背景】v6.39 融合分析只融合人物特征、生成描述性提示词，提示词里没有任何出图排版要求，出图单张还是多视图全看模型发挥；用户真机截图里图 A 是多视图排版人物图（头部特写＋正面＋侧面＋背面横排）、图 B 是单人脸部特写，用户要出图按图 A 布局排。【1·识别图 A 版式】分析指令新增共用 layoutBlock 段（双图/单图、超写实/3D 动漫都带）：版式来源只有图 A（单图模式为唯一参考图），逐项识别视图数、排列（横排/竖排/网格）、各视图角度与景别（正面/侧面/背面/头部特写/全身/半身）、底色背景、视图间有无分隔；五步工作法的第 1 步同步加版式识别；识别结果必须写进 summary 开头附近让用户核对。【2·版式锁定句】正向组织序列在「构图」处扩为「构图与版式锁定」，输出四块口径与出参 schema 的 describe 同步写明：promptZh 必须含一段【版式锁定】、promptEn 必须含一致的 layout lock 描述（视图数量、排列方式、各视图角度与景别顺序、每视图同一人同一服装同一发型、背景与图 A 一致、分隔与图 A 一致）；三视图写三视图、多视图按实际个数写、单图按其构图写并明示不增加视图不改多视图。【3·版式跟 A 不跟权重】modeBlock 双图段新增一句：主次只决定长相以谁为主、排版只跟 A，B 只贡献长相不贡献排版（balance=b 也一样）；单图段新增一句：版式跟唯一参考图走。【4·结构不变】输出仍 summary/promptZh/promptEn/negative 四块、不新增块，版式描述只进 summary 与两块正向，负向不强制加版式内容（输出口径明示）。【5·桩结果】dryRun 新增可选入参 dryRunLayout（three/multi/single，页面从不传、仅沙箱验证用），桩结果按三种图 A 版式各备一份：summary 写明识别到的版式、promptZh 带【版式锁定】段、promptEn 带 [Layout lock] 段；不传时按模式回落（双图=multi、单图=single）与旧桩兼容。【不动】融合界面、预览区（v6.40）、带入素材与 A/B 角标（v6.41）、提交链路、状态保持、复制、「使用此提示词」填入规则、两种风格的组织方式（版式句两种风格都有、走共用段）、ctx.inference 调用通道与参数、模型报错原文透回口径；监控数据、DISSECT_CHAT_RULES、3 天清理与清除下限、预设库、下载任务、封面记录 id 43 全不动；不恢复自动下载；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe；沙箱未提交生图、未跑真实视觉调用（桩结果验三种版式）。基线升 v6.42（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：三视图/多视图图 A 各融一次看 summary 版式识别准不准、正向里版式锁定段在不在，再点生成看实际出图是否按图 A 版式排（会花 Geeknow 账户的钱，沙箱不代跑）。",
+  },
+  {
+    version: "v6.41",
+    date: "2026-11-17",
+    text: "这一版补上你说的那件事：融合出来的提示词点「使用此提示词」时，融合用的参考图会一起带过去，生成图片时按图生图出图，不再是光有文字、没带图。以前的毛病是：你在融合里传了 A、B 两张图、融出了提示词，点「使用此提示词」只把文字填进创作页，图没跟过去，点「生成图片」出来的是纯文字生成的图，跟你传的两张图没关系。现在点「使用此提示词」，除了填文字（框里本来有内容时还是先弹窗问你覆不覆盖，规矩没变），还会把这次融合用的图自动放进创作页的参考素材区：双图模式带 A、B 两张，顺序固定 A 在前、B 在后；单图模式带那一张。带过去的图左上角有角标——双图的标「图A」「图B」，单图的标「参考图」，一眼能认出哪张是哪张；角标只是贴在缩略图上看的，图片本身没动，提示词正文里也不会多出标注行。带过去的图和你自己上传的参考图完全一个待遇：点「生成图片」时会跟着一起上传提交，不用你再勾什么；在参考素材区点删除就能删掉，删了就不会提交。两个小规矩说清：一是同一份融合结果重复点「使用此提示词」，图不会重复带第二遍；你重新传图、重新融合后再点，会带新图进来，旧图不会自动删，你在素材区自己删。二是参考素材最多 16 张，要是已经满了放不下，文字照样填好，但图不会硬塞、也不会悄悄丢——页面会明说哪张没带进来、让你先删掉几张，再回融合界面点一次「使用此提示词」补带。融合分析本身、预览、结果四块、复制、提交出图的链路全没动。真机等你亲验：融一次后点「使用此提示词」，看参考素材区是不是多了带「图A」「图B」角标的两张图，再点「生成图片」，看出来的图是不是按这两张图生的。",
+    features: "融合结果使用时按图生图提交＋参考图 A/B 标注（v6.41，用户主聊直派，原话「生成图片的时候要以图生图方式，并标注哪个是图A图B」；纯客户端 imagegen.tsx 的 applyFusionResult 带入逻辑 + RefImage 新增 fusionBadge 字段 + 参考素材缩略图角标渲染 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【背景】v6.39 融合的 A/B 图只存在融合界面里，「使用此提示词」只填中英文正向文字、不带图，用户真机跑完一次融合后生成记录新增一条却是纯文字出图——本版补这个缺口。【1·带入】applyFusionResult 在填提示词后（空框直填 / 有内容经 ConfirmDialog 确认两条路共用同一函数，取消不带图）把本次融合用的参考图追加进创作页 refs：双图模式带 fusion.imgA、imgB（顺序 A 前 B 后），单图模式带 fusion.imgSingle；带入的就是融合时已压好的 1024px JPEG 副本（融合上传时已经走过 urlToThumbnail 压缩与图片格式过滤），构造成 RefImage{dataBase64/mimeType/preview/label=原文件名或「融合{角标}」, origin:manual} 与手动上传同一份 refs、同一待遇，直接处于「点生成图片按现有链路一起上传提交」的状态、无需再勾选（「同意上传」勾选早已于 #111202 删除）。【2·角标】RefImage 新增可选 fusionBadge（「图A」|「图B」|「参考图」），参考素材网格缩略图按钮改 relative、左上角叠一枚电光蓝圆角小角标（var(--walnut) 底白字 + 轻阴影），只显示在素材区、不改图片字节；提示词正文不加 A/B 标注行；「更换」换图后新对象无此字段、角标自然消失；角标随草稿 refs 一起存本机（loadDraft 不过滤字段、原样保留）。【3·去重】按「同角标 + 同 dataBase64」判定已带入：同一次融合结果重复点不重复带；重新上传 / 重新融合后图字节变了才带新图，旧带入图不自动删、用户在素材区自行删。【4·上限】沿用参考素材 16 张上限：room=16-refs.length，fresh 先到先得（A 先于 B）；放不下的在 promptCopyMsg 回执里逐个点名（哪个角标没带进来、为什么、怎么补带）并同步 setRefMsg 在素材区红字提示，提示词照常填入，不静默丢图。【5·回执】promptCopyMsg 改为拼装：填词句 + 带入 / 已在 / 没放下三类参考图说明（按实际情况出现）+ 负向未带上原句；融合完成 fusionMsg 与「使用此提示词」按钮 aria-label 同步写明会带图。【不动】提交链路（上传→换链接→提交）一字未动、生图禁令不变（只有点「生成图片」才提交）、融合分析与 fuseCharacterFeatures、预览区（v6.40）、结果四块、复制、草稿状态保持、人物关联与自动带入（origin=auto 那条）全不动；监控数据、DISSECT_CHAT_RULES、3 天清理与清除下限、预设库、下载任务、封面记录 id 43 全不动；不恢复自动下载；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe；沙箱未提交生图、未跑真实视觉调用（桩融合结果＋草稿种子验带入流程）。基线升 v6.41（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：融合后点「使用此提示词」看素材区出现带图A/图B角标的两张图、点「生成图片」确认按图生图出图（会花 Geeknow 账户的钱，沙箱不代跑）。",
+  },
+  {
+    version: "v6.40",
+    date: "2026-11-17",
+    text: "这一版只修人物特征融合里参考图看不全的毛病，你截图圈出来的两处都治了。以前参考图 A、参考图 B 的预览框是固定高度的宽矩形，图片按「填满框」的方式塞进去，上下左右超出框的部分直接被切掉——竖图只剩中间一段、三视图头脚不全、宽图也只剩局部。现在预览区重新做了：图片按它自己的原始比例整张放进预览区，一点都不裁；预览框的高度跟着图片走，图高框就高、图矮框就矮，只设了一个上限（不超过窗口内容区高度的一半左右），特别高的图会等比例缩小后完整显示，绝不会再被切掉一截。图片比框窄的时候，多出来的地方用深色底垫着、图片居中放，一眼能看出整张图的边界。双图模式下 A、B 两张各按各的比例完整显示，两个框高度可以不一样，不再硬凑等高；单图模式同一套规矩。另外点一下预览图能打开大图看整张原图（和全站其他地方点开看大图一样），点空白处、点右上角关闭、或者按 Esc 都能关。更换、删除按钮的位置和功能没动，融合模式、风格、开始融合、结果那四块、复制和「使用此提示词」全没动，上传的图片和数据也没动——只改了预览怎么显示。真机等你亲验：传一张竖图和一张宽图到融合里，看是不是整张都看得见、头脚都在；再点一下预览图看大图能不能打开、能不能关掉。",
+    features: "人物特征融合参考图预览区重新设计（v6.40，用户主聊直派＋真机截图为证；纯客户端 imagegen.tsx 的 renderFusionSlot 预览块 + 新增 fusionLightbox 大图层与 Esc 顺序 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【毛病】v6.39 融合界面双图模式下参考图 A/B 预览用固定 h-40（160px）宽矩形 + object-cover object-top 填满裁切：A 图只剩局部、B 图三视图上下被切头脚不全；单图模式同一 renderFusionSlot 同一毛病。【改法】renderFusionSlot 的已传图预览块整段重写：外层改成整块可点的 button（aria-label「放大查看{标题}（整张图）」、cursor-zoom-in、深色底 #0a0d12 + 原 outline 边框口径），内层 img 改 object-contain + h-auto/w-auto + max-w-full + max-h-[320px]（约悬浮窗内容区高度的一半）+ mx-auto 居中——图片按原始比例完整显示、高度随图自适应、超上限等比缩小仍完整、多余空间由按钮深色底填充；双图 A/B 两区各自按各自比例（外层 grid items-start 本就在位，两区不强求等高）、单图同一标准。【点图看大图】新增 fusionLightbox 纯 UI 状态（{src,title}，不进草稿）：点预览图打开与 refLightbox 同款大图层（fixed inset-0 z-[70]、rgba(3,5,9,0.78) 遮罩、img max-h-[86vh] + max-w-full 完整显示整张图、右上角「关闭」按钮），点遮罩任意处关闭；Esc 顺序在既有 keydown 里加在 refLightbox 之前（先关融合大图、再参考素材大图、再出图大图、再回创作页、再关窗）。【不动】更换 / 删除按钮的位置、文案与功能（仍在预览下方同一行），未传图时的上传按钮（h 160 整块按钮）原样；融合模式 / 风格 / 主次 / 补充要求 / 开始融合与 fuseCharacterFeatures 分析调用 / 结果四块 / 复制 / 使用此提示词 / 草稿状态保持 / 上传压缩逻辑（urlToThumbnail 1024 JPEG 副本）与图片数据一字未动；其他页面、监控数据、DISSECT_CHAT_RULES、3 天清理与清除下限、预设库、下载任务、封面记录 id 43 全不动；不恢复自动下载；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe；沙箱未提交生图、未跑真实视觉分析调用。基线升 v6.40（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：融合里传竖图 / 宽图各一张看整张完整显示、点头脚都在，点预览图开大图看完整并关掉，双图两区高度不同也都完整。",
+  },
+  {
+    version: "v6.39",
+    date: "2026-11-17",
+    text: "这一版给图片生成工作台加了一个新功能：人物特征融合。入口就在创作页提示词那一排（「中文构思 / 英文提示词」旁边）多了一个「人物特征融合」按钮，点开还在同一个窗口里，不跳页，左上角有「返回」回创作页，返回不会丢任何东西。用法是这样：选融合模式——双参考图融合就左右各传一张人物图（参考图 A、参考图 B），单参考图＋文字融合就传一张图、再在下面的框里写清要改什么（比如保留脸型、发型改成银灰色长卷发）；再选风格，第一阶段只开两种：超写实（按真人摄影写，皮肤纹理、毛孔、发丝都写实，避免塑料感）和 3D 动漫（按高品质三维动画角色写）；双图模式还能选主次（均衡融合、以 A 为主、以 B 为主），另外有个补充要求框，你写了具体要求就优先按你写的来。点「开始融合」，AI 会先把两张图各自的特征（脸型、五官、发型、肤色、年龄感、身材、服装、气质）分别看清，再判断哪些能合、哪些冲突要取舍，最后融成一个完整统一的新人物——不是把两张图的描述简单拼起来，也不会拼出半张脸是 A、半张脸是 B。结果有四块：融合结果说明（A 保留了什么、B 吸收了什么、哪里做了重构）、中文正向提示词、英文正向提示词、负向提示词（按你选的风格分别配，不是两个风格套同一份）。四块都能直接改、每块都能单独复制，还有一键复制完整提示词、只复制正向、只复制负向、重新融合。点「使用此提示词」就把中英文正向分别填回创作页的两个提示词框；框里本来有内容时，会先弹窗问你覆不覆盖，绝不会一声不响盖掉。有一点说清：工作台没有单独的负向提示词输入框，所以负向词只在结果里展示和复制，不会自动带上。注意「开始融合」只做分析和写提示词，不会直接出图、也不会花生成图片的钱；出图还是回创作页点「生成图片」。你传的图、选的模式风格、写的要求和融合结果都跟着工作台原来的草稿一起存在本机：关掉窗口、最小化再打开都在；两个模式来回切换，另一个模式传的图和写的字也不会丢；万一融合失败，只会把失败原因写清楚让你重试，图和文字一个都不会清掉。其他页面和功能全没动。真机等你亲验：传两张不同的人物图选超写实融一次、再选 3D 动漫融一次，看提示词是不是一个完整统一的人、风格对不对；再试单图加文字，看保留和修改有没有照你写的来；最后点「使用此提示词」，看词有没有填进创作页的框里。",
+    features: "图片生成工作台新增「人物特征融合与提示词智能生成」（v6.39，用户主聊亲发十节规格＋悬浮窗截图下单；客户端 imagegen.tsx 融合界面与草稿扩展 + 服务端 actions.ts 新增 fuseCharacterFeatures 一个动作 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【落点】居中悬浮窗（v6.35 形态）内、创作页提示词区「中文构思／英文提示词」那一排加「人物特征融合」按钮（与中英 seg 同视觉层级），点开在同一悬浮窗内把滚动区内容切到融合界面（不另开窗、不跳页），顶部「← 返回」回创作页、Esc 同口径（先回创作页再关窗），页签切换同步退出融合界面；返回 / 关窗 / 最小化不丢任何已填内容与结果。【界面五部分】①融合模式 seg：双参考图融合／单参考图＋文字融合，切换只改 mode、另一模式的图与文字原样保留（状态注释明示）；②素材上传：双图左右 A/B 两槽（预览图 object-top、更换／删除，未传时整块上传按钮），单图一槽＋下方文字要求框（图定基础、文字定修改的口径写在框下）；上传在本机经 urlToThumbnail 压成最长边 1024 的 JPEG 副本（mime 恒 jpeg，与现有图片分析同一走法），压不动回落 fileToBase64 原图字节，用户本机原图文件不动；③融合设置：风格 seg（超写实／3D 动漫，选中项下方各有一段该风格的组织口径说明）、双图模式另加主次 seg（均衡融合／以参考图 A 为主／以参考图 B 为主）、补充要求 textarea（两模式共用、写了优先）；④「开始融合」btn-primary（只调分析动作、绝不提交生图；未备齐输入时禁用并在按钮下写明缺什么，fusing 中文案「融合分析中…」）；⑤结果预览：融合结果说明／中文正向／英文正向／负向四块 textarea 均可编辑、各带「复制」小按钮，下方操作行：一键复制完整提示词（中文正向＋英文正向＋负向、带小标题拼）／只复制正向（中＋英）／只复制负向／重新融合／使用此提示词（btn-primary），复制与完成反馈走 fusionMsg 绿字行、失败走 fusionError 红字 role=alert。【服务端动作 fuseCharacterFeatures】入参 mode（dual|single）/ style（hyperreal|anime3d）/ balance（balanced|a|b）/ textRequirement / extraRequirement / visionImages（imageInput、max 2）/ dryRun（沙箱验证专用、页面从不传）；服务端先过滤非 jpeg/png 图并做完整性校验（双图缺图、单图缺图或缺文字要求回大白话错误、不调模型）；分析走现有图片分析同一链路 ctx.inference.complete（vision 通道、图片 base64 内联 + caption 标明参考图 A/B），结构化出参四块（summary/promptZh/promptEn/negative），timeout 240；推理提示词落实规格四的五步机制（分别识别→九类特征提取→判断融合关系（带 A 圆脸大眼＋B 立体鼻梁例）→统一人物结构→重新组织成完整描述）与禁止项（禁简单拼接、禁两脸平均、禁左右半脸拼接、禁多脸/双重五官/双重身体/人物重叠），风格段两套组织方式分开写（超写实按真人摄影质感、皮肤纹理毛孔、真实发丝织物、避免塑料皮肤蜡像过度磨皮；3D 动漫按三维动画角色设计、动漫五官、发丝层次、三维体积感、电影级动画光影、避免廉价塑料模型与面部崩坏），负向按所选风格分别补该风格专属避免项＋融合通用项；正向按规格五的 12 项组织（主体定位→脸部结构→五官→发型→肤色皮肤→身材→服装→气质→构图→光影→风格→质量），中英文一一对应；用户补充要求优先级最高、单图文字要求逐条落实、明确保留项不改、明确修改项不漏；错误口径：InferenceSchemaError 回「结构不完整请重试」、其余异常原文透回（融合失败：<原文>，model_not_found 等不静默换模型），正向全空回可重试错误。dryRun=true 不调模型、回与真实结果同形的桩四块（每块文字写明【桩结果·沙箱验证用，不是真实分析】），供沙箱探针验全流程。【使用此提示词】applyFusionResult 把 result.promptZh/promptEn 分别 setPromptZh/setPromptEn 后切回创作页并在 promptCopyMsg 写明已填入与负向未带上；requestUseFusionResult 在任一提示词框已有内容时先弹 ConfirmDialog（标题「提示词框里已经有内容」、confirmLabel「覆盖，填融合结果」、取消不改原内容），两框全空直接填；负向提示词：实查高级设置与提交链路均无负向字段（submitGeeknowImageTask 无负向入参），按落点只展示＋复制、不新增提交字段、不改提交逻辑，结果区与填入回执各有一句明示。【状态保持】PanelDraft 新增可选 fusion 段（FusionDraft：mode/style/balance/imgA/imgB/imgSingle/textRequirement/extraRequirement/result），loadDraft 经 parseFusionDraft/parseFusionImage 防御解析（旧草稿无此段按 EMPTY_FUSION），saveDraft 实时回存、回存失败的回落链在原「丢 refs」之后再加一层「丢 refs＋丢融合图、保留模式/文字/结果」；fusionView/fusing/fusionError/fusionMsg/fusionUseConfirmOpen 为纯 UI 临时状态不进草稿（关窗重开回创作页、融合内容在草稿里）。【不动】现有图片生成 API 与模型调用逻辑、中文/英文提示词编辑、参考素材管理、人物资产系统、已有生成任务与记录、改图模式、总设置解析；其他页面、监控数据、DISSECT_CHAT_RULES、3 天清理与清除下限、预设库、下载任务、封面记录 id 43 全不动；不恢复自动下载；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe；沙箱未提交生图、未跑真实视觉分析调用（全程 dryRun 桩响应＋UI 草稿种子验流程，真实分析质量留真机按规格十测试 A–F 验）。基线升 v6.39（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：双图＋超写实、双图＋3D 动漫、单图＋文字、两张差异大的图四种各融一次看质量；正向复制粘贴可用；负向/复制/重新融合/使用此提示词（含覆盖确认）各点一遍；第一次真调用若报视觉模型 model_not_found，把报错原文发回主聊定模型名。",
+  },
+  {
+    version: "v6.38",
+    date: "2026-11-16",
+    text: "这一版只修监控页视频卡片的排版，你圈出来的两个毛病都治了。第一，同一行卡片的底部按钮以前高低不一：标题、标签占的行数不一样，再加上分组视图里「发布于」那行字长短不一会多占一行，就把按钮顶得参差不齐。现在每张卡片改成上下结构：封面、标题、数据、标签在上面，按钮整排固定贴在卡片底部，中间多出来的空白自动补齐——同一行里所有卡片的按钮都落在同一条水平线上，标题一行还是两行、标签一行还是两行都不再影响。第二，「下载原片」四个字以前会溢出按钮框、贴着边：原因是按钮被平均分宽压得太窄，字塞不下。现在按钮宽度按文字长短来：两个字的按钮窄一点、四个字的宽一点，左右留白同排统一，字完整收在框里、居中、不换行；按钮还是一行排完，不会掉到第二行，也不会超出卡片边框。三个视图款式（极简信息流、大图视觉、紧凑数据）和五个视图全都同步生效；分组视图里一张卡有五个按钮（播放、详情、下载原片、复刻、删除），那一排的字号和留白整体略收紧一点，保证五个按钮照样一行放下、字照样完整。按钮的文案、颜色、顺序和点击功能一个没动，卡片上的标题、播放量、标签这些信息也没动，页面其他部分全没动。真机等你亲验：打开监控页翻几行卡片，看同一行按钮是不是齐平了；再看几张卡的「下载原片」按钮，字是不是完整收在框里；点播放、详情、下载原片、复刻试试，功能跟以前一样。",
+    features: "监控页视频卡片排版对齐＋按钮文字溢出修复（v6.38，用户截图红箭头指第一行第 6 张卡《当你妈突然来学校找你有急事》底部按钮区；纯客户端 monitorbench.tsx 一处渲染核 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【根因实查】①按钮不在一条线：视图容器 flex-wrap 下同一行 article 本就拉伸等高，但卡内是普通文档流，按钮紧跟内容排——极简款标题已锁 2 行高、标签区 v4.55 已锁 2 行高，剩余变量是 full 款（分组视图）「发布于 {日期} · ID {videoId}」行无 nowrap、长度随日期与 ID 变而折行行数不一，及各款附加行差异，谁多占一行谁的按钮就被顶下去（截图第 6 张即此类）。②文字溢出：MonitorCardButtons 旧口径 flex-1 等宽 + min-w-0，极简款卡宽 176、5 个按钮均分后每个约 30px，「下载原片」4 字在 11px 字号下约 44px + 左右内边距 16px 根本塞不下，文字溢出框外贴边；4 个按钮的紧凑款同样溢出（约需 60px、分到约 39px）。【改法·结构】MonitorCardCore 三款设计（minimal / visual / data）的 article style 统一加 display:flex + flexDirection:column；MonitorCardButtons 整体（按钮行 + 下方下载状态小字）外包一层贴底容器 div：marginTop:auto 把按钮块顶到卡片底部、paddingTop 承接原 marginTop 入参的最小间距；子元素只用 marginTop、无 marginBottom，改 flex 后间距与旧文档流逐像素一致（无外边距合并差异）。【改法·按钮】按钮 className 由 min-w-0 flex-1 改 flex-auto（flex:1 1 auto，最小宽度 = 文字内容宽、不再被压小），同排字号 / 上下内边距（sz(4,s)）统一；左右内边距与间距按按钮个数两档（dense 以 onDelete 在场判定 = 分组款 5 按钮）：普通档（紧凑款 ≤4 按钮）字号 sz(11,s)、左右内边距 sz(5,s)、间距 sz(4,s)——极简卡宽 176 内 4 按钮合计约 170px；密排档（5 按钮）字号 sz(10,s)、左右内边距 sz(3,s)、间距 sz(3,s)——12 字合计约 172px；两档均按档位 s 等比缩放、各档位比例恒定；「已存好 / 排队中 / 下载中」（3 字）比「下载原片」（4 字）更窄、同档同口径。单行不换行（flex nowrap + whitespace-nowrap 不变）、不超出卡宽（上述合计均 < 最窄内容宽 176；data 款内容宽 244、visual 款 196 更宽裕）。【不动】按钮文案 / 颜色（btn / btn-primary / btn-danger-ghost 类与顺序 播放→详情→下载原片→复刻→删除）/ 点击逻辑与禁用口径、卡片全部内容与数据、标题与标签的既有固定高度口径（极简标题锁 2 行、标签区锁 2 行、data 款标题 1 行截断为其设计本义未改）、封面尺寸、视图 / 筛选 / 排序、下载任务状态机、详情窗与播放窗内的按钮（不在卡片上、本版未动）、DISSECT_CHAT_RULES、3 天清理与清除下限 clearedAtMs、其他页面、全部正式数据；封面记录 id 43 不动；不恢复自动下载；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.38（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台打开监控页逐行核对按钮齐平、「下载原片」字完整在框内、改窗口宽度与切档位（0.8/0.6/0.5）后仍对齐不溢出、五按钮的分组视图同一行放得下。",
+  },
+  {
+    version: "v6.37",
+    date: "2026-11-16",
+    text: "这一版把监控页的解剖入口加了回来，改名叫「复刻」：每张视频卡片底部、「播放 / 详情 / 下载原片」同一排多了一个「复刻」按钮，详情窗和悬浮播放窗里也有同一个入口（封面顶部不加，还是干干净净的）。点「复刻」不会马上复制，而是先弹出一个预设选择窗，把你在拆解提示词库里存的预设全列出来——名称、简介、分类、最后修改时间都在，系统默认那条带着「系统默认」标记——点哪条就用哪条。复制出去的内容还是老样子：前面是这条视频的信息头（视频ID、标题、时长、达人、发布时间、点赞播放、描述话题、云端文件位置，一个字没变），后面接上你选的那条预设的正文全文；复制好照旧提示你去聊天框粘贴发送，同时照旧排进待解剖队列，同一条重复点不会重复排队。选系统默认那条复制出来的内容，和以前那个入口复制的一模一样，因为默认预设的正文就是原来那套 14 节规则全文，没动过。要是预设库里一条预设都没有，选择窗里只会写一句「还没有预设，去拆解提示词库里加一条」，不会报错、也不会复制。顺带把默认预设的简介和分析模仿页说明里的旧名字都改成了「复刻」的说法（只改说法，预设正文一个字没动；你要是自己改过那条预设的简介，你的改法不会被覆盖）。其他全没动：拆解提示词库的管理窗、下载原片和下载队列、3 天清理、视图筛选排序、卡片数据、生图、封面、项目和分析记录都照旧，也没有恢复任何自动下载。真机等你亲验：打开监控页点一张卡的「复刻」，看选择窗里有没有那条默认预设，选它之后去聊天框粘贴，核对粘出来的还是原来那套规则全文；再打开详情窗和播放窗，确认里面的入口也叫「复刻」、点开是同一个选择窗。",
+    features: "监控页卡片加「复刻」按钮＋预设选择窗（v6.37，用户主聊直派；客户端 monitorbench.tsx + dissectpresets.tsx + 服务端 actions.ts 的 seedDissectPreset 一处简介同步 + analysisbench.tsx 说明文案 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无新服务端动作；NO real image/video generation submitted）：【背景】卡片上原来的解剖入口已于 v6.26（#111606）从封面删除、只剩逻辑无可见入口；用户要加回来并改名「复刻」：点开后先选拆解提示词预设、选好再复制。【1·卡片按钮】MonitorCardButtons 一处落点（三款设计与紧凑款共用渲染核、五视图五处调用点透传 onReplicate，版式预览示例卡不传不渲染）：播放 / 详情 / 下载原片同一排、下载原片之后删除之前加「复刻」按钮（btn btn-sm 同款 + btnStyle 档位缩放 + flex-1 等宽，aria-label 写明先选预设）；原 onAnalyze 透传链路（MonitorCardCore / VideoCard / CompactVideoCard / 五视图调用点）改名 onReplicate 并真正解构渲染（v6.26 起该链路只透传不渲染），封面顶部不加（#111606 删除决定不动）。【2·选择窗】dissectpresets.tsx 新增 DissectPresetPicker（z-[92] 压过详情窗 / 播放窗的 z-[80]）：打开时调 listDissectPresets 列全部预设，每条整行可点（名称 / 简介 / 分类标签 / kind=system 时「系统默认」绿标 / 最后修改时间 / 全文字数），点一条即选中；读取失败窗内红字 + 重新读取按钮；本窗不做种子落库（默认预设由管理窗打开时幂等补种，正式库里 id 1 已在位）。【3·选中后】MonitorBench 的 handleReplicatePick（由旧 handleAnalyze 改名改造）：先关窗，再按现行格式拼指令——buildDissectInstruction 新增可选第三入参 rulesBody（默认 DISSECT_CHAT_RULES 常量），视频信息头（请帮我解剖这个视频／视频ID／标题／时长／达人／发布时间／点赞·播放／描述话题／云端文件路径）一字不变、正文换成选中预设的 body 全文；addDissectQueueItem 入待解剖队列（同 videoId 服务端去重不变、入队失败只在 toast 带一句不拦复制）→ copyTextToClipboard 复制，成功 toast 原句「已复制解剖指令，去聊天框粘贴发送（，已加入待解剖队列）」，失败仍弹指令全文窗手动复制；dissectBusyRef 同卡防重入保留。选系统默认预设时正文是库中种子（与常量逐字一致），复制结果与旧版逐字相同。【4·详情窗 / 播放窗】实读代码确认两窗此前并无同名入口（v6.26 记载属实：详情窗只有预填、播放窗无入口），本版按 brief 的终态要求各补一个「复刻」入口走同一个选择窗：VideoDetailModal 在下载原片节后新增「复刻」节（说明一句 + 同名按钮，onReplicate 不传或示例卡不渲染），VideoPlayerModal 底部行在「看原视频」前加「复刻」按钮；两处渲染点都传 openReplicatePicker(该视频, 达人名)。【5·空预设分支】列表为空时窗内只显示「还没有预设，去拆解提示词库里加一条」，不报错、不复制、不入队（没有可点的预设行，自然无后续动作）。【6·旧名改口径】用户可见文案里的旧入口名全部改「复刻」口径：dissectpresets 的 DEFAULT_PRESET.intro 改新文案（只改简介措辞）；seedDissectPreset 加一次性同步——库中同 slug 的 system 行简介还一字不差等于旧版种子文案 LEGACY_DEFAULT_PRESET_INTRO 时才把简介更新为客户端送来的新文案（updatedAt 一并刷新），正文 / 名称 / 分类一律不动、用户改过的简介不覆盖；analysisbench 分析模仿页页头说明改新流程口径（点「复刻」选预设复制，顺带去掉早已过时的封面绿标签与存云端提示旧说法）；App 历史更新日志旧记载按惯例保留不改，代码内部函数名 / 动作名 / 注释与动作 description 里的旧名按 brief 口径不属于用户可见名字、未改名（LEGACY_DEFAULT_PRESET_INTRO 常量必须保留旧文案作匹配）。【不动】DISSECT_CHAT_RULES 常量一字未动、拆解提示词库管理窗（增删改查与种子口径）、待解剖队列与去重与「已解剖 ✓」标记逻辑、下载任务队列与取件状态机（v6.36）、3 天清理判定与清除下限 clearedAtMs、视图 / 排序 / 筛选、卡片数据、生图 / 封面 / 项目 / 分析记录、其他页面；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe；不提交生图、不用用户凭证。基线升 v6.37（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台点一张卡「复刻」核对选择窗与默认预设、选它粘出核对与旧版逐字一致、详情窗与播放窗入口同名同窗。",
+  },
+  {
+    version: "v6.36",
+    date: "2026-11-16",
+    text: "这一版是「下载原片」的第一步（只做下载线，自动解剖是下一步、还没做）：监控页每张视频卡片底部、「播放 / 详情」同一排多了一个「下载原片」按钮，五个视图、三款卡片设计都有，点开详情窗里面也有同一个入口，两边状态同步。点一下按钮，这条视频就排进下载队列，按钮马上变成「排队中」；后台取件接上以后会自动去下载，下载中按钮显示「下载中」，下完存回云端库后显示「已存好」。同一条重复点不会重复排队；已经存好的再点只会提示你已经存好了，不会再排一次。要是下载没成功，按钮下方会用大白话写清失败原因，按钮可以再点重试。要注意：这一版只把按钮、队列和状态显示做好了，真正去下载的后台取件还没接上——在那之前点按钮只会排队、停在「排队中」，不会自己开始下载；取件接好后不用再改页面，排队的会自动被取走下载。其他什么都没动：卡片数据、达人、筛选排序、清理规则、解剖提示词库、发送到聊天解剖、生图、封面、项目和分析记录都照旧，也没有恢复任何自动下载——只有你亲手点的才会排队。真机等你亲验：打开监控页，找一张卡点「下载原片」，看按钮是不是马上变「排队中」、再点一次是不是不会重复排队；打开详情窗看里面的按钮状态跟卡片一不一致。",
+    features: "监控页卡片加「下载原片」按钮与下载任务队列（v6.36，用户主聊直派，下载线第一步；服务端 download_tasks 新表（migration 0048）+ 6 个新动作 + 客户端 monitorbench.tsx 一处渲染核落点 + App 版本/日志 + replication 基线 + DATA-PLAN；NO real image/video generation submitted）：【背景】用户亲口定：要在工作台里点一下、尽量不在聊天框联系，过期链接的视频要能下载回来再分析；已实测走通的下载路是云端浏览器打开快手页免登录取真实地址下载（与完整版逐字节一致），本机浏览器扩展那条路文件只落用户电脑、到不了助手手里，不用。本单只做第一步下载线（按钮＋队列＋取件状态机＋状态显示），第二步自动解剖（按预设拆、存记录、套项目）另立一单：不动预设库、不动 DISSECT_CHAT_RULES、不动分析记录与项目数据。【1·新表】download_tasks（migration 0048）：id / videoId / title / pageUrl / platform / creatorName / presetId（整数默认 1，预留给第二步选预设、本版无选择界面）/ status（queued|downloading|done|failed 枚举）/ errorMessage / fileSizeBytes / durationMs / sha256 / cloudPath / createdAtMs / updatedAtMs / claimedAtMs / doneAtMs（时间一律毫秒整数）；video_id 与 status 各一个索引。同一 videoId 只许一条非终态任务，由 enqueue 查重保证（不加唯一约束，失败要能重试建新行）。【2·动作】enqueueDownloadTask{videoId}：先查非终态同 videoId 任务→回带 already_active 不重复建；再查最新 done 任务→经特权 cloudVideoStat 查云端文件仍在才回 already_saved（videoId 不合规跳过查、特权调用抛错回退以任务状态为准），文件没了则往下重新建；最后从 monitor_videos join monitor_accounts 取标题（monitorCardTitle 与客户端 splitDescription 同口径）/ videoUrl / 平台 / 达人名快照建 queued 任务（presetId=1），卡片不存在回 ok:false + not_found 大白话。listDownloadTasks{status?}：按 createdAtMs、id 升序，不传回全部（页面据此按 videoId 取最新一条显示状态，取件只取 queued）。claimDownloadTask{id}：条件更新（id 且 status=queued 才改 downloading + 写 claimedAtMs，returning 判定）防重复认领，被领/已完回 ok:false 带当前任务与大白话。completeDownloadTask{id,fileSizeBytes,durationMs,sha256,cloudPath}：仅 downloading→done 写 doneAtMs 并清 errorMessage。failDownloadTask{id,errorMessage}：仅 downloading→failed 存大白话原因。getDownloadTaskStatus{videoId}：最新一条任务或 null。【3·卡片 UI】MonitorCardButtons 一处落点（三款设计与紧凑款共用渲染核、五视图五处调用点透传 downloadTask + onEnqueueDownload，版式预览示例卡不传、不渲染）：「播放/详情」同一排加「下载原片」按钮（btn btn-sm 同款 + btnStyle 档位缩放 + flex-1 等宽）；useDownloadOriginal hook 卡片与详情窗共用——点按钮先本地乐观显示排队中、动作回执后以服务端状态为准；按钮文字随状态变（排队中/下载中/已存好，queued/downloading 时禁用防重复点）；按钮下方小字只出三类：failed 显示任务 errorMessage 大白话原因 + 可重试提示（role=alert 红字）、建任务失败显示回执原因（role=alert）、已存好再点显示绿字提示（role=status）；详情窗在置顶标记节后新增「下载原片」节（当前状态一句话 + 同款按钮 + 同款提示行），与卡片经同一份任务列表数据同步。【4·状态刷新】MonitorBench 新增 ['download-tasks'] 读查询（withReadTimeout + retryReadQuery，与页面其他读查询同节奏，不另起轮询/定时器），打开监控页即读回各卡最新状态；建任务成功后 invalidate 该查询。【5·取件约定（本单不实现下载本身，cron 由主代理另建）】取件每轮：listDownloadTasks{status:queued} → claimDownloadTask 认领 → 云端浏览器打开视频页取真实地址下载 → 核对完整（大小>0、可读时长、解码无错）→ 存入 ~/workspace/video-cloud/videos/{videoId}.mp4 并按 state.json 锁协议（lock+tmp+rename）记账 → completeDownloadTask 回写大小/时长/SHA-256/路径；任一步失败 failDownloadTask 写大白话原因。云端库已有同 videoId 文件时取件先核对已有文件：核对通过直接 complete、不过重新下载覆盖（覆盖规则在取件侧执行，工作台动作层不拦）。【不动】监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「发送到聊天解剖」、存云端与播放器链路、生图/封面/项目/分析记录、其他页面；不恢复自动下载（取件只处理用户点按钮建的任务）；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe；不提交生图、不用用户凭证。基线升 v6.36（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台点一张卡的「下载原片」看排队中状态与重复点不重复排队、详情窗状态同步（真下载要等取件 cron 建好后才发生）。",
+  },
+  {
+    version: "v6.35",
+    date: "2026-11-16",
+    text: "这一版按你在主聊定的样子，把「图片生成工作台」从右侧窄条改成屏幕正中央的大悬浮窗，右侧抽屉彻底取消，只改呈现和布局，生图的业务逻辑、模型调用、人物绑定、参考图上传、提示词数据、生成任务和历史记录一字没动，也没有提交任何生图。打开方式：点原来的生图入口，窗口在当前页面正中央打开，不跳页、不改动底下剧本工作台的排版，底层盖一层半透明深色遮罩带一点模糊，窗口层级在普通弹窗之上。尺寸：桌面宽约 1160px（屏幕不够时自动收窄留边）、高约 820px 以内，圆角 16px；手机等小屏幕自动变全屏，不裁内容、不横向溢出。里面是双栏：左边约六成放提示词编辑（中文构思／英文提示词切换、复制、清空、AI 一键优化都在）和生成设置（质量、比例、画风、三视图直接摆出来，模型、超时、重试、节点收在「高级设置」里）；右边约四成放参考素材（上传入口、三列网格、总数和绑定状态）和人物参考关联卡；屏幕窄了自动变单栏上下排。顶上固定：左边标题、右边最小化／关闭，下面一行「创作／生成记录」切换，生成记录还在同一个窗口里切，不另开窗。底下固定一条：当前模型、质量、比例和生成状态看得见，「生成图片」按钮一直醒目、内容怎么滚都在。窗口里自己滚动，底层页面不会跟着滚穿。最小化：点最小化窗口收起，右下角留一条带「图片生成工作台」的小浮条，点「展开」就回来，写到一半的提示词、选好的参考图都原样保留；关闭再打开也不会清空，因为草稿一直自动存着。只有一种情况会多问一句：点生成后的头几秒、提交请求还在路上的时候关窗，会先提醒你等它提交完再关，免得这次提交被误判成失败；平时关窗不问。真机等你亲验：点生图入口看窗口是不是在正中央、够不够宽敞；写两句提示词后最小化再展开、关闭再打开，看内容在不在；切到生成记录页再切回来；换个小尺寸窗口看是不是变全屏；最后亲手点一次「生成图片」确认能正常出图。",
+    features: "图片生成工作台改居中悬浮窗口（v6.35，用户主聊亲发八节规格；纯客户端 imagegen.tsx 呈现重构 + settingsfloat 注释同步 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【1·居中悬浮窗】ImageGenPanel 的 section 由 fixed right-3 top-[70px] z-[60] 右侧抽屉改为外层 fixed inset-0 z-[95] flex 居中容器 + 半透明深色遮罩（rgba(3,5,9,0.62) + backdrop blur 3px，点遮罩走 requestClose）+ relative 窗口本体：桌面 w=min(1160px, 100vw-64px)、h=min(820px, 100dvh-48px)、rounded-2xl（16px）、sm:border；小屏（<640px）h-full w-full 全屏无圆角无边框；深色样式沿用 --surface/--border/--shadow-card。层级 z-[95] 高于工作台与普通弹窗（监控/分析 toast z-[90]、其它弹层 z-[70]/[80]/[85] 之下不再压窗——窗在其上）；面板内大图层 z-[70] 在窗口层叠上下文内仍压过窗口本体。【2·拖拽调宽下线】v6.34 的左缘拖拽手柄（role=separator）、panelWidth 状态、420–560 钳制与 localStorage imagegen.panelWidth.v1 读写整段删除（固定大窗不再需要；旧存档键留在用户本机不再读取、无副作用）。【3·双栏布局】创作页滚动区改 px-5 py-4：状态行（服务/连接/公告/生效来源）整行在上，其下 grid lg:grid-cols-[3fr_2fr] gap-5 items-start——左栏=改图区（原样）+ 提示词整块（中英 seg 切换、编辑框高 190px、复制/清空、AI 优化整块，一字未改）+ 生成设置卡（从右栏位置整块平移：关键项直出 + 高级设置折叠，字段与 onChange 原样）；右栏=参考素材整块（三列网格/大图/更换/删除/上限 16/自动带入条原样，第一块去掉原 mt-4 由 grid gap 承接间距）+ 人物参考关联卡（原样）；<lg 自动单列堆叠（左栏在前）。生成记录页只改外边距 px-5 py-4，记录整块、全部操作与轮询一字未改，同窗 seg 切换不变。【4·顶部/底部固定】标题行（左标题、右最小化/关闭）与 seg 导航仍在滚动区外固定，内边距 px-5；底部固定条新增首行状态（role=status）：当前模型：{model}（{modelFamily}）· 质量 · 比例 + submitting 时「正在提交…」/ 有 submitted|generating 记录时「N 个任务生成中」（activeGenCount 由既有 records 现算）；字数行 mt-3→mt-1，其余（生成按钮、禁用条件、前置提示、help-fold 并行说明、submitError、hostRouteNote、计费说明）原样。【5·窗口交互】关闭口径统一 requestClose（关闭按钮/点遮罩/Esc 同路）：草稿实时回存本机（loadDraft/saveDraft 不动）+ 已提交任务在服务端与记录里续跑（轮询/续查逻辑不动），平时直接关不弹确认；仅 submitting 为真时弹 ConfirmDialog「正在提交生成请求」（仍然关闭/继续等）防关窗卸载把在途提交误判失败——这是唯一会丢东西的情况，符合「有自动保存兜底不打扰、确实会丢才确认」的落点。Esc 处理：先关 refLightbox/lightboxRec 大图层、再走 requestClose，最小化时不响应。滚动穿透：窗口打开且未最小化时 effect 锁 document.body.style.overflow=hidden、卸载/最小化恢复原值；窗口内滚动仍只有中间滚动区。最小化：宿主最小化小浮条保留（文案「图片生成工作台」+ 展开/关闭，z-[60]→z-[95] 与窗口同层），面板 display:none 不卸载、全部状态保留，展开即恢复；手机打开不再自动最小化（openListener 删除 <640 自动收起，小屏直接全屏窗）。【不动】全部生图业务逻辑与状态（草稿 PanelDraft 结构、submitAndRecord、pollRecord、saveRec*、改图模板、锁脸句、溯源、总设置解析）、模型 API 与参数、人物资产自动关联、参考素材绑定与上传管理、提示词数据、生成任务及历史记录、现有业务规则；底层剧本工作台布局未动；DISSECT_CHAT_RULES 一字未动、3 天清理与清除下限未动、监控页未碰、封面记录 id 43 未动；不恢复自动下载；沙箱未点真实生成。基线升 v6.35（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：居中大窗打开观感与尺寸、双栏/单栏切换、最小化浮条与恢复、关闭重开状态保留、生成中关窗不中断、点一次真生成、手机全屏。",
+  },
+  {
+    version: "v6.34",
+    date: "2026-11-16",
+    text: "这一版按问题 #111613 把右侧的生图面板整个重新排了一遍，名字改成「图片生成工作台」，只改样子和排版，生图的业务逻辑、模型调用、人物绑定、参考图上传、生成记录数据一字没动，也没有提交任何生图。改了这些：①面板变宽了：默认约 480px（宽屏 500、普通笔记本 440），把鼠标放到面板左边缘可以拖着调宽，420 到 560 之间，调完会记住；小屏幕上自动变成接近全屏的抽屉。②顶部多了两个标签：「创作」和「生成记录」，生成记录单独一页，不再堆在创作内容后面；切来切去，正在输入的提示词、选好的参考素材、正在生成的任务都不会丢。③创作页从上到下是：提示词（中文构思和英文提示词改成标签切换，编辑框加高到约 190px，下面有复制、清空和 AI 一键优化）、参考素材（显示总数、三列网格、点图看大图、每张能更换或删除、上限还是 16 张）、人物参考关联（独立卡片：人物名、缩略图、已关联状态和参考说明，能看绑定详情、能解除关联）、生成设置（质量、比例、画风、三视图直接摆出来，模型、超时、重试、节点收进「高级设置」里折叠着）。④「生成图片」按钮固定在面板底部，内容怎么滚它都一直在，生成中的状态提示也照旧。⑤最小化、关闭、重新打开都照旧，状态不清空。真机等你亲验：打开生图面板看宽度、拖一下左边缘调宽；中英文提示词切换着各写两句看会不会丢；参考素材传一张删一张；切到生成记录页再切回来；最后亲手点一次「生成图片」确认能正常出图。",
+    features: "图片生成右侧栏 UI 全面改造（v6.34，问题 #111613；纯客户端 imagegen.tsx 渲染重组 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【1·尺寸】面板由固定 408px 改为默认按屏宽给宽（>=1600→500、>=1280→480、>=1024→440、否则 480），左边缘拖拽手柄（role=separator、pointer 拖动 + 方向键微调、420–560 钳制、localStorage imagegen.panelWidth.v1 持久化），max-w 100vw-24px 小屏近全屏抽屉；最小化条文案同步改「图片生成工作台」。【2·顶部结构】标题改「图片生成工作台」（section aria-label 同步），最小化/关闭保留原 aria-label 与行为；标题下新增 seg 标签「创作 / 生成记录（N）」，两页共用同一面板组件与全部状态，切换只切显示。【3·创作页重排】顺序=状态行（连接状态/公告/生效来源，计费说明移至底部）→改图区（原样）→01 提示词：中英文改 seg 标签切换（promptLang 纯 UI 状态，两份内容与草稿保存、英文优先提交口径不变），编辑框高 190px，下方复制/清空当前语言按钮（clipboard 写文本、只动当前份）+ AI 一键优化整块（按钮降为普通按钮避免与生成主按钮争视觉，逻辑/文案/撤销不变）→02 参考素材：总数徽标（N/16）、上传与从储存库选图入口原样、三列网格统一 aspect-square 缩略图、点图开面板内大图层（refLightbox）、每张新增「更换」（replaceRef 隐藏 input + fileToBase64 替换指定下标、origin=manual）与原「删除」、自动带入标注条与两条说明原样、上限 16 校验原样→03 人物参考关联：原人物选择区改 surface-alt 卡片，新增关联信息卡（缩略图=资产卡主图/人物图/场景图 preview、人物名、「已关联」状态、参考说明=mergeInfo.source + 自动带入张数），「查看绑定详情」展开原 mergeInfo 块（来源/待核对/冲突，默认收起）、「解除关联」=onSelectPerson('') 清空选择 + 只清 origin=auto 的参考图；自动识别/绑定/拼词逻辑一字未动→04 生成设置：surface-alt 卡片，关键项直出（质量/比例含比例提示、人物画风、三视图勾选），模型族/模型/手动模型/请求超时/下载超时/重试/服务节点收进「高级设置」折叠（默认收起），全部字段与 onChange 原样、无配置删除。【4·底部固定区】字数行、生成按钮（btn-primary、禁用条件/提交中态/aria-label 原样）、两个前置提示、提交与并行说明（改 help-fold 折叠）、submitError、hostRouteNote、计费说明移入面板底部固定条，滚动不离场；生成记录页同样显示（重提失败的 submitError 也可见）。【5·生成记录页】原记录区整块移入第二标签：任务/时间/缩略图/状态/全部操作（看提示词/预览/下载/存卡/设人物图/设场景图/续查/重提二次确认/删除二次确认）与展开详情一字未改；轮询 effect 与记录查询不依赖当前标签，切页不丢任务状态。【不动】全部生图业务逻辑与状态（草稿 PanelDraft、submitAndRecord、pollRecord、saveRec*、改图模板、锁脸句、溯源、总设置解析）、模型 API 与参数、人物资产系统、自动绑定、上传管理、记录数据与存储结构；DISSECT_CHAT_RULES 一字未动、3 天清理与清除下限未动、监控页未碰、封面记录 id 43 未动；不恢复自动下载；沙箱未点真实生成。基线升 v6.34（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：宽度手感与拖拽、中英切换、上传/更换/删除、点一次真生成、最小化关闭、各尺寸布局、中间剧本台不受影响。",
+  },
+  {
+    version: "v6.33",
+    date: "2026-11-16",
+    text: "这一版按你那句「把这个按钮进行删除吧」，把监控账号页每张视频卡片封面顶部的「放入聊天框」按钮删掉了。你真机点过之后确认了：浏览器不让网页把视频文件复制进剪贴板，点完只在页面上红字报错，这条路走不通，所以这次整颗删干净——所有卡片、三款卡片样子、五种视图都没有这个按钮了，不留空白占位、不留灰着点不了的按钮，封面恢复成加这个按钮之前的样子：封面图、右下角时长、「已解剖 ✓」标记都照旧，点封面其他地方还是老样子。只供这个按钮用的那套东西也一并清掉了：取视频文件、往剪贴板里写、成功和失败的提示文字、防止重复点的判断，页面里都不再有，以后也不会再冒出「没能放进剪贴板」那种红字报错，也不会再有「已复制，去左侧聊天框按 Ctrl+V」那种绿字提示。其他全没动：卡片底部「播放」「详情」照常能点（按达人分组的卡片上原有的「删除」也还在），播放窗和详情窗里没有残留入口；顶部页签和工具栏按钮、「使用说明」、中转那行、筛选栏都没改；解剖指令模板一个字没动，3 天清理和清除下限没动，53 张卡片和 16 个达人没动，云端库文件和账本没动，扩展上报和导入 Excel 建卡照旧，也没有提交任何生图。真机等你亲验：打开监控页翻几张卡，卡片封面顶部应该干干净净、没有「放入聊天框」按钮，排版跟以前一样。",
+    features: "监控页删「放入聊天框」按钮（v6.33，用户主聊直派，原话「那你把这个按钮进行删除吧」；纯客户端 monitorbench.tsx 删除 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：背景——该按钮 v6.31（问题 #111611）加在卡片底部、v6.32（售后单 #111612）移到封面顶部并删下载兜底；用户真机实点后剪贴板写文件被浏览器权限拦住、页面红字报错，确认点按钮没法让视频直接进聊天框，亲口定删。【删除清单】①MonitorCardCore 的 coverImg 封面顶部覆盖层「放入聊天框」按钮 JSX 整段删除（三款设计与紧凑款共用一处落点、五视图全覆盖），不留空白占位、不留禁用灰按钮，封面恢复加按钮之前的样子（封面图 / 时长角标 / 云端标 / 未确认置顶标 / 「已解剖 ✓」标记一字未动，紧凑款整卡点开详情等封面其余区域行为不变）；②仅供该按钮使用的 useChatCopy hook 整段删除（取文件：getCloudVideo 查云端存档 → fetch 同源地址、无存档 fetch 直链、180 秒上限；手势内以 promise 值 ClipboardItem 发起 navigator.clipboard.write、实 File 重试支路；failFetch / failClipboard 两路失败文案），连同模块级 lastChatCopiedKey 防重复、chatCopyKeyForVideo / chatFileNameForVideo / formatFileSize 三个辅助函数与 ChatCopyState 类型一并删除（formatFileSize 全文件仅此一处使用，已核）；③MonitorCardButtons 的 chatState / chatMsg 入参（声明、解构、三处调用点传参）与按钮行下方的反馈文字段（成功绿字 role=status / 失败红字 role=alert）整段删除，页面上不再出现「没能放进剪贴板」红字与「已复制，去左侧聊天框按 Ctrl+V 粘贴」绿字；④随之失效的 monitorbench 对 cloudvideo 的 isCloudVideoId 导入摘除（cloudvideo.tsx 本体不动）。【服务端】getCloudVideo 动作确认别处在用（cloudvideo.tsx 的 useCloudVideoSource 播放器云端优先、监控页云端已存视图 cloudOnly 播放、分析页抽帧），保留未删；无任何只供此按钮的服务端动作。【不动】卡片封面 / 标题 / 播放量等数据与标签、「播放」「详情」按钮与原有功能（分组视图卡片原有「删除」不动）、「已解剖 ✓」标记、播放窗 / 详情窗（本无此入口）、顶部页签与工具栏按钮、「使用说明」、中转行、筛选栏（视图 / 发布日期 / 平台 / 版式）、扩展上报 window.__monitorIntake、导入 Excel 建卡、DISSECT_CHAT_RULES 一字未动、3 天清理判定与清除下限 clearedAtMs、云端库文件与 state.json 账本、全部正式数据、封面记录 id 43；不恢复自动下载；不自动生图；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.33（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台打开监控页核对卡片封面顶部没有「放入聊天框」按钮、排版正常。",
+  },
+  {
+    version: "v6.32",
+    date: "2026-11-16",
+    text: "这一版按你售后单 #111612 的话改监控账号页的「放入聊天框」按钮，就改两处。第一处是位置：按钮从卡片底部那一排移走了，改放到每张卡片封面的顶部——贴着封面顶边、横向居中偏左，就是你截图里红箭头指的那个位置，是一个压在封面上的半透明小按钮，在封面图上看得清、点得到；封面右下角的时长角标不会被它挡住，点封面其他地方还是老样子。卡片底部恢复成只有「播放」「详情」两个按钮（按达人分组的卡片还多一个「删除」，跟以前一样）。三款卡片样子、五种视图都有这个按钮，版式预览里的示例卡没有。第二处是点完的结果：上一版浏览器不让网页复制视频文件时，它会改把视频下载到你的电脑——你说不要下载、要发到聊天内，这次把下载那条路整段删掉了，点这个按钮永远不会往你电脑里下文件。顺带修了上一版真机上容易复制失败的一个原因：以前是先把几十兆的视频整个取回来、再往剪贴板里放，取文件花掉几秒钟，浏览器给这次点击的授权就过期了，复制被拒才掉进下载；现在改成你点下去的那一刻就先把复制发起、文件在后台慢慢取，授权不会过期，剪贴板这一程更容易一次走通。复制成功后按钮变「已复制 ✓」，按钮下面绿字把下一步写全了：「已复制，去左侧聊天框按 Ctrl+V 粘贴，视频会出现在输入框里，未发送」。还是要说清：工作台页面和左边聊天框不是同一个框，页面没法直接把附件塞进聊天输入框，所以最后一下 Ctrl+V 还得你自己按；按完视频就以待发送附件出现在输入框里，你不点发送就不会发出去，聊天记录里也不会多出任何东西，输入框里原来打好的字不会被动、能接着打字、也能把附件删掉。同一条重复点不会重复复制，会提示已经复制好了。要是剪贴板实在写不进去（浏览器不支持、权限被拦），按钮下面会红字把原因写明，你可以再点一次重试——什么都不会发、也什么都不会下载。取文件那部分没变：云端已经存过的优先用云端那份完整文件，没存过的才去下卡片上的直链；直链过期取不到时红字说明原因、什么都不发、可以重试。其他全没动：「播放」「详情」照常，排序、筛选、发布日期、平台都没改，解剖指令模板一个字没动，3 天清理和清除下限没动，53 张卡片和 16 个达人没动，云端库文件和账本没动，也没有提交任何生图。真机等你亲验：打开监控页看按钮是不是在卡片封面顶部；点一张卡的按钮，去左边聊天框按 Ctrl+V，确认这条完整视频以待发送附件出现、而且没有被发送出去，电脑上也没有多出下载文件；再确认输入框原来的字还在、能继续打字、能删附件。",
+    features: "监控页「放入聊天框」按钮移位 + 删下载兜底（v6.32，售后单 #111612 针对问题 #111611，用户原话「放在箭头指向的位置，发到聊天内不是下载」；纯客户端 monitorbench.tsx：useChatCopy hook 新落点 + MonitorCardCore coverImg 覆盖层按钮 + MonitorCardButtons 瘦身 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【1·移位】「放入聊天框」按钮从 MonitorCardButtons 底部第一排删除，改放 MonitorCardCore 的 coverImg 封面顶部覆盖层一处落点（三款设计与紧凑款共用、五视图全覆盖，版式预览示例卡 SAMPLE_VIDEO_ID 不渲染）：贴顶边 top=sz(6)、横向居中偏左（left 50% + translateX(-62%)），半透明黑底白字圆角小按钮（成功态转绿色 rgba(5,150,105,0.92) 同「已解剖 ✓」角标口径）、白边 + 阴影保证封面图上可读、尺寸随卡片档位 sz() 缩放、zIndex 2、点击 stopPropagation（紧凑款整卡点开详情不变，封面其余区域行为不变）；不压右下角时长角标（底部）；例外——带「已解剖 ✓」标记的卡片左上角已被该标记占住、居中偏左会压住它，按钮按售后单允许的封面顶部内微调改落右上角（仍在封面顶部一带）。底部按钮行恢复 播放 / 详情 / 删除（v6.31 之前样子）。【2·状态上移】取文件 + 写剪贴板逻辑从 MonitorCardButtons 抽成 useChatCopy(video, title) hook 由 MonitorCardCore 持有，MonitorCardButtons 改为只经 chatState/chatMsg 入参在按钮行下方画反馈文字（role=status/alert、颜色口径不变），三处调用点同步传参。【3·删下载兜底】v6.31 的 ClipboardItem 不可用/被拒 → object URL 下载到本机整段删除，ChatCopyState 的 downloaded 态一并删除；写不进只走 failClipboard 红字（role=alert）：「没能放进剪贴板——浏览器没让网页把这个视频文件复制进去，什么都没发、也什么都没下载。请再点一次试试；如果反复不行，换 Chrome 或 Edge 打开工作台再点这个按钮。」按钮恢复可点可重试；绝不下载、绝不拿链接/封面/标题代替完整文件。【4·剪贴板走通修复】排查 v6.31 真机失败主因：旧代码先 await getCloudVideo + fetch 完整文件（几十 MB、数秒）才调 navigator.clipboard.write，浏览器 transient activation（点击授权，约几秒）已过期 → NotAllowedError 被拒 → 掉进下载兜底，用户实点结果就是「变成下载」。新写法：点击处理函数内同步发起 navigator.clipboard.write，ClipboardItem 的值给 tracked（将来的 File）promise，取文件在后台完成（Chrome / Safari 支持 promise 值 ClipboardItem，写入在手势内登记、授权不过期）；构造同步抛错先转 rejected promise 统一走重试支路；write 被拒且 fetch 未失败时（浏览器不收 promise 值等），文件取回后用实 File 再写一次；fetch 失败与剪贴板被拒分开记账（fetchFailed / noSource 标志），文案不混——取不到文件仍走过期红字口径、无来源走无存档红字口径。仍写不进的已知边界：浏览器完全不支持 ClipboardItem 写文件（如旧版 Firefox）或页面失焦/权限策略拦截时只能红字重试或换 Chrome/Edge，页面代码无法直接往左侧聊天输入框挂附件（不同文档），Ctrl+V 一次仍需用户手动。【5·反馈文案】成功绿字改全下一步：「已复制，去左侧聊天框按 Ctrl+V 粘贴，视频会出现在输入框里，未发送。（文件名，大小）」；防重复绿字同步改「这条已经复制好了，去左侧聊天框按 Ctrl+V 粘贴，视频会出现在输入框里，未发送。」；按钮 busy 态「取视频中…」、done 态「已复制 ✓」不变。【不动】取文件来源与校验（云端优先 getCloudVideo 同源地址、无存档再 fetch 直链、180 秒上限、非 2xx/空文件/HTML 错误页判失败）、防重复 lastChatCopiedKey、播放/详情/删除功能与样式、视图/排序/发布日期/平台筛选、DISSECT_CHAT_RULES 与解剖指令模板一字未动、3 天清理判定与清除下限 clearedAtMs、云端库文件与 state.json 账本（本版只读 getCloudVideo 查存档）、中转与扩展上报、其他所有页面与全部正式数据、封面记录 id 43；不恢复自动下载；不自动生图；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.32（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台打开监控页看按钮在封面顶部，点一张卡按钮后去左侧聊天框 Ctrl+V 确认完整视频以待发送附件出现且未发送、电脑无新增下载文件、输入框原有文字保留可继续打字可删附件。",
+  },
+  {
+    version: "v6.31",
+    date: "2026-11-16",
+    text: "这一版给监控账号页的每张视频卡片加了一个「放入聊天框」按钮（问题 #111611），就在卡片底部「播放」「详情」同一排，样子跟其他按钮一样，五种视图、三款卡片设计都有。点它之后发生的事说清楚：它会先把这条视频的完整文件取回来（云端已经存过的优先用云端那份，没存过的才去下卡片上的直链），然后把整个视频文件复制进系统剪贴板，并在按钮下面绿字写明「已复制，去聊天框粘贴（Ctrl+V），未发送」。注意最后一步要你自己动手：页面没法直接往左边聊天框里塞附件，你点完按钮后去聊天框按一下 Ctrl+V，视频才会以待发送附件的样子出现在输入框里，输入框里原来打好的字不会被动，你还能接着打字、也能把附件删掉；你不点发送，它就一直只是草稿，不会自己发出去，聊天记录里也不会多出任何东西。同一条视频重复点不会重复复制，会提示你已经复制好了；换一张卡点，就换成那条视频。要是浏览器不让网页直接复制视频文件，它会改把完整视频下载到你这台电脑，并在按钮下面写明：把下载好的文件拖进聊天框就行。要是这条视频云端没存、直链又过期取不到文件，按钮下面会红字告诉你原因，什么都不会复制、什么都不会发，你把视频存云端或等链接刷新后可以再点。其他全没动：「播放」「详情」照常，排序、筛选、发布日期、平台都没改，解剖指令模板一个字没动，3 天清理和清除下限没动，53 张卡片和 16 个达人没动，云端库文件和账本没动，也没有提交任何生图。真机等你亲验：打开监控页点一张卡的「放入聊天框」，看按钮下面是不是出现绿字提示；再去左边聊天框按 Ctrl+V，确认这条完整视频以待发送附件出现、而且没有被发送出去，原来打的字还在、能继续打字、能删附件。",
+    features: "监控页卡片加「放入聊天框」按钮（v6.31，问题 #111611，用户截图红箭头指卡片要求点一下把完整视频放进左侧聊天输入框当待发送附件、不自动发送；纯客户端 monitorbench.tsx 的 MonitorCardButtons 一处落点 + cloudvideo.ts 的 isCloudVideoId 复用 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【技术路线·如实】工作台页面与左侧 Muse 聊天框不在同一个文档，页面代码无法直接往聊天输入框挂附件——沿用 v6.22「发送到聊天解剖」站内口径走剪贴板：按钮把完整视频文件写进系统剪贴板，用户在聊天框按 Ctrl+V 粘贴后视频才成为待发送附件；点按钮不发送、不产生聊天记录、不切页、不弹窗、不播放。【1·入口】MonitorCardButtons 第一排（播放/详情/删除同一排）新增「放入聊天框」按钮（btn btn-sm 同款样式与 btnStyle 档位缩放、flex-1 等宽、aria-label 写明复制完整文件放入聊天框待发送）；三款卡片设计与紧凑款共用同一渲染核、五视图（按播放量/按达人分组/按最新/云端上传/最新5条）全覆盖；版式预览示例卡（SAMPLE_VIDEO_ID 沿 v6.28 先例）不渲染此按钮。【2·取文件】点击先调既有 getCloudVideo 查云端存档：有则 fetch 其同源地址（完整文件、不过期）；没有再 fetch 卡片 videoFileUrl 直链；fetch 带 AbortController 180 秒上限；resp 非 2xx / 空文件 / text/html 错误页一律判失败。无云端存档且无直链时红字明示「云端没存档、卡片上也没有视频直链，什么都没复制」。【3·写剪贴板】new File([blob], 清洗后的标题.mp4, video/mp4) 经 ClipboardItem({\"video/mp4\": file}) 走 navigator.clipboard.write；成功后按钮变「已复制 ✓」、下方绿字（role=status）「已复制，去聊天框粘贴（Ctrl+V），未发送。（文件名，大小）」，并把该视频键记进模块级 lastChatCopiedKey。【4·防重复】同一条再点且键命中 lastChatCopiedKey 时不再取文件、不再写剪贴板，只绿字提示「这条已经复制好了，去聊天框粘贴（Ctrl+V）就行，未发送」；换一张卡则取那条并覆盖剪贴板。【5·兜底】ClipboardItem 不可用或写入被拒 → 把完整文件经 object URL 下载到本机（文件名同上），下方绿字明示「已把完整视频下载到这台电脑：把下载好的文件拖进聊天框就能发，未发送」；不用链接/封面/标题代替完整文件。【6·失败口径】取文件失败红字（role=alert）沿既有过期口径：「视频文件没取到——直链可能已过期（快手链接有时效），什么都没复制、也没发送。可以先把这条存云端，或等链接刷新后再点一次。」按钮恢复可点、可重试。【不动】播放/详情/删除功能与位置样式、视图/排序/发布日期/平台筛选、DISSECT_CHAT_RULES 与解剖指令模板一字未动、3 天清理判定与清除下限 clearedAtMs、云端库文件与 state.json 账本（本版只读 getCloudVideo 查存档、不写云端）、中转与扩展上报、其他所有页面与全部正式数据、封面记录 id 43；不恢复自动下载；不自动生图；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.31（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台点一张卡「放入聊天框」看绿字提示，再去左侧聊天框 Ctrl+V 确认完整视频以待发送附件出现且未发送、原有文字保留、可继续打字、可删附件。",
+  },
+  {
+    version: "v6.30",
+    date: "2026-11-16",
+    text: "这一版把监控账号页每张视频卡片下方的「下载视频」和「传文件」两个按钮删掉了（问题 #111610）。原来卡片底部有两排按钮：第一排「播放」「详情」（有的卡还有「删除」），第二排左边「⬇ 下载视频」、右边「⬆ 传文件」。现在第二排整排去掉，按钮本身删干净，不留空白行、不留灰着点不了的按钮，卡片高度跟着收紧，排版不错位。只供这两个按钮用的处理代码也一并清掉了：下载视频的拉取与文件名生成、传文件的选文件框、上传进度提示、覆盖确认窗和分片上传那一整套客户端代码，都不再留在页面里。其他全没动：每张卡的封面、标题、播放量、标签照旧，第一排「播放」「详情」照常能点，播放窗和详情窗里也没有残留入口；顶部页签和工具栏按钮、「使用说明」、中转那行、筛选栏、其他页面都没改；已有的 53 张视频卡片一张没删，云端库里已经存好的视频文件和账本一条没动；扩展上报和导入 Excel 建卡照旧，3 天清理的判定和清除下限也没动，也没有恢复自动下载。也没有提交任何生图。真机等你亲验：打开监控页翻几张卡，卡片底部应该只剩「播放」「详情」，没有第二排按钮、没有空白行。",
+    features: "监控页卡片删「下载视频」「传文件」两按钮（v6.30，问题 #111610，用户截图红箭头指向卡片底部第二排两按钮；纯客户端 monitorbench.tsx 删除 + cloudupload.ts 整文件删除 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删除清单】①MonitorCardButtons 第二排整段删除（「⬇ 下载视频」与「⬆ 传文件」并排 flex 行 + 下载失败红字 + 下载成功绿字一并删，不留空白占位，卡片高度随之收紧）；②仅供下载按钮用的 handleDownload（fetch 拉 blob + 120 秒 AbortController）与 downloadFileNameForVideo 文件名函数整段删除（全站仅此一处使用，replication 里的历史记载按惯例保留）；③「传文件」入口全链路删除：MonitorCardButtons / MonitorCardCore / VideoCard / CompactVideoCard 的 onUploadFile 入参与透传、五视图调用点的 handleUploadFileRequest 传参、监控页本体的 handleUploadFileRequest / handleUploadFileChosen / beginPickUploadFile、上传专属状态（uploadConfirmVideo / uploadProgress / uploadBusyRef / uploadPendingVideoRef / uploadFileInputRef）、隐藏 file input、底部上传进度浮条、「云端已有这条视频的存档」覆盖确认窗、cloudupload.ts 整个模块（384KiB 分片上传）与 monitorbench 的 import、随之失效的 ChangeEvent 类型导入；④服务端 uploadCloudVideoChunk / finishCloudVideoUpload / discardCloudVideoUpload 三个动作与特权契约按 v6.16 先例保留未删（只下线客户端入口），云端库已有视频文件、state.json 账本条目一字未动、不删任何已存视频。【保留】卡片封面 / 标题 / 播放量等数据与标签、第一排「播放」「详情」（及分组卡的「删除」）按钮与原有功能、播放窗 / 详情窗（本就无这两个入口，未动）、顶部页签与工具栏按钮、「使用说明」、中转行、筛选栏（视图 / 发布日期 / 平台 / 版式）、扩展上报 window.__monitorIntake、导入 Excel 建卡、3 天清理判定与清除下限 clearedAtMs、批量存云端与云端已存视图；不恢复自动下载。【不动】其他所有页面与模块、全部正式数据、封面记录 id 43；不自动生图；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.30（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台打开监控页核对卡片底部只剩「播放」「详情」、排版正常、无空白行。",
+  },
+  {
+    version: "v6.29",
+    date: "2026-11-16",
+    text: "这一版把监控账号页中间那个大粘贴框去掉了（问题 #111609）。就是「中转（服务费代理）：已连接」那一行下面、筛选栏上面那个横跨整页的输入框——以前把整段视频信息粘进去就能自动建卡，现在整个框连同边框和里面的提示文字一起删掉，不留空白，下面的筛选栏和视频卡片直接顶上来。页面上从此没有手动粘贴建卡的入口了；粘贴专用的解析代码也一并清掉，不会留个空壳在那。其他全没动：顶部页签和「拆解提示词库、导入 Excel、刷新、存云端、立即清理、一键清除」按钮都在，「使用说明」和扩展上报说明照旧，中转那行和「测试连接」照旧，筛选、排序、发布日期和平台下拉框照旧，已有的 53 张视频卡片一张没删，卡片上的播放、详情、下载视频、传文件都照旧；扩展上报（扩展点「数据上报」自动建卡）和导入 Excel 建卡这两条路也都还在，没受影响；3 天清理的判定和清除下限也没动。也没有提交任何生图。真机等你亲验：打开监控页看一眼，粘贴框应该不见了，筛选栏紧贴在中转那行下面，卡片排版跟原来一样。",
+    features: "监控页去掉中部大粘贴框（v6.29，问题 #111609，用户截图红框箭头指向中转行下方、筛选栏上方的大粘贴框；纯客户端 monitorbench.tsx 删除 + theme.css 一条专属样式删除 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删除清单】①填写区 textarea 整段删除（通栏单行框、深蓝灰底 #1f2c44、monitor-paste-field 类、placeholder 18 项示例全文、onPaste 粘贴即建卡入口、pasteBusy「正在解析并建卡…」状态行与外层 div 一并删，不留空白占位，筛选栏与卡片列表自然上移）；②粘贴专属状态 pasteInput / pasteBusy / pasteBusyRef 删除；③粘贴处理函数 handlePastedText 整段删除（解析 → fetchMonitorVideo 建卡那条手动粘贴管线下线）；④仅供粘贴框用的 parsePastedInfo 解析函数与 PASTE_FIELD_LABELS 规范顺序表删除；⑤theme.css 的 .monitor-paste-field::placeholder 专属样式删除。【保留】PASTE_FIELD_MAP 与 FormState / EMPTY_FORM（Excel 导入 handleExcelFile 仍在用，一字未动）、normalizeUrl / parseCount（Excel 与 intake 共用）；扩展上报 window.__monitorIntake 与 monitorintake.ts 全套未动；导入 Excel 按钮与建卡管线未动；顶部页签与工具栏按钮（拆解提示词库 / 导入 Excel / 刷新 / 存云端 / 立即清理 / 一键清除）、使用说明与扩展上报说明文字（内文仍提粘贴框，按 v6.05 既定边界未动）、中转状态行与测试连接、筛选栏（视图 / 发布日期 / 平台 / 版式）、已有视频卡片与全部数据、卡片播放 / 详情 / 下载视频 / 传文件、3 天清理判定与清除下限 clearedAtMs 全部未动。【不动】其他所有页面与模块、封面记录 id 43；不自动生图；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.29（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台打开监控页核对粘贴框消失、筛选栏紧贴中转行下方、卡片排版正常。",
+  },
+  {
+    version: "v6.28",
+    date: "2026-11-16",
+    text: "这一版给监控账号页的每张视频卡片加了一个「传文件」按钮，就在原来播放、详情、删除、下载视频那排按钮旁边，样子跟其他按钮一样。为什么加它：有些视频的快手直链过期了，云端那份要么没存上、要么只下了一半，解剖的时候只能拆一半。现在多一条路——你在自己电脑上已经下好的 mp4，点卡片上的「传文件」，选那个文件，它会分片传进云端库、跟这张卡片绑在一起，传完卡片就跟其他「已存云端」的卡一样，之后点「发送到聊天解剖」走的还是原来的流程，一个字没变。几个规矩说清：一是只收 mp4，选了别的文件会提醒你「只收 mp4」并停下，不会乱传；二是单个文件最大 500MB，跟原来下载存云端的上限一样；三是这条视频云端已经存过一份时，会先弹一句「已有存档，覆盖？」问你，点了覆盖才传——之前那份要是没下完整，正好靠这次补全，你点取消就什么都不动；四是文件传完服务端会验一遍：大小不能是 0、必须是正经 mp4、还要能读出能播的时长，验不过就直接拦下、不记账、不留半截文件，并告诉你原因让你重传（本机要是没有验时长的工具，就只验大小和文件头，并会如实告诉你只验了这两样）。上传时页面下方有进度提示第几片共几片。其他全没动：卡片数据、3 天清理、视图排序筛选、解剖指令模板、存云端和下载视频都照旧，也没有提交任何生图。真机等你亲验：找一张没存云端的卡点「传文件」选一个下好的 mp4，看能不能传上、卡片变没变成已存云端；再对同一张卡传第二次，看有没有先问你覆盖。",
+    features: "监控页卡片加「传文件」入口（v6.28，方案三·发文件直拆的工作台落地；用户已在主聊选定方案三——聊天框发文件即拆已生效，本单给监控页卡片加上传入口，绕开直链过期导致的云端文件缺失/截断；客户端 monitorbench.tsx + 新模块 cloudupload.ts + 服务端 actions.ts 3 个新动作 + privileged.ts 3 个新契约；无 DB schema 变更、无新 migration；NO real image/video generation submitted）：【1·入口】MonitorCardButtons 第二行改 flex 行：下载视频（有 videoFileUrl 才渲染）与新增「⬆ 传文件」并排、各 flex-1 等宽，样式同既有按钮（btn btn-sm + btnStyle 随版式档位缩放）；只有下载时下载按钮仍占满整行、只有传文件时传文件占满整行。三款卡片设计与紧凑款共用 MonitorCardButtons 一处落点全覆盖；onUploadFile 经 MonitorCardCore / VideoCard / CompactVideoCard 透传，五视图真实调用点（云端已存/按播放量/按最新/最新5条/按达人分组）全传 handleUploadFileRequest，版式预览示例卡不传、按钮不渲染。【2·流程】点按钮：无 videoId 提示不能关联；正在传另一个文件时提示等它传完；cloudSavedIds（既有 listCloudSavedVideos 清单）命中 → 先弹 ConfirmDialog 覆盖确认（标题「云端已有这条视频的存档」、confirmLabel「覆盖，选新文件」，确认才打开文件框、取消什么都不动）；未存档直接打开隐藏 file input（accept=.mp4,video/mp4）。选完再验：扩展名非 .mp4 → toast「只收 mp4 文件…没有上传」停下；0 字节 / 超 500MB 同样提示停下。【3·分片上传】cloudupload.ts 的 uploadCloudVideoFile：384KiB 一片（Base64 524,288 字符、请求体约 512KiB，稳低于通道约 1MB 上限，口径同人物图分片 v6.10），逐片顺序送 uploadCloudVideoChunk（单片失败原地重试共 3 次、同片重送服务端覆盖暂存），进度经底部浮条显示「第 x / y 片」，全片到齐调 finishCloudVideoUpload；任一步失败调 discardCloudVideoUpload 清暂存。【4·服务端落盘】特权层 cloudVideoUploadChunk 把分片落 video-cloud/uploads/<uploadId>/<片号>.part 暂存；cloudVideoUploadFinish 按片号拼回临时文件（缺片即拦、累计字节超 500MB 即拦、expectedSize 对不上即拦）→ 完整性校验（大小 > 0、MP4 头 ftyp、spawn ffprobe 读 format=duration：读不出时长判坏文件拦下；ffprobe 不存在 ENOENT 才回落只验大小与文件头、verifiedBy=size-header 如实标注，界面回执同步注明「只验了大小和文件头」）→ 通过才 rename 成 videos/{videoId}.mp4 覆盖旧存档 + upsertCloudDownloaded 按既有 state.json 锁协议（lock + 锁内重读合并 + tmp/rename）记账 {file, size, at}，字段与下载路径一致；校验不过删临时文件与暂存、不记账、旧存档一字不动。uploadId/videoId 双层白名单正则防目录穿越。【5·完成后】客户端 invalidate cloud-saved / cloud-storage 两查询，卡片按既有口径显示「已存云端」（云端已存视图、计数、播放器云端优先全走既有链路），toast 报大小与时长；「发送到聊天解剖」与现有流程完全相同。【不动】卡片数据、墓碑、清除下限 clearedAtMs、3 天清理、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板一字未动、v6.22 点一下直接复制不弹窗行为、批量存云端与下载视频逻辑；不恢复自动下载（定时任务已删）、不碰中转站与扩展；不自动生图；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.28（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台对一张未存云端的卡传一个 mp4 核对落盘与已存状态；对已存卡再传一次核对先弹覆盖确认、确认后替换、取消后原文件不动。",
+  },
+  {
+    version: "v6.27",
+    date: "2026-11-16",
+    text: "这一版给监控账号页加了一个「拆解提示词库」。原来顶部那颗「下载模板」按钮换成了绿色的「拆解提示词库」按钮，位置和大小都没变，点一下打开一个悬浮窗，不再下载文件。窗口里能管你存的拆解提示词：第一条默认预设就是现在「发送到聊天解剖」用的那套规则全文，一个字没改，分类放在「1:1视频复刻」里；你可以点预设名展开看全文、点「复制」把完整正文（连换行和编号）复制走、点「编辑」改名称、简介、正文和分类，窗口底部有「＋ 新增预设」可以自己加新的，数量不限。上面有搜索框（名称、简介、分类、正文都能搜）和分类下拉框（通用视频拆解、1:1视频复刻、Seedance 2.5、MiniMax H3、人物与场景分析、自定义预设），两个可以叠着用。预设都存在工作台的数据库里，关掉窗口、刷新页面再进来都还在；自己加的预设可以删（删之前会再问你一次），系统默认那条删不了、只能改和复制。要说清的是：这个库只是方便你管理和复制提示词，在库里改了默认预设，不会改变「发送到聊天解剖」按钮实际复制出去的那套规则，那边照旧用写死的规则全文，两边互不影响。「下载模板」这次只是按钮不显示了，生成模板的代码原样留着，以后想加回来不用重写。其他全没动：监控数据、视图、筛选、3 天清理、存云端、下载视频、其他页面和全部数据都照旧，也没有提交任何生图。真机等你亲验：打开监控页点一下绿色按钮，看默认预设在不在、展开全文对不对；再自己新增一条、改一条、删一条，刷新页面看还在不在。",
+    features: "监控页「下载模板」按钮替换为「拆解提示词库」（v6.27，用户附截图＋九节规格下单；客户端 monitorbench.tsx 按钮替换 + 新模块 dissectpresets.tsx 悬浮窗 + 服务端 dissect_presets 新表（migration 0047）与 5 个动作 + App 版本/日志 + replication 基线 + DATA-PLAN；NO real image/video generation submitted）：【1·入口】顶部工具栏原「下载模板」按钮（btn btn-sm 原位置原尺寸）替换为绿色按钮「拆解提示词库」（background/border var(--olive) #3cb179、白字），点击切换悬浮窗开关（再点关闭、点窗外关闭、Esc 关闭），不下载文件；downloadMonitorTemplateXlsx 本体在 monitorxlsx.ts 原样保留、仅摘除 monitorbench 的 import 与按钮调用，以后加回不用重写；使用说明与报错文案里提到「下载模板」的旧文字按本单口径未动。【2·悬浮窗】dissectpresets.tsx 的 DissectPresetLibrary：居中悬浮窗（max-w-3xl、max-h 86vh、内容区独立滚动、长正文 pre 限高 320px 内滚 + pre-wrap 断行不撑破），标题栏＋关闭按钮，搜索框（名称/简介/分类/正文四路匹配）＋分类下拉（全部＋6 个默认分类：通用视频拆解/1:1视频复刻/Seedance 2.5/MiniMax H3/人物与场景分析/自定义预设）可叠加筛选。【3·默认预设】窗口每次打开先调 seedDissectPreset 幂等落库：slug 固定 dissect-chat-rules-current、只在不存在时插入一次（slug 唯一索引兜底），正文由监控页把代码常量 DISSECT_CHAT_RULES（8126 字）原样经 seedBody 传入——服务端不抄第二份、保证与常量逐字一致；名称「聊天精修解剖规则（当前版）」、分类「1:1视频复刻」、kind=system。重复打开不产生重复预设（沙箱实证 created 先 true 后 false、列表恒 1 条系统预设）。【4·操作】复制 = copyTextToClipboard 复制完整正文（剪贴板 API＋execCommand 回落，成功按钮变「已复制 ✓」＋窗内反馈条）；查看 = 点预设名展开全文（带全文字数）；编辑 = 名称/简介/分类下拉/正文多行框（系统与自定义都可改、更新原行不新增、名称与正文必填校验）；新增 = 窗底绿色「＋ 新增预设」整宽按钮展开同款表单、保存即入列表；删除 = 仅 kind=custom 显示可用删除按钮且走 ConfirmDialog 二次确认，系统预设删除按钮禁用并带 title 说明、服务端 deleteDissectPreset 对 system 行硬拦回 ok:false。【5·数据】新表 dissect_presets（id/slug 可空唯一/name/intro/body/category/kind 枚举 system|custom/created_at/updated_at，migration 0047），动作 listDissectPresets（系统在前、其余按 updatedAt 倒序）/ seedDissectPreset / createDissectPreset / updateDissectPreset / deleteDissectPreset；不存 localStorage、关窗刷新不丢。【不动】「发送到聊天解剖」复制内容仍是代码常量 DISSECT_CHAT_RULES（buildDissectInstruction 一字未动，编辑默认预设不影响它）、分析记录、项目、监控数据、清理、视图、解剖指令模板与全部其他功能；不自动生图；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.27（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台打开监控页点绿色按钮核对默认预设全文、新增/编辑/删除各走一遍、刷新后数据仍在。",
+  },
+  {
+    version: "v6.26",
+    date: "2026-11-16",
+    text: "这一版只删监控账号页一个小东西：每张视频卡片封面顶部那颗绿色的「发送到聊天解剖」小标签，就是你截图里红箭头指着的那颗，现在整个拿掉了——所有卡片、所有视图、三款卡片样子和紧凑款都没有了，封面干干净净。封面旁边「达人 · 平台」那行深色字、卡片下面的播放、详情、删除、下载视频这些按钮都照旧，一个没动。要说清的是：这次只删了卡片上的这颗标签显示，背后的东西没删——点它时复制解剖指令、把视频排进待解剖队列的那套逻辑代码原样留着，待解剖队列里的数据一条没动；详情窗、播放窗里其他位置的入口也没动，你只指了卡片封面这一处，就只删这一处。其他全没动：存云端、下载视频、视图和筛选（包括发布日期下拉框）、3 天清理、扩展上报、其他页面和全部数据都照旧，也没有提交任何生图。真机等你亲验：打开监控页随便翻几张卡片，封面顶部应该看不到那颗绿色标签了，卡片其他部分和以前一样。",
+    features: "监控页卡片封面绿色「发送到聊天解剖」标签删除（v6.26，问题 #111606，用户截图红箭头指向第三张卡《记忆花的名字！》封面顶部绿色小标签；纯客户端 monitorbench.tsx 显示层一处删除 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删除点】MonitorCardCore 渲染核 coverImg 内封面右上角淡绿按钮（background rgba(187,247,208,0.95) / 深绿字 #14532d / aria-label「发送到聊天解剖：…」）整段 JSX 删除——三款卡片设计（极简/大图视觉/紧凑数据）与紧凑款共用同一渲染核，一处删除全覆盖、所有视图（按播放量/按达人分组/按最新/云端已存/最新5条）同步生效。【保留逻辑】onAnalyze 入参类型与 VideoCard/CompactVideoCard/五视图调用点的透传链路保留（渲染核不再解构、不再渲染），handleAnalyze、buildDissectInstruction、DISSECT_CHAT_RULES 常量、addDissectQueueItem 入队与去重、指令全文窗（自动复制失败时手动复制）全部一字未动——代码全文仍会出现「发送到聊天解剖」字符串（注释/常量/日志），那是保留的逻辑与历史记载，不算残留。【其他位置同名入口·未动】①分析模仿页顶部说明文字里提到「在监控页的视频卡片封面右上角点淡绿色的『发送到聊天解剖』」（analysisbench.tsx 说明文案，非按钮入口，按本单口径未动）；②详情窗只有「预填到分析模仿页」、悬浮播放窗无同名入口，均未动。【不动】待解剖队列数据、存云端按钮、下载视频、播放、详情、视图/排序/筛选（含发布日期下拉框、平台下拉框）、3 天清理、扩展上报与中转、其他所有页面、全部正式数据；不自动生图；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.26（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台打开监控页翻几张卡片，确认封面顶部绿色标签不见、达人·平台行与下方按钮正常。",
+  },
+  {
+    version: "v6.25",
+    date: "2026-11-16",
+    text: "这一版只改监控账号页一个小地方：抖音的卡片不再显示播放量那一段了。你截图指着的那张抖音卡上写着「▶ 0」——抖音导出的表格本来就没有播放量这一列，那个 0 不是真没人看、是压根没这个数据，摆在那儿容易看错。现在规矩是：只要是抖音达人的卡片、又没有播放数据，卡片上播放量那一段（▶ 图标和数字）整个不显示，只留点赞和发布时间，中间不会留多余的空档；三款卡片样子和点开后的播放窗口都一样。哪天这张卡有了真实的播放数字（比如你手工粘贴时填了播放量），播放量会照常显示出来。快手的卡片一个字没动——快手卡片就算播放量是 0，也照样显示「▶ 0」，因为那是真数据。其他全没动：按播放量排列时抖音卡还是排在最后、3 天清理和清理清单里的数字照旧、平台筛选和标签照旧、导入和粘贴照旧，全部数据一条没改，也没有提交任何生图。真机等你亲验：打开监控页看一张抖音卡，数据行应该只剩点赞和时间、没有「▶ 0」；再看一张快手卡，播放量还在。",
+    features: "监控页抖音卡片无播放数据时隐藏播放量段（v6.25，用户截图指着抖音卡上的「▶ 0」说抖音没有播放量就不要显示；纯客户端 monitorbench.tsx 显示层改动 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【判定】按有没有数据判、不按平台一刀切——hidePlay = 所属账号 platform 为「抖音」且该卡 playCount === 0，两处同口径（MonitorCardCore 渲染核、VideoPlayerModal 播放窗）。【卡片】MonitorCardCore 三款设计全覆盖：极简款数据行整段不渲染播放 span 与其后分隔符（点赞/时间不受影响、无多余空隙）；大图视觉款封面叠加行由「达人 · 平台 · ▶播放 · 时间」改为隐藏时不拼「 · ▶…」段；紧凑数据款不渲染「播放量」数据列且网格由三栏改两栏（点赞/发布两列均分、不留空列）。platform 入参沿用 v6.24 既有透传（VideoCard / CompactVideoCard 五视图调用点已传 a.platform），版式预览示例卡不传 platform、行为不变。【播放窗】VideoPlayerModal 新增可选 platform 入参，底部「播放 X · 点赞 Y」行在 hidePlay 时只显示「点赞 Y」；playing 状态加 platform 字段，五处 setPlaying 调用点（四视图 + 云端视图）透传 a.platform。【核对未改】详情窗 buildDetailText 18 行原文渲染既有「0 留空」口径（count(n)=n>0 才出数），抖音卡播放量行本就留空，本版不动。【不动】排序口径（按播放量排列抖音 0 播放卡仍排最后）、3 天清理判定与预览清单里的诊断数字、平台筛选与标签、导入/粘贴/上报链路、解剖指令里的点赞·播放信息头、全部正式数据、其他所有页面；不自动生图；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.25（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。【沙箱验证】见 DATA-PLAN v6.25 节（抖音 playCount=0 三款设计与播放窗无播放段 / 抖音 playCount>0 照常 / 快手 playCount=0 照常 ▶ 0 / 点赞与时间不受影响）；探针数据已清。真机待核：正式工作台打开监控页看抖音卡数据行只剩点赞与时间、快手卡播放量照旧。",
+  },
+  {
+    version: "v6.24",
+    date: "2026-11-16",
+    text: "这一版让监控账号页能直接吃抖音导出的表格了，并把快手和抖音分开归类。你亲手给的那份抖音表格（26 列）现在可以直接点「导入 Excel」导进来：它的「达人UID」会认成达人ID、「抖音号」也会存好，抖音多出来的那 9 列（视频类型、收藏量、分享量、推荐量这些）自动跳过、不报错；特别说明——「推荐量」不会被当成播放量，抖音表格本来就没有播放量这一列，导进来的抖音卡片播放量就是空着的。新建的达人会自动分平台：表格里有「平台」列就按列填（抖音 / 快手），没填就看链接——抖音链接归抖音、快手链接归快手；粘贴建卡时文本里带「平台：抖音」也一样认。已经建好的达人平台不会被改动。页面上视图那一行多了一个「平台」下拉框（全部 / 抖音 / 快手），选哪个平台就只看哪个平台的作品，选择会记住、只影响显示不删数据；每位达人名旁和每张卡片上都多了一个小平台标签，一眼分清这条是抖音还是快手的。还有一条清理口径：抖音卡片因为压根没有播放数据，不再参与按播放量的 3 天清理判定——不会因为「播放量是 0」被误删，会跟没采到数据的卡一样列进「无数据未判定」；快手卡片的清理规矩一个字没变。「下载模板」下的空表第一列多了「平台」，后面 18 项顺序没动。其他全没动：四个视图加「最新5条」的排序、发布日期筛选、云端、下载、解剖、其他页面和全部数据都照旧，也没有提交任何生图。真机等你亲验：把那份抖音表格导一次，看达人是不是归到抖音、卡片上有没有抖音标签；再切一下「平台」下拉框，只看抖音时应该只剩抖音的卡。",
+    features: "监控页 Excel/粘贴适配抖音模板＋平台分类（v6.24，用户亲手给抖音导出 26 列表格、要求工作台能吃这种格式并把快手和抖音分开归类；客户端 monitorbench.tsx / monitorxlsx.ts + 服务端 actions.ts 的 fetchMonitorVideo 与 evaluateMonitorCleanup + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration——monitor_accounts.platform 列既有；NO real image/video generation submitted）：【1·字段别名】PASTE_FIELD_MAP 一处加三条（粘贴与 Excel 共用）：「达人UID」→ creatorId、「抖音号」→ kuaishouId（字段名与库列名不改，它就是每行存的达人 handle 快照）、「平台」→ 新增 FormState.platform；抖音独有无处可存的 9 列（视频类型/收藏量/分享量/推荐量/视频标签/大家都在搜/所属合集/音频文件链接/视频话题）走既有「认不出的列跳过」静默忽略，不新增任何 schema 字段；严禁「推荐量」映射播放量——无「播放量」列时 playCount 保持 0。【2·平台入参】fetchMonitorVideo 新增可选入参 platform（trim、上限 20 字、默认空）；新函数 normalizeMonitorPlatform 归一化：抖音/douyin/抖音短视频（大小写不敏感）→「抖音」、快手/kuaishou→「快手」；空或认不出按 creatorUrl/videoUrl 域名推断（douyin.com→抖音、kuaishou.com→快手）；都推不出默认「快手」保住既有调用方行为。新建账号 insert 用归一化结果替换写死的「快手」；已有账号分支不碰 platform（patch 仍只补 name/creatorId）；动作 description 里「快手视频」改「快手/抖音视频」；墓碑、去重、刷新链接分支、isPinned、collectSource 一字未动。客户端粘贴建卡与 Excel 导入两处调用透传解析出的 platform（表单界面不新增输入框；intake 扩展上报不传、靠域名推断，行为与新默认一致）。【3·Excel】handleExcelFile 每行透传「平台」列值、无此列靠服务端推断，toast 汇总格式不变；creatorId 回退提取仍只认 /profile/<id>，抖音行靠「达人UID」列直给，缺该列时 creatorId 留空照常建卡。【4·模板】downloadMonitorTemplateXlsx 调用处表头改「平台」+18 规范名（顺序一字不动），文件名「监控视频导入模板.xlsx」不变；别名只在导入时认、不进模板表头。【5·平台分类显示】视图行加「平台」下拉框（全部/抖音/快手，仿 #111602 发布日期下拉框）：经 displayAccounts 与发布日期筛选叠加、筛全部现有视图、只影响显示不删数据、选择记 localStorage（monitor-platform-filter-v1）、默认全部，页首计数行与空态文案同步；达人行（按达人分组 / 最新5条既有 {a.platform} 徽标复用）与五视图全部卡片在达人名旁补小平台标签（MonitorCardCore 新增 platform 入参，三款卡片设计均在达人名后拼「· 平台」，VideoCard / CompactVideoCard 透传、五处渲染点传 a.platform）；不新增视图、不动现有视图排序口径。【6·清理抖音口径】evaluateMonitorCleanup（服务端唯一判定处）新增：账号平台为「抖音」且 playCount=0 的卡片视为「播放数据未知」进「无数据未判定」不删（抖音导出结构性缺播放量，是既有 0/0 规则的延伸）；快手判定一字不动；previewMonitorCleanup 共用同一判定、未判定清单同步列出；删除日志与规则文案口径不变。【7·说明文字】监控页使用说明只在 Excel 导入那几句后补一段：抖音模板「达人UID」「抖音号」列认、「平台」列可填抖音/快手不填按链接自动认、抖音卡片因无播放数据不参与按播放量的清理判定；其余说明文字（含已过时的视图数记载）不动。【不动】监控数据与全部正式数据、云端/下载/解剖/封面/打包备份、封面记录 id 43；不自动生图；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.24（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。【沙箱验证】见 DATA-PLAN v6.24 节（26 列抖音表 3 行导入 + 重复导入 + 平台筛选与标签 + 清理预览抖音/快手对照 + 模板表头 + 旧 18 列快手回归）；探针数据已清。真机待核：正式工作台导入那份抖音表格核对归类与标签；平台下拉框切换核对计数；下载模板核对首列「平台」。",
+  },
+  {
+    version: "v6.23",
+    date: "2026-11-16",
+    text: "这一版把监控账号页「发送到聊天解剖」复制出去的那套解剖规则，整个换成了你在主聊里亲手发的新版本。以前是 9 条简版规矩，现在是完整的 14 节：先核台词和时间轴、对说话人、逐镜头拆解，然后多了整整一套连续性审核——人物站位和空间、道具的出现消失、动作完整性、场景环境，都要逐镜头交叉核对；再往后是原片穿帮破绽审核（问题分四类标注、严重程度 S1 到 S4 分级）、按最小改动原则修复、修复完再做一次全片二次审核，最后才是时长切割、两份 MiniMax H3 提示词、存档套用和最终执行纪律。核心口径也写死了：先还原原片、再查破绽、最后修复，修复不许改原剧情。复制出去的视频信息头（视频ID、标题、时长、达人、发布时间、点赞播放、描述话题、云端文件路径）一个字没变；卡片按钮复制的、待解剖队列里「复制指令」复制的、指令全文窗里看到的，用的是同一份，跟着一起换新。其他全没动：监控页其他功能、其他页面、全部数据都照旧，也没有提交任何生图。真机等你亲验：随便找一张卡点「发送到聊天解剖」，把复制出来的指令粘出来翻一遍，应该是新版 14 节、结尾停在「尽可能实现真正的 1:1 高质量复刻」。",
+    features: "监控页「发送到聊天解剖」解剖规则全文换新版 14 节模板（v6.23，用户在主聊亲手发全文、要求现在就改；纯客户端 monitorbench.tsx 的 DISSECT_CHAT_RULES 常量一处替换 + 常量上方注释同步改写 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【替换】DISSECT_CHAT_RULES 旧 9 条简版全文下线，换成用户新定全文（8126 字符）：开头核心目标（1:1 影视级逆向拆解＋充当连续性审片师、先还原原片事实再查问题最后合理修复、不得因修复改变原剧情）＋14 节——1 核台词与时间轴（tiny ASR 定时间轴与条数、文字仅草稿；1fps 逐帧读烧录字幕核对、字幕为准并记录不一致；易错处 3fps 复核；逐条记录编号/原文/起止时间/人物/镜头/疑点；无法确认标 lowConfidence 禁编造）／2 对说话人及人物身份（口型/构图/声音/语义闭环交叉对位、无依据标 lowConfidence；人物编号与外貌严格锁定不串演；最多 10 位按出镜时长/台词量/剧情重要度/关键动作/转折五维筛选）／3 逐镜头逆向拆解（基本信息/画面与构图/摄影机与运镜/人物动作与表情/视听信息/视觉效果六组逐项提取、不许一句话概括）／4 人物站位与空间连续性审核（场景空间位置与当前画面位置两套坐标分开记、建站位图、反打越轴先判机位不误判换位、逐镜头交叉核对九项）／5 道具出现消失与状态连续性审核（逐件十三项记录、十项排查、无交接不许换持有者、合理剪辑省略不机械判穿帮）／6 动作完整性与剧情逻辑审核（起始→过程→完成→衔接四段齐全、关键动作重点查）／7 场景与环境连续性审核（场景资产逐项提取、九项核对、sceneName 与 scenes 的 name 逐字相同、道具无特殊不加）／8 原片穿帮破绽与错误审核（人物/道具/空间/动作/剧情/视听六大类、CONFIRMED_ERROR/SUSPECTED_ERROR/INTENTIONAL_EDIT/UNCERTAIN 四类标注、S1–S4 分级、逐问题十项记录、先判有意剪辑不误报）／9 破绽修复与最小化修改（最小改动/人物关系保护/空间连续/道具来源/动作完整/镜头保护/剧情保护七原则、五级修复优先级、逐次十一项修复记录、只报问题不给修复版禁止）／10 修复后全片二次审核（十三项复核、修复镜头与前后镜一起复核、未解决保留记录不许谎称、出问题/已修复/未解决三清单＋二次审核结果）／11 时长与镜头切割规则（actionSeconds 整数、原始时间轴保留、原片时长与重制时长分开记、动作没做完不切）／12 两份 MiniMax H3 六段式中文提示词（按剧情复刻版＋每镜 10–15 秒生成版：攒够约 10 秒优先在转折点或动作完成点换镜、动作超 15 秒保完整不强切、下一镜继承上一镜结束状态）／13 最终输出与存档格式（十一项交付清单、格式要求十一条、修复前事实与修复后方案分开记、最终分镜以修复后版本为准）／14 存档与套用（按分析模仿页现有记录格式存档、存档内容七项、裸标题一键套用）＋最终执行纪律十条与最高优先级序（原片准确性＞人物一致性＞空间与道具连续性＞动作完整性＞剪辑节奏＞视觉效果）。━━━ 分隔线（每节两条）、空行、编号、标点全部按用户原文逐字保留。【注释同步】常量上方注释里 v5.58 的「9 条」「2~4 主角改 10 位」等旧说法整段改写为新版 14 节＋连续性审核＋修复＋二次审核口径，不留过期注释。【不动】buildDissectInstruction 的视频信息头（请帮我解剖这个视频／视频ID／标题／时长／达人／发布时间／点赞·播放／描述话题／云端文件路径）一字未动；常量名与拼装方式不变，卡片按钮、队列「复制指令」、指令全文窗同源复用自动同步；其他所有监控功能、其他页面、全部正式数据；不自动生图；封面记录 id 43 不动；不碰 flor／选配页／新台「监控账号」／GitHub／exe。基线升 v6.23（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台点一张卡「发送到聊天解剖」粘出核对新版 14 节全文、顺序与结尾句；队列「复制指令」与指令全文窗同为新文本。",
+  },
+  {
+    version: "v6.22",
+    date: "2026-11-16",
+    text: "这一版按你点的方案，把监控账号页卡片上「发送到聊天解剖」的拦路弹窗拿掉了。以前点这个按钮会先查一遍这条视频存云端了没有：没存的，不复制、不进队列，只弹一个「先点存云端，再点分析」的窗口挡着你，得先去存云端再回来点。现在这个检查和这个窗口整个删掉了——不管存没存云端，点一下就直接把解剖指令复制好、提示你去聊天框粘贴发送，同时照旧把这条排进待解剖队列（同一条重复点不会重复排）。解剖指令本身一个字没改，还是原来那套精修规矩；自动复制万一没成功，还是会把指令全文摆出来让你手动复制，不会悄悄失败。要提醒一句你已经知道的：没存云端的视频，指令发到聊天里助手也读不到文件、解剖不了，还是得回来先点「存云端」——这是你选的取舍，这一版没有再加任何拦路或警告。其他全没动：「存云端」按钮和云端存储、下载视频、四个视图加「最新5条」、发布日期筛选、3 天清理、已解剖标记、其他页面和全部数据都照旧，也没有提交任何生图。真机等你亲验：找一张没存云端的卡点「发送到聊天解剖」，应该直接出「已复制解剖指令」的提示、不弹任何窗口；再点一张已存云端的，行为和以前一样。",
+    features: "监控页「发送到聊天解剖」删除存云端拦路弹窗（v6.22，用户在主聊亲手点选方案「直接拿掉弹窗，点一下就复制」；纯客户端 monitorbench.tsx 一处链路 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更；NO real image/video generation submitted）：【删除清单】①handleAnalyze 内的云端清单现查整段删除（listCloudSavedVideos 调用 + savedIds 判定 + 查询失败 toast 分支），点按钮不再查云端；②「先存云端，再点分析」弹窗整段删除（标题「先点存云端，再点分析」、正文「还没存云端……先把这条存云端，再回来点」、按钮「知道了」「去存云端」两个入口全删），连同其专属状态 dissectNoCloudTitle 一并摘除；③无 videoId 时原走弹窗的分支一并删除。【改后行为】点一下直接走原「已存云端」路径：buildDissectInstruction 组装指令（模板一字未改：项目 41 精修标准、人物上限 10 位、元数据字段原样）→ addDissectQueueItem 入待解剖队列（服务端同 videoId 去重不变；无 videoId 时入队校验失败只在 toast 带一句、不拦复制）→ copyTextToClipboard 复制，成功 toast 原句「已复制解剖指令，去聊天框粘贴发送（，已加入待解剖队列）」；复制失败仍弹指令全文窗手动复制，不静默失败；dissectBusyRef 同卡防重入保留。【全文核查】monitorbench.tsx 内「先存云端 / 还没存云端 / 去存云端 / dissectNoCloud」零残留；App.tsx 历史更新日志里的旧记载按惯例保留不改；#111603 改过的下载失败提示文案未动。【不动】解剖指令模板全文、待解剖队列与去重、「已解剖 ✓」标记、云端存储与「存云端」按钮、下载视频按钮、全部视图/排序/筛选（含发布日期下拉框）、3 天清理、扩展上报与中转、其他所有页面、全部正式数据；不自动存云端、不加新提示或警告；不自动生图；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.22（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：正式工作台找一张没存云端的卡点「发送到聊天解剖」，核对直接复制 + 入队、不弹任何窗口；再点一张已存云端的核对行为与改前一致。",
+  },
+  {
     version: "v6.21",
     date: "2026-11-15",
-    current: true,
     text: "这一版给「监控账号」页加上了「24 小时自动更新最新 5 条」里页面能做的部分，先把丑话说在前面：自动去快手抓新作品那条腿还没接进来——网页自己调不通快手（要登录、还要快手页面现算的签名），所以这一版不会真的自动抓取，谁也不会拿假数据冒充更新；页面上能看到的「下次应更新」时间只是个提示，到点不会自己动。新作品还是靠老路子进来：粘贴建卡、扩展上报、Excel 导入，哪条路真进来新卡片，那位达人的「上次更新」时间就会自动记成当时的时间、并写明是哪条路来的。具体新东西有四样：①视图多了一个「最新5条」——按达人分组，每位达人只看按发布时间排的最新 5 条，标了置顶的排除在外；还没确认是不是置顶的卡照常显示，卡上会带一个橙色小标记写着「未确认是否置顶」，发布时间没填的排在最后。②每张卡的详情窗里多了「置顶标记」：三个按钮「标为置顶 / 取消置顶 / 改回未确认」，哪条是置顶你自己说了算，随时能改。③达人行上多了「参与24小时自动更新」开关，旁边写着上次更新时间和下次应更新时间；页面上方还有一个总开关，间隔固定 24 小时改不了——这两个开关现在只是先把名单和状态记下来，等以后自动抓取那条腿接进来，就按这份名单干活。④扩展上报的视频如果带了是否置顶的信息，会直接存下来（带 1 是置顶、带 0 不是），没带就先记「未确认」。原来的四个视图、排序、3 天清理、云端和下载全都没动，现有达人和卡片数据一条没改（只加了新字段，老卡片都先记成「未确认是否置顶」）。真机等你亲验：打开监控账号页切到「最新5条」，看每位达人是不是最多 5 条、发布时间最新的在前；随便点开一张卡的详情，用三个按钮把置顶标记来回改一次，看「最新5条」里这张卡跟着出现或消失；再给一位达人打开「参与」开关，看上次更新那行字对不对。",
     features: "监控账号页新增「24 小时自动更新最新 5 条（置顶除外）」的页面部分（v6.21；采集腿缺口如实声明：网页调不通快手——需登录 + 页面签名，自动抓取不在本单内，不造假数据、不加假定时器、不模拟更新；migration 0046 只加列 + monitor_meta 两键默认值，现有数据一律不动）：【改动1·数据】monitor_accounts 加 auto_update（0/1 默认 0）/ last_collected_at（可空毫秒）/ last_collect_status（文本默认空）；monitor_videos 加 is_pinned（可空，NULL 未确认 / 0 非置顶 / 1 置顶，现有行全 NULL）；monitor_meta 加 monitor_auto_update_enabled（默认 0）/ monitor_auto_update_interval_hours（默认 24）。【改动2·达人行】达人分组视图每位达人行下加 AutoUpdateControl：开关「参与24小时自动更新」（新动作 setMonitorAccountAutoUpdate 写 auto_update）+ 状态行「上次更新：<时间或待采集>（来源）· 下次应更新：<上次+24h 或待采集>」；fetchMonitorVideo 真正新建卡片时（重复跳过不算）把该达人 last_collected_at 写当前时间、last_collect_status 按真实路径写 手动粘贴 / 扩展上报 / Excel导入（collectSource 入参，粘贴与 Excel 客户端显式传、intake 走 fromIntake 推导）；本动作不写「自动采集」来源。【改动3·新视图】MonitorViewMode 加 latest5，视图按钮行加「最新5条」（localStorage 键 monitor-view-mode-v1 口径不变，默认仍 collected）；latestFiveVideos 口径：排除 is_pinned=1、按 publishedAt 倒序（缺失排最后、不回退 createdAt）取前 5；按达人分组显示全部有卡达人，头行带达人名 / 参与状态 / 上次更新；is_pinned=NULL 的卡经 pinnedUnknown 透传在 MonitorCardCore 封面右上角打橙色「未确认是否置顶」小标；版式沿用 monitor-card-display-v1；批量存云端清单同步 latest5 口径。【改动4·置顶标记】详情窗 VideoDetailModal 加「置顶标记」区：标为置顶 / 取消置顶 / 改回未确认三按钮走新动作 setMonitorVideoPinned 写 1/0/NULL；fetchMonitorVideo 加可选 isPinned 入参，intake 映射 mapIntakeRow 从 payload is_pinned/isPinned/pinned 归一化（1/true/'1'→1、0/false/'0'→0、其余不传），粘贴 / Excel 不新增置顶列。【改动5·总开关】监控页顶部（填写区上方）加「24 小时自动更新」总开关（新动作 setMonitorAutoUpdateEnabled 写 monitor_meta）+ 说明行（间隔固定 24 小时、下次应更新只做提示、不触发任何抓取）；listMonitorFeed 出参带 autoUpdateEnabled / autoUpdateIntervalHours，listMonitorAccounts / listMonitorFeed 的达人与卡片出参带新字段。【不动】现有 4 个视图与排序口径、3 天清理、云端与下载、解剖链路、去重与墓碑、清除下限、一键清除、链接备忘录、扩展上报与中转通道本身；不自动生图；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe。基线升 v6.21（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。【沙箱验证】五项证据见 DATA-PLAN v6.21 节（迁移副本核对 / 最新5条夹具 / 置顶三态 + intake is_pinned / 到货写状态 / 无 kuaishou 网络请求与假定时代码核对）；探针数据已清。真机待核：监控页切「最新5条」核对每达人 ≤5 条与置顶排除；详情窗三按钮来回改一次；达人行开关与状态行。",
   },
@@ -19482,7 +19160,7 @@ className={
 {h3PlotLenses.length > 0 && (
 <DocSection title="MiniMax H3 提示词（两版）">
 <p className="text-xs leading-5 text-[var(--dim)]">
-按 MiniMax H3 六段式拼装（subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music），一个镜头一段，整段粘进 MiniMax H3 桌面端用。参考图编号 &lt;Picture N&gt; 与每个镜头的镜头包附图清单同序同号：把本镜头附图按清单顺序传进 H3，编号就对得上；没有资产图的人物不占编号、定义句也不引用参考图。人物数据与上方人物表同源——在人物表改了造型 / 性别 / 音色、点「确认并同步到分镜提示词」后，这两版一起按新数据重拼。
+按 MiniMax H3 六段式拼装（subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music），严格照 H3 技能标准写：一个镜头一段，整段粘进 MiniMax H3 桌面端用。定义句是「&lt;Subject N&gt; 是 &lt;Picture N&gt; 中的……」的固定句式，每个人的音色紧跟在他的定义句后面单独成一行；保留段里每个人出场的 [Shot] 和正文逐镜对得上；正文里切镜后先接上一镜的结尾、停顿约半秒再出对白，台词写成 &lt;Subject N&gt; (S1) 说出，&lt;d&gt;[Chinese] 台词&lt;/d&gt;，多人齐声用一个复合编号 (S1,S2)；环境音是同一个地方不断的底噪，没有台词的镜头会写明没人说话；没有配乐数据，配乐段照标准写 N/A。参考图编号 &lt;Picture N&gt; 与每个镜头的镜头包附图清单同序同号：把本镜头附图按清单顺序传进 H3，编号就对得上；没有资产图的人物不占编号、定义句也不引用参考图。人物数据与上方人物表同源——在人物表改了造型 / 性别 / 音色、点「确认并同步到分镜提示词」后，这两版一起按新数据重拼。
 </p>
 <div className="seg mt-3" role="group" aria-label="H3 提示词版本切换">
 <button
