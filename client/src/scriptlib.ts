@@ -5734,14 +5734,18 @@ export function h3DurationGroups(script: ScriptData): ScriptGroup[] {
  * 积——当前组攒够 10 秒后，遇到转折点就在转折点之前收组、新
  * 镜头从转折拍开始；没攒够 10 秒时即使遇到转折点也不切（不
  * 留碎组）；一直没等到转折点、当前组已满 15 秒时才在当前拍
- * 收组（再等只会更超）。节拍不可拆：转折点来得晚时个别组会
- * 略超 15 秒、单拍本身超 15 秒时该组只能超、最后一组可能不
- * 足 10 秒，界面逐段标实际秒数。只用于 H3 10–15 秒版拼装，
- * 不写回分镜结构。v5.91 起按 actionUnits 装组：切点正赶上一个
- * 动作做到一半时不切、等动作做完（动作链整段同进同出，组可
- * 因此到 18 秒）；动作链本身比 18 秒还长时退回逐拍装，链内边
- * 界上转折点不切、只认满 15 秒的兜底切（动作链比一镜还长，
- * 只能在节拍边界切开）。没有动作链时与旧口径逐字一致。
+ * 收组（再等只会更超）。节拍不可拆：单拍本身超 15 秒时该组
+ * 只能超、最后一组可能不足 10 秒，界面逐段标实际秒数。只用
+ * 于 H3 10–15 秒版拼装，不写回分镜结构。v5.91 起按 actionUnits
+ * 装组：切点正赶上一个动作做到一半时不切、等动作做完（动作
+ * 链整段同进同出）；动作链本身比 18 秒还长时退回逐拍装，链
+ * 内边界上转折点不切、只认满 15 秒的兜底切（动作链比一镜还
+ * 长，只能在节拍边界切开）。没有动作链时与旧口径逐字一致。
+ * v6.58 起再加一条 15 秒硬顶（用户定「镜头不要超过 15s」）：
+ * 动作链上限由 18 秒收紧到 15 秒；装组时再并一单元就会超过
+ * 15.0 秒的，无论转折点还是链内边界都先收组——硬顶优先于转
+ * 折点与动作链完整性，两者只在硬顶之内继续生效。已存项目的
+ * 分组数据不受影响（本函数是纯视图分组，不写回）。
  */
 const H3_STRONG_CUT_REASONS = new Set([
   "场景转场",
@@ -5778,7 +5782,13 @@ export function h3ShortGroups(script: ScriptData): ScriptGroup[] {
   const view = storyboardScript(script);
   const flat = flattenStoryboardBeats(view);
   if (flat.length === 0) return [];
-  const units = actionUnits(flat, 18);
+  // v6.58（15 秒硬顶）：动作链上限由 18 秒收紧到 15 秒——比 15 秒
+  // 还长的链退回逐拍装；装组时再并一单元就会超过 15.0 秒的，无
+  // 论是不是转折点、是不是动作链内部，都先收组（硬顶优先于转折
+  // 点与动作链完整性，两者只在硬顶之内继续生效）。节拍不可拆：
+  // 单拍本身超过 15 秒时该组只能由这一拍单独成组、仍会超 15 秒，
+  // 界面逐段标实际秒数、批量生成时该镜头会被标出不提交。
+  const units = actionUnits(flat, 15);
   const packs: { items: FlatBeat[]; duration: number }[] = [];
   let cur: { items: FlatBeat[]; duration: number } = { items: [], duration: 0 };
   let prevUnit: ActionUnit | null = null;
@@ -5786,17 +5796,16 @@ export function h3ShortGroups(script: ScriptData): ScriptGroup[] {
     if (cur.items.length > 0 && prevUnit) {
       const prevBeat = prevUnit.items[prevUnit.items.length - 1];
       const firstBeat = u.items[0];
-      // 链内边界 = 同一动作链被 18 秒上限拆成逐拍单元后的单元
-      // 之间：动作还没做完，转折点不切、只认满 15 秒兜底切。
+      // 链内边界 = 同一动作链被 15 秒上限拆成逐拍单元后的单元
+      // 之间：动作还没做完，转折点不切、只认 15 秒硬顶切。
       const midChain = u.chainId === prevUnit.chainId;
       const isTurningPoint =
         prevBeat != null &&
         firstBeat != null &&
         h3IsTurningPoint(prevBeat, firstBeat);
       if (
-        (!midChain &&
-          ((cur.duration >= 10 && isTurningPoint) || cur.duration >= 15)) ||
-        (midChain && cur.duration >= 15)
+        cur.duration + u.duration > 15 ||
+        (!midChain && cur.duration >= 10 && isTurningPoint)
       ) {
         packs.push(cur);
         cur = { items: [], duration: 0 };
@@ -6485,6 +6494,155 @@ export function buildH3ShortVersion(
   const base = storyboardScript(script);
   const view: ScriptData = { ...base, groups: h3ShortGroups(script) };
   return buildH3Version(view, ctx, { actionCutRule: true });
+}
+
+// ---------------------------------------------------------------------------
+// v6.58 分镜 H3 批量生成：ShotBundle 构建（分镜页「发送到画布批量
+// 生成」专用）。
+//
+// 单事实来源纪律：prompt 直接调 buildH3TextForGroup（与「复制本
+// 镜头 H3」/ buildH3ShortVersion 同一函数、同一入参、同一视图），
+// 逐字一致；bindings 的人物顺序与编号直接取 lensCastEntries（与
+// 拼装函数同一套出场顺序），<Picture N> 只由有图人物按出场顺序
+// 依次编号（与 buildH3TextForGroup 内部的 pictureOf 口径一致）。
+// 场景在 H3 提示词里没有 <Picture N>，不进 bindings。
+//
+// 排除口径（A2/A4/裁决4）：超 15 秒、缺图、无图可带、参考图超
+// 9 张、编号核对没通过——任一命中该镜头标 excludedReason，不拦
+// 整批；绝不缩放时间戳、绝不改提示词文本。
+// ---------------------------------------------------------------------------
+
+export interface H3ShotBinding {
+  /** <Picture N> 的 N（1 起）。 */
+  picNum: number;
+  /** 提交体字段名 ref_image_{picNum-1}。 */
+  apiField: string;
+  /** <Subject N> 的 N（本镜头出场顺序，1 起）。 */
+  subjectNum: number;
+  /** 展示名（人物映射标签，如「A（小陈）」）。 */
+  roleName: string;
+  /** 人物卡 id（工作台 characters.id），无则 null。 */
+  assetId: number | null;
+  /** 人物代号（如「A」）。 */
+  code: string;
+}
+
+export interface H3ShotBundleItem {
+  shotId: string;
+  /** 本批内序号（1 起）。 */
+  index: number;
+  title: string;
+  /** 分组口径的实际时长（秒，可带小数）。 */
+  rawDurationSec: number;
+  /** 提交给接口的时长（秒）。现行手动提交路径的时长滑条是整数
+   * 秒（step=1），批量按同一口径四舍五入取整、再由画布侧按工
+   * 作流 maxDur 封顶；接口是否接受小数时长未核实，见回执。 */
+  apiDurationSec: number;
+  /** 与「复制本镜头 H3」逐字一致的提示词全文。 */
+  prompt: string;
+  /** [Shot N] 数 = 本镜头节拍数。 */
+  shotCount: number;
+  bindings: H3ShotBinding[];
+  /** 缺图人物展示名（该镜头因此被排除时非空）。 */
+  missingImages: string[];
+  /** 非空 = 该镜头不提交，值为给用户看的原因。 */
+  excludedReason: string | null;
+}
+
+/**
+ * 飞行前检查（A3）：prompt 内 <Picture N> 集合须恰为
+ * [1..bindings 数]（无缺号、无超号）；subject_definitions 的定
+ * 义行逐条核对 <Subject N> ↔ <Picture K> 与 bindings 一致。
+ * 通过返回 null，不通过返回原因（中文，给用户看）。
+ */
+export function validateH3PictureMapping(
+  prompt: string,
+  bindings: H3ShotBinding[],
+): string | null {
+  const pics = new Set<number>();
+  const re = /<Picture\s+(\d+)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(prompt)) !== null) {
+    pics.add(parseInt(m[1] ?? "0", 10));
+  }
+  if (pics.size !== bindings.length) {
+    return `提示词里出现了 ${pics.size} 个参考图编号，但本镜头绑定了 ${bindings.length} 张图，对不上`;
+  }
+  for (let i = 1; i <= bindings.length; i++) {
+    if (!pics.has(i)) return `提示词里缺 <Picture ${i}>，参考图编号不连续`;
+  }
+  const defOf = new Map<number, number>();
+  for (const line of prompt.split("\n")) {
+    const dm = line.match(/<Subject\s+(\d+)>\s*是\s*<Picture\s+(\d+)>\s*中/);
+    if (dm) defOf.set(parseInt(dm[1] ?? "0", 10), parseInt(dm[2] ?? "0", 10));
+  }
+  for (const b of bindings) {
+    const pic = defOf.get(b.subjectNum);
+    if (pic == null) {
+      return `<Subject ${b.subjectNum}> 的定义句里没找到对应的 <Picture ${b.picNum}>`;
+    }
+    if (pic !== b.picNum) {
+      return `<Subject ${b.subjectNum}> 的定义句写的是 <Picture ${pic}>，与绑定的 <Picture ${b.picNum}> 不一致`;
+    }
+  }
+  return null;
+}
+
+/** 构建整批 ShotBundle（每镜 10–15 秒版全部分组）。 */
+export function buildH3ShotBundles(
+  script: ScriptData,
+  ctx?: LensMappingContext,
+): H3ShotBundleItem[] {
+  const base = storyboardScript(script);
+  const view: ScriptData = { ...base, groups: h3ShortGroups(script) };
+  const tl = computeTimeline(view);
+  return tl.groups.map((g, gi) => {
+    const prompt = buildH3TextForGroup(view, gi, ctx, { actionCutRule: true });
+    const cast = lensCastEntries(view, g, ctx);
+    const bindings: H3ShotBinding[] = [];
+    const missingImages: string[] = [];
+    cast.forEach((e, i) => {
+      if (e.hasImage) {
+        const picNum = bindings.length + 1;
+        bindings.push({
+          picNum,
+          apiField: `ref_image_${picNum - 1}`,
+          subjectNum: i + 1,
+          roleName: e.label,
+          assetId: e.characterId,
+          code: e.code,
+        });
+      } else {
+        missingImages.push(e.label);
+      }
+    });
+    const rawDurationSec = g.duration;
+    let excludedReason: string | null = null;
+    if (rawDurationSec > 15) {
+      excludedReason = "超过 15 秒，请重新分组";
+    } else if (missingImages.length > 0) {
+      excludedReason = `缺参考图：${missingImages.join("、")}`;
+    } else if (bindings.length === 0) {
+      excludedReason = "本镜头没有带参考图的人物，不能批量生成";
+    } else if (bindings.length > 9) {
+      excludedReason = "参考图超过 9 张上限（待核实）";
+    } else {
+      const verr = validateH3PictureMapping(prompt, bindings);
+      if (verr) excludedReason = `参考图编号核对没通过：${verr}`;
+    }
+    return {
+      shotId: `shot-${gi + 1}`,
+      index: gi + 1,
+      title: g.title,
+      rawDurationSec,
+      apiDurationSec: Math.max(1, Math.round(rawDurationSec)),
+      prompt,
+      shotCount: g.beats.length,
+      bindings,
+      missingImages,
+      excludedReason,
+    };
+  });
 }
 
 /** @deprecated v5.90 起 H3 第 2 版改用 buildH3ShortVersion；保留
