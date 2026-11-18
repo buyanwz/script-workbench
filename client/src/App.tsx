@@ -23,7 +23,11 @@ import { ConfirmDialog } from "./confirm";
 import { ScriptImportDialog } from "./scriptimport";
 import { GenProgress } from "./genprogress";
 import { ImageGenPanelHost, openImageGenPanel } from "./imagegen";
-import { VideoGenPanelHost, openVideoGenPanel } from "./videogen";
+import {
+  VideoGenPanelHost,
+  openVideoGenPanel,
+  openVideoGenPanelWithBatch,
+} from "./videogen";
 import { SettingsDock } from "./settingsfloat";
 import { CoverBench } from "./coverbench";
 import { PreviewImg } from "./previewimg";
@@ -50,6 +54,8 @@ buildGenChecklist,
 buildH3FullText,
 buildH3PlotVersion,
 buildH3ShortVersion,
+buildH3ShotBundles,
+type H3ShotBinding,
 buildLensPromptPack,
 buildMarkdown,
 buildReviewMarkdown,
@@ -95,6 +101,7 @@ inferCharacterGenderDetail,
 inferCharacterAgeGroupDetail,
 isDefaultFilmStyle,
 isGroupTempName,
+lensCastEntries,
 lensMappingDiff,
 lensPlan,
 mappingImageFilterEnabled,
@@ -1624,9 +1631,10 @@ export function App() {
           都是它；只手动打开、绝不自动弹，挂载在这里常驻待命。 */}
       <ImageGenPanelHost activeProjectId={activeId} />
 
-      {/* 生成视频全页覆盖窗口（v6.48）：顶栏「生成视频」按钮打开，
-          里面是牢络生成平台（同源 iframe 承载 laoluo/ 平台单元），
-          关闭回到工作台；只手动打开、绝不自动弹，常驻待命。 */}
+      {/* 生成视频全页覆盖窗口（v6.48 接入，v6.51 改直接挂载）：顶栏
+          「生成视频」按钮打开，里面是牢络生成平台（直接挂进 React
+          树的 laoluo/ 平台单元），关闭回到工作台；只手动打开、绝不
+          自动弹，常驻待命。 */}
       <VideoGenPanelHost />
 
       {/* 左下角悬浮「设置」（v5.88）：常驻左下角，点开向上展开；
@@ -8818,10 +8826,16 @@ function StepThree({
     // 录清掉待确认字段、并把同步前的已存值存进 rollback（一层回
     // 退点）；其余人的记录原样带回；已不在人物表里的代号清掉。
     pendingSnapshot?: CharPendingMap,
+    // v6.61：人物表在别处被增 / 删 / 改（删卡、加卡、改卡）后，
+    // 没有待确认修改也要能点「确认并同步」重新匹配角色映射：
+    // rematchOnly 时 edits 可以为空——不改任何人物行、不写
+    // voiceMap，只随整份稿落盘一次（顺带把已不在人物表里的待
+    // 确认记录按既有口径清掉），回执按「重新匹配」口径写。
+    opts?: { rematchOnly?: boolean },
   ): Promise<{ ok: boolean; message: string }> => {
     if (!scriptDraft)
       return { ok: false, message: "剧本还没加载好，稍后再点一次同步。" };
-    if (edits.length === 0)
+    if (edits.length === 0 && !opts?.rematchOnly)
       return { ok: false, message: "还没有改动，不用同步。" };
     const changedNames: string[] = [];
     const rows = scriptDraft.characterRows.map((r) => {
@@ -8912,6 +8926,12 @@ function StepThree({
     }
     syncScriptJson(json);
     setScriptDraft(next);
+    if (opts?.rematchOnly && edits.length === 0)
+      return {
+        ok: true,
+        message:
+          "已按现在的人物表重新匹配：没有待确认的修改要转正，这一遍把全部提示词版本（四档 Seedance、通用版、导出，以及本页下方「MiniMax H3 提示词（两版）」的按剧情版与每镜 10–15 秒版）都按现在的人物表重新对了一遍——删掉的人物卡，它的造型 / 音色 / 语气不会再进任何一版提示词；还在的人，都按现在的表走，序号重新排过、不留空号。提醒一句：台词里还写着归他的代号不会自己消失——是两个人组合的代号，会按还在的人的资料重新拼一句；是单个代号的，只剩一个光代号（没有造型和音色）。想连代号一起去掉，去审查页把那几句台词的说话人改掉就行。到下方 Seedance 区或 H3 区里点「复制」粘出来就是新版。",
+      };
     return {
       ok: true,
       message: `已同步：${(changedNames.length > 0 ? changedNames : edits.map((e) => e.name)).join("、")} 的造型 / 性别 / 音色 / 语气基调 / 身高锚点已存回人物表，全部提示词版本已按新数据重新生成（四档 Seedance、通用版、导出，以及本页下方「MiniMax H3 提示词（两版）」的按剧情版与每镜 10–15 秒版；身高锚点只进 H3 两版的定义句）——到下方 Seedance 区或 H3 区里点「复制」粘出来就是新版。`,
@@ -12069,7 +12089,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v6.50";
+const WORKSPACE_VERSION = "v6.61";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12082,9 +12102,75 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
+    version: "v6.61",
+    date: "2026-11-18",
+    current: true,
+    text: "这一版修你报的那个问题：去人物与大纲页删了人物卡，回到分镜页，「确认并同步到分镜提示词」却不亮，分镜里的旧人物还留着。原因找到了：以前这个按钮只看你有没有在分镜页的人物面板里改过东西，删卡、加卡是在别的页面存的，它根本不知道。现在改成：工作台会记住你上次点确认时的人物表是什么样，之后只要人物表有增、删、改——删卡、加卡、改了卡上的备注，或者分镜里还提到一个人物表里已经没有的人——这个按钮就会亮起来，旁边写一句「人物表变了，点确认重新匹配角色映射」。点下去，它拿现在的人物表把全部提示词版本（四档 Seedance、通用版、导出、MiniMax H3 两版）重新对一遍：删掉的卡，它的造型和音色不会再出现，还在的人序号重新排、不留空号（台词里还写着归他的代号不会自己消失：组合代号按还在的人的资料重拼、单个代号只剩光代号）。原来那套「改了造型、音色先待确认、点确认才转正」一点没变；页面打开、刷新、删卡保存的时候它都不会自己重拼，只有你亲手点这个按钮才算数。有一点先说清：这一版第一次打开某个项目时，会先把当时的人物表记下来当基准，所以你之前已经删掉的那两张不会追着亮灯，从这次打开以后的增删改才会亮。顺带查清你数的对不上：分镜人物表里是 5 个人（小陈、小良、小痞、老板、妈妈）；镜头 4 里多出来的两个主体，一个是「B/C」发言位、一个是「B+C」两人齐声，它们的人物卡其实还在（就是没照片的那两张），有台词和齐声点到它们，拼装就会给它们各编一个主体——不是删掉的卡留下的残影。以后不想让谁出现，把他的人物卡和人物行都删掉，再点一次确认同步就行。",
+    features: "人物资产删卡后「确认并同步到分镜提示词」亮起并重新匹配角色映射（v6.61，用户主聊直派，无 flor 编号，用户 2026-11-18 21:08 报障附两图、21:13 补第三图；纯客户端 App.tsx（ScriptDocument 印记检测 + StepThree syncCharBasics 加 rematchOnly 第三参）+ 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted）：【诊断（裁决1，实读代码+项目 50 真实数据）】按钮点亮条件实测 = disabled={!charDirty}，charDirty 只比对 charEdits（人物行已存值 + charPending 待确认合成）与 characterRows 已存字段（造型/音色/语气/性别/身高锚点）——只看本页对现有人物行的待确认修改；删卡走 characters 表 deleteCharacter（人物与大纲页 StepTwo，与 scriptJson 两套存储）、加行/删行走审查页 autoAdded 与自动加入流程，两条路都不经过 charEdits、也不产生 charPending，故删卡后按钮不亮；且全站没有「上次确认时的人物表」基线记录，无从判断表已变。提示词重拼 = 保存后由 characterRows + 人物卡（mappingCtx）+ voiceMap 现算（buildSingleGroupText/ForModel 四档、通用版、buildMarkdown、buildGenChecklist、buildH3PlotVersion/buildH3ShortVersion），无第二份缓存。H3 subject_definitions 出自 lensCastEntries（lensMappings 按节拍说话人 + 画面提及的已知名字收集出场者，已知名字 = 人物卡名 ∪ 人物行名），定义句数据经 resolveCharacterInfo（人物行 → 人物卡 note 的造型/音色/语气段 → voiceMap）解析。【项目 50 实读】characterRows 5 行 A–E（用户说的 5 个）；characters 表 7 行 = A(222,有图)/B(223,有图)/C(224,有图)/D(225,有图)/E(226,有图)/B/C(229,无图)/B+C(230,无图)，characterCount 数此表；卡 id 序列缺 227/228 两号（项目 49 卡为 214–221、项目 50 为最新项目），与「删了 2 张」吻合，但已删行名字无从查回（删除不留痕）；tempCharacterStates + autoAddedCharacters 另存 4 条群演（路人/众人/B/C/B+C），是第三份记录、只供群演区展示，resolveCharacterInfo 不读它、不进拼装。镜头 4（H3 每镜 10–15 秒版重组）6 个 Subject 逐个对源：S1=B/C（造型/音色与卡 229 note 逐字一致）、S2=B 小良、S3=C 小痞、S4=B+C 二人组（与卡 230 note 逐字一致）、S5=A 小陈、S6=E 妈妈——多出的 S1/S4 来自仍在册的卡 229/230（台词 #19 说话人记 B/C、齐声记 B+C，出场收集点到即编主体），不是已删卡 227/228 的残留。【改法·印记】ScriptDocument 新增 charTableStamp（useMemo）：人物行已存字段 + voiceMap + aliasOverrides + 人物卡（id/名/role/note/有无图）+ 出场无靠代号集合（lensCastEntries 全镜收集、既无行又无卡的代号）拼串后双 FNV 哈希；基线存 localStorage scriptbench.charSyncStamp.<projectId>.v1（与 charAnalysisJob 同制式），首次打开记基线不亮（防老项目全亮 + P-不误亮），之后印记不一致 = charTableChanged，与 charDirty 并联成 charSyncNeeded 驱动按钮 disabled；按钮旁在「只有表变化、无待确认修改」时显示大白话「人物表变了，点确认重新匹配角色映射」；「还没有改动…」灰字提示改按 charSyncNeeded 判。【改法·点击】runCharSyncOrRematch 统一入口：有待确认走原 doCharSync 转正；只有表变化走新增 runCharRematch → onSyncCharBasics([], pendingSnapshot, {rematchOnly:true})（prop 类型同步加第三参）；StepThree syncCharBasics 加 opts.rematchOnly：edits 为空时不再报「还没有改动」，不改人物行、不写 voiceMap，只随整份稿落盘（charPending 收敛口径不变：已删行记录清掉、其余待确认原样保留）并回重新匹配回执（明示删卡的造型/音色/语气不再进任何一版、序号重排；台词说话人代号不宣称消失——探针 UI 实测：组合代号（A+B）在 H3 两版按成员行资料重新拼出组合定义、已删卡原文全消失；函数级模拟（项目 50 真数据删 229/230）里 B/C、B+C 只剩裸代号主体，两路证据口径不同、回执与日志按此如实分开写，项目 50 真实结果列真机待核）；doCharSync / runCharRematch / runCharRollback 成功后置 restampAfterSyncRef，effect 在父级回渲染、印记落定后把基线更新为当前印记、按钮熄灭；失败不更新基线、灯保持。只确认此人仍走 doCharSync 单人路径（成功同样更新基线——它也是一次整份落盘确认）。【裁决对照】裁决3：打开/刷新/切项目/删卡保存均不自动重拼不自动确认，印记只读比对、基线只在亲手确认成功后更新；裁决4：待确认语义/回退点/只确认此人不变，两路关系——待确认修改走转正、纯表变化走 rematch（不动待确认值、只清已删行的待确认记录，沿既有收敛口径）；裁决2：拼装规则（风格锁定句/声明/身高锚点句序/H3 六段式）一字未动，Flor911/密钥/监控/封面/生图/拆解预设/下载任务未动，平台版本仍 28；裁决6：群演区双份记录问题只诊断（见回执第 6 段）不在本版修。【删除清单】零删除（被取代的只有按钮 disabled 表达式、点击入口与灰字提示的判定条件）。基线升 v6.61（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：项目 50 分镜页删一张无图卡后回分镜页看按钮亮起+说明在位、点确认后展开 H3 镜头 4 逐字核对 Subject 数与序号、刷新后按钮保持熄灭。",
+  },
+  {
+    version: "v6.60",
+    date: "2026-11-18",
+    text: "批量生成这版改了三件大事。第一，面板从右边一条改成了屏幕中间的大悬浮窗：画布四周的东西都露着，镜头行变宽，参考图徽章一排能摆三张、不再挤成一行小字；想看画布就点「收起」，窗口缩成顶部一个小胶囊，上面写着已完成几个、进行中几个，生成一点不受影响，点胶囊就回来；点窗口外边或者关掉也不会把正在跑的任务弄停。第二，工作流直接在批量面板里换：下拉里 13 种都有，旁边小牌写清这个工作流最多几张图、最长几秒；换完当场重新核对每个镜头，图太多或者时长超了的镜头会标红写清原因、先不生成，换回来又能自动恢复；正在生成时下拉先锁住，旁边多了「暂停后续排队」——点了之后正在跑的几个跑完，剩下的先停下等你换好工作流再继续，暂停状态关掉重开也还在。第三，每一批都会自动存档：面板顶上能看到「项目50批量生成记录（共几条）」，点开是这个项目历次批量的清单，哪天、用的什么工作流、完成几个、花了多少都记着；点进任何一条旧记录，能看每个镜头的提示词和每一版结果，还能直接对旧镜头「再次抽卡」，新版本追加进那条记录里，不用重新发一遍分镜。存档只存小缩略图，不占地方；旧记录抽卡时要是原图已经不在画布上，会明说抽不了，不会拿缩略图糊弄提交。",
+    features: "批量生成三件套——居中悬浮窗＋工作流可选＋按项目存档记录（v6.60，用户主聊直派，无 flor 编号，用户 2026-11-18 19:55 提三条需求附两张真机截图、令总结后问 Gemini 设计方案，Gemini（代码与分析 4 Argon）回完完整规格、用户亲手发回全文，2026-11-18 20:19 点选「按这个方案开工」并授权直接实施；纯客户端 laoluo/source.html 在 v6.59 底版上继续改写为新底版 + sync.mjs 一处锚点更新（setTimeout 15→20，存档相关新增 5 处）+ 重跑 sync.mjs 再生 generated.* + videogen.tsx 诊断版本行两处 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未用任何凭证提交真实生成，沙箱全程走演示分支与 mock）：【新底版】source.html 在 v6.59 底版（770bff5e31b1ba34，SHA-256 对 source.html 原始字节全文计算）之上改写为 v6.60 新底版（SHA-256 前缀 e0752f26c4860ed1，LAOLUO_SOURCE_HASH 同步）；sync.mjs 四项计数 CSS 379→405、顶层函数 283→314、on* 模板 174→187、模板引用函数 107→120。【需求1 居中悬浮窗】遮罩 .uv-batch-backdrop（fixed 全屏、z 48、rgba(6,8,13,0.42)+blur 3px）与窗体 .uv-batch 并列（窗 z 49、min(860px,100vw-64px)×min(760px,100vh-72px)、min-height 460px、圆角 14px、#12151f 卡面 token）；断点 ≥960 桌面、640–959 平板（100vw-32px/100vh-48px）、<640 窄屏（100vw-16px/100vh-24px、圆角 12px）；Picture 徽章改网格 .uv-batch-pic-grid（≥820 三列、640–819 两列、<640 一列）；窗内三区沿用 v6.59（标题区含存档 pill、控制区常驻、列表独立滚动加 overscroll-behavior:contain）；点遮罩/点 ×/Esc 走同一 batchDismiss：运行中缩成顶部居中小胶囊（top 66px、z 45、蓝点脉冲+已完成 x/y（进行中 n）+80px 迷你条=完成数/可生成数真实计数+展开钮，≤900px 时胶囊下移 128px 避让同在 top 66 的创作记录条）并 toast 一次，空闲彻底关闭、重开走画布右岛既有「批量」按钮；旧窄条 .uv-batch-rail 删除、旧 collapsed 落盘值首次加载按「最小化=胶囊」理解；Esc 两段（画布菜单/弹窗先关、再到批量窗，原生下拉由浏览器先收）；不做拖拽/调尺寸/坐标记忆；.uv-result z-index 30→55 按 Gemini 规格提（注：.uv-hud 本身 z 30 成层叠上下文，结果窗实际仍在遮罩之下，批量行内自带 video 播放不受影响，见回执层级实测）。【需求2 面板内可选工作流】控制区第二行换成真下拉（13 预设+自定义 ID…、高 30px、min-width 280px，默认=上次批量用过的 llpub-batch-lastwf、没记过用手动线当前所选，初始即 U24 口径不变）+自定义输入框（仅自定义时出现）+上限小牌（只报 WORKFLOW_PRESETS 实有字段 maxImages/maxAudios/maxDur，逐条核实：13 预设字段仅 id/label/maxImages/maxAudios/maxDur/minImages，无 resList——画幅不按工作流拦、宽松口径）；batchWorkflowProfile 只读预设表解析本批档案，batchApplySkip 与 batchSubmitShot 改按本批档案（手动线校验与提交一字未动）；换工作流立即重校验未运行/未成功镜头：图数超限/时长超 maxDur+0.5s → EXCLUDED+wfGate 标记+行内红 pill 写清原因（不静默截断、apiDurationSec 四舍五入与提示词不动），换回宽松工作流按 wfGate 自动恢复；shotHash 本含 workflowId（v6.58 起实读确认）不改算法，换流后哈希重算、已完成镜头同流跳过语义不变；U03 文生（maxImages=0）不按图数拦、行内给「参考图可能不生效（未核实）」黄 pill；运行中下拉 disabled+tooltip 明示，新增「暂停后续排队」（batch.paused 落盘：batchPump 不派新活、在途 RUNNING 照旧轮询到终态、刷新后仍暂停、恢复走开始类按钮、暂停后下拉解锁且换流只影响未提交镜头）；批量只改 batch.workflowId、绝不动 S().workflowId。【需求3 按项目存档记录】实时队列键 proj-<pid>-batch 不变、只追加 batchId/projectName/title/seqNum/workflowId 关联与 customWfId/paused/createdAt 字段（镜头追加 wfGate）；新增同库键 proj-<pid>-batch-archives{records 最新在前≤20、nextSeq、blobIndex}；发送时建 batchId 草稿、第一镜进 SUBMITTING 起由 persistBatch 防抖 400ms 的 batchSyncArchiveNow 建记录，之后完成/失败/抽卡新版本原地更新，无保存按钮；旧队列打开面板时 batchEnsureArchives 迁移成 #N（只补 batchId/序号/标题，不动镜头状态与任务号，裁决7）；标题区存档 pill（📁 项目X批量生成记录（共 N 条）·当前：#seq ▾）+可收起历史条（max-height 185px）逐行 序号·标题｜时间｜工作流·画幅｜已完成 x/y·已花约｜查看/抽卡｜删除（两段式确认）；点旧记录载入查看（viewArchiveId 只换渲染源、实时队列一字不动），无其他批次运行时可对旧记录镜头再次抽卡（专用 pollArchiveTask 同批量轮询口径：退避不判失败、接口明确失败才记 attempts），新版本追加进该记录；存档抽卡取图：记录短链→同批实时队列原图→画布素材 assetId，都找不到按裁决10 明示拦住、绝不拿缩略图提交（Gemini 的 thumbUrl/512px 兜底与 batch-refs 缓存按裁决5/10 不采纳）；存档 JSON 只存 64×64 JPEG 缩略图（makeBatchThumb，约 3KB），视频 Blob 沿用 batch-video-{shotId}-v{N} 键族（存档抽卡新版本用 batch-vid-<batchId>-<shotId>-v{N}），blobIndex LRU 每项目 30 个超限删最旧本体保留 URL 与文字，删记录/超 20 条剪最旧时连带删其 Blob；Blob 缓存 fetch 失败静默降级只留 videoUrl、hasLocalBlob=false，不阻塞任务完成。【不动清单】密钥三处读/用/存路径与 v6.59 持久化修复（grep 证实 Authorization ×3、DEFAULT_TOKEN 置空锚点、llpub-token/llpub-dskey/auth-keys 键名逐字未动）、P3 组绑定拼装、P4 工作流预设表本身（只读不改）、v6.56 连线、v6.57 雷达与菜单、BatchScheduler 状态机与 shotHash 幂等语义、v6.59 进度反馈与抽卡版本语义、手动模式全部交互与校验、平台版本仍 28（裁决1）；删除：.uv-batch-rail 右侧窄条 CSS 与渲染（被小胶囊取代）、批量面板工作流只读文本行（被真下拉取代）。基线升 v6.60（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：项目 50 打开面板看悬浮窗与存档 pill、换一次工作流看超限标红与恢复、运行中点遮罩看胶囊、暂停后换工作流再继续、旧记录抽卡一次。",
+  },
+  {
+    version: "v6.59",
+    date: "2026-11-18",
+    text: "按你真机用批量生成时提的四点，这版全改了。第一，批量面板重新排版：顶部一行把总数、能生成几个、已完成几个、总共要花多少钱说清；开始按钮一直留在上面，镜头列表再长也不用滚回去找；面板还能收起成右侧一条窄边，收起时照样显示进行中几个，生成不会停。第二，生成中的镜头现在能看到走到哪一步了：提交、排队、生成、取回，每一步都写明，还带已用时间和查询次数——接口本身不给百分比，所以不编假进度。第三，生成好的镜头多了「再次抽卡」：点一下换个新种子重新生成一次，结果按第 1 版、第 2 版存好，随时切换着看、分别下载；万一抽卡失败，原来那版好的还在，不会丢。第四，密钥记不住的问题修了：以前是存的时候没检查到底存上没有，这次改成存完当场回头核对一次，两处存放互相补漏，对话框里每把钥匙都写着「已保存」和保存时间，清除也改成各清各的、清之前会再问一遍；另外加了导出/导入，万一哪台设备实在存不住，复制出去下次粘回来就行。",
+    features: "批量生成体验重做（v6.59，用户主聊直派，无 flor 编号，用户 2026-11-18 19:01 真机跑 v6.58 批量后提四问并授权直接实施；纯客户端 laoluo/source.html 在 v6.58 底版上继续改写为新底版 + sync.mjs 一处锚点更新（setTimeout 14→15，密钥防抖保存新增 1 处）+ 重跑 sync.mjs 再生 generated.* + videogen.tsx 诊断版本行两处 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未用任何凭证提交真实生成，沙箱全程走演示分支与 mock）：【新底版】source.html 在 v6.58 底版（be60dc271b889a2c，SHA-256 对 source.html 原始字节全文计算）之上改写为 v6.59 新底版（SHA-256 前缀见回执，LAOLUO_SOURCE_HASH 同步）；sync.mjs 四项计数 CSS 356→379、顶层函数 268→283、on* 模板 165→174、模板引用函数 100→107。【问题1 面板重设计】根源：v6.58 面板宽 min(620px,100vw)、头部/控制/操作/列表四段无分区、每行缩略图徽章 30px 图+全字段名大格换行、标题 overflow-wrap:anywhere 任意断行把行高撑大；且摘要「可生成」只数当前 READY 态——这正是旗标(a) 7 vs 5 的口径差：沙箱 7 是开始前 READY 总数，真机截图时 1 镜已完成+1 镜生成中，READY 只剩 5，数字随进度缩水被误读成总数变了（发送端 buildH3ShotBundles 排除口径与面板 batchApplySkip 二次校验逐行核对一致，不是排除口径不同）。改：面板宽 560px；三区结构——摘要区一行收紧（共 N 镜/可生成=非 EXCLUDED 总数/待生成/进行中/已完成/失败/总预估，分开计数不再缩水）、控制区（画幅四档 pill/种子/强制重生保留，工作流只读行降为一行小字，音色提示保留）、主操作（先试生首镜/全部开始/一键下载全部）与摘要控制同处列表之外的常驻区，列表独立滚动时始终可见；新增收起/展开（batch.collapsed 落盘）：收起成 46px 右侧窄条+状态徽章（进行中 N/总数或完成数，失败标红），点窄条恢复，收起不碰队列与轮询；行内：标题单行省略+title 全称、状态与费用同行、徽章缩到 22px 图+10.5px 字横排、行距收紧；全部旧能力逐项保留（画幅四档/工作流只读/种子/强制重生/音色提示/三按钮/总预估/缩略图 token 徽章/提示词抽屉/切镜 pill/状态/费用/失败原因与重试/CONFIRM 待确认两按钮/继续查询）。【问题2 进度反馈】根源：v6.58 行内只有状态文案一个词，轮询回程除出错外不刷新面板，pollCount/起始时刻根本没记。改：镜头运行时字段 startedAtMs/stage/pollCount/inflight 落地——提交同 tick 内状态变 SUBMITTING+按钮禁用（activeCount>0 时开始类按钮 disabled+函数级第二道闸）；状态文案区分待生成/排队中（队列位置 第 N 位/共 M 位，仅已启动队列的 READY 行）/提交中/生成中/取回与完成/失败/已跳过（EXCLUDED 沿用「已跳过」）；batchPollShot 每轮 pollCount+1 并 patch 面板，stage 随真实轮询走（提交中→排队中→生成中），行内显示阶段+已耗时 mm:ss（patchStatus 既有 1 秒节拍轻量刷新耗时节点，不新增定时器）+已查询次数+不定式动效条，全文无百分比（裁决6）；失败行原因大白话沿用接口原文+重试，面板摘要汇总失败数，重试只重跑失败行；防重复：inflight 标志+batchSubmitShot 入口闸+开始函数闸，shotHash 幂等保留；取消功能查无既有入口，按 brief 不新增、回执单列。【问题3 再次抽卡】根源：v6.58 结果只有单个 videoUrl 字段、已完成行无重生成入口。改：镜头新增 versions 版本表（{v,videoUrl,seed,demo,histId,at} 只追加不覆盖）+curVer+seedUsed+attempts；已完成/已跳过行加「再次抽卡」主按钮——复用原 prompt/bindings/时长/画幅/工作流，新随机种子（与上次不同）经 opts.seedOverride 提交并记进新版本，面板种子框只管首次提交（口径写进代码注释）；行内 v1/v2… 切换钮+当前版种子显示，切换只改展示（videoUrl/histId 跟随版本），播放（抽屉 video）与下载都按当前版，视频缓存改按版本分键 batch-video-{shotId}-v{N}、v1 回退旧键；一键下载全部改下每镜最新版、多版本时文件名带 _vN；失败保护：抽卡（含演示 mock fail、提交 catch、轮询 FAILED 三路）在 versions 非空时恢复原状态、失败记进 attempts 并给「重试抽卡」，成功版一字不动；队列存档只加字段（键名 proj-<pid>-batch 不变），loadBatchState 对旧存档补默认（已完成/已跳过无 versions 时按现有 videoUrl 补记 v1）。【问题4 密钥持久化】诊断证据链（逐项实读）：键名 llpub-token/llpub-dskey（localStorage）+auth-keys（IndexedDB）自 v6.55 起稳定、无版本后缀；启动顺序 idbOpen→initProjects→loadKeys 正确、loadKeys 无清存储逻辑（v6.55 已删按格式清 dskey 的旧逻辑）；输入即存的 on* 在委托字典内（sync 审计 input 计数含 onTokenInput/onDsInput）；真正的洞有三：①persistKeys 盲写——lsSet 的 try/catch 把 localStorage 写失败（配额/分区拒绝）静默吞掉、idbSet 在 db 未就绪时静默跳过，写完从不回读校验，存没存上无人知道；②loadKeys 只在 IDB 有非空值时才覆盖内存，IDB 那份若是旧值会把 localStorage 里的新值盖掉，且两路从不互愈；③clearToken 一钮清两把、无二次确认，与「各管各的」口径不符（不是丢钥匙主因、属高度耦合一并修）。另：沙箱与真机存储同为本机浏览器分区，平台层是否对该分区另有清理无法从代码证实，故按 brief 给导出/导入兜底、不谎称根治。改：persistKeys 写后回读校验（不一致置 keyPersistFailed、对话框状态行明示「没存上」）+保存时刻 llpub-keys-savedat（只记时间、值真变了才更新）；loadKeys 启动互愈（两路对齐回填）+历史键名迁移（ll-token/autodl-token/ll-dskey/deepseek-key 四个旧名查过，有值而现行键为空才迁入、旧键保留）；对话框：输入防抖 400ms 保存（scheduleKeySave）+保存按钮双保险、逐把状态行（未填写/未保存…/已保存·时间/没存上）、逐把独立清除（两段式确认、文案明示清掉找不回、只清被点那把）、导出（复制 JSON）/导入（粘回解析、非 JSON 整段当 Token 兜底）；saveToken/演示判定（!token.trim() 走演示）/三处读用路径（submitTask/queryTask 的 Authorization: token、DeepSeek 的 Bearer + dskey、DEFAULT_TOKEN 置空锚点）逐字未动，grep 与 sync 锚点双证。【不动清单】BatchScheduler 状态机与 shotHash 幂等语义、P3 组绑定拼装、P4 工作流与 gating、v6.56 连线、v6.57 雷达与菜单、手动模式全部交互与校验、队列键名、平台版本仍 28（裁决1）；零删除（clearToken 函数被 clearKeyOne 取代属问题 4 范围内改写，清除能力保留且更细）。基线升 v6.59（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：项目 50 首镜真 Key 抽卡一次看版本+种子、批量运行中收起面板看徽章、密钥改后关掉重开验恢复。",
+  },
+  {
+    version: "v6.58",
+    date: "2026-11-18",
+    text: "分镜页的 H3「每镜 10–15 秒版」多了一个「发送到画布批量生成」：点一下，这一版的每个镜头连同它的人物参考图一起送到生成视频画布的批量面板里，核对清单后点「全部开始」就能一镜接一镜自动生成，不用再一段一段复制粘贴。批量有自己的一套排队：最多同时跑 4 个；查询时网络抖动只会等一等再查、不会误判失败；密钥或余额出问题会立刻停下整批并写明原因；页面刷新了，正在跑的任务会自动接着查，不会重复提交扣费。已经生成过的镜头再发送会标「已生成（跳过扣费）」，想重做勾上「强制重生」。另外按你定的口径，分组加了 15 秒硬顶：任何一组都不会超过 15 秒，超过的镜头在批量清单里会标出来不提交，不会偷偷改你的提示词。先拿一个镜头试生、看好了再点「继续生成剩余」也可以；完成的视频能在面板里直接下载，文件名是「01_镜头名_时长s.mp4」这种格式。",
+    features: "分镜 H3 批量生成一期（v6.58，用户主聊直派，无 flor 编号，用户 2026-11-18 17:46 定「接受镜头不要超过 15s」、17:47 亲口令按主代理设计稿＋Gemini Argon 评审修订方案开工；客户端 scriptlib.ts（分组硬顶＋ShotBundle 构建）+ App.tsx 分镜页发送按钮 + videogen.tsx 桥接与诊断版本行 + laoluo/source.html 继续改写为新底版（批量模块）+ sync.mjs 一处锚点更新（setTimeout 9→14）+ 重跑 sync.mjs 再生 generated.* + laoluo/README.md 新底版警告 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未用任何凭证提交真实生成，沙箱全程走演示分支与 mock）：【新底版】source.html 在 v6.57 底版（80b6e984…）之上改写为 v6.58 新底版（SHA-256 be60dc271b889a2c，LAOLUO_SOURCE_HASH=be60dc271b889a2c）；README 新底版警告同步。【A 发送＋ShotBundle】scriptlib 新增 buildH3ShotBundles＋validateH3PictureMapping：与 buildH3ShortVersion 同一视图（storyboardScript＋h3ShortGroups）、逐镜调 buildH3TextForGroup（与「复制本镜头 H3」同一函数同一入参，prompt 逐字一致）；bindings 取 lensCastEntries 同一套出场顺序，只有有图人物占 <Picture N>（场景在 H3 文本里无 Picture、不进 bindings，与拼装口径一致）；人物卡图片地址由分镜页按 assetId（回退按代号）在 mappingCtx.characters 里查 imageUrl 附上；排除口径：rawDurationSec>15→「超过 15 秒，请重新分组」、缺图→「缺参考图：…」、无图可带、bindings>9→「参考图超过 9 张上限（待核实）」、validateH3PictureMapping 不过（<Picture N> 集合须恰为 [1..bindings 数]、定义行 <Subject N>↔<Picture K> 逐条核对）→标 EXCLUDED 不拦整批；整批 0 可提交→分镜页只给一句说明、不打开空清单。按钮只在 H3 每镜 10–15 秒版「复制全部」旁出现（裁决10：按剧情版与 Seedance 三版无此按钮，H3 按剧情版拼装函数未动）。videogen 新增 openVideoGenPanelWithBatch：pending 清单在面板 open＋phase=ready 时经 handlers.receiveShotBundle 交付一次。【B 15 秒硬顶】h3ShortGroups：actionUnits 上限 18→15 秒；装组时 cur+unit>15.0 无条件先收组（硬顶优先于转折点与动作链完整性，两者只在硬顶内继续生效）；单拍本身超 15 秒时该组只能由这一拍单独成组（节拍不可拆）；纯视图函数不写回、已存分组数据不动；按剧情版与 Seedance 三版一字未动。分镜页短版说明文案同步改硬顶口径（删「个别组可能到 18 秒左右」旧说法）。【C BatchScheduler】画布内独立状态机＋4 槽信号量，直调 submitTask/queryTask；不读写四条手动线 lane state、不触发全画布 render（面板 patchBatchPanel 只写 [data-fid=batch-root] 容器）；队列存 IndexedDB 键 proj-<pid>-batch（沿用 P2 键体系，切项目先落盘＋停定时器、删项目连带删键）；状态 EXCLUDED|READY→SUBMITTING→RUNNING（taskId 先落盘再轮询）→POLL_PAUSED→SUCCESS|FAILED，另有 CONFIRM（刷新时 SUBMITTING 无 taskId 的手动待确认：[填入 taskId 恢复查询]/[确认未扣费·重新提交]）与 SKIPPED（幂等命中）；轮询错误分离：queryTask 网络/5xx→pollErrorCount＋退避 3s→6s→12s、连续 10 次→POLL_PAUSED（续查不重提），只有接口返回 failed/error/cancelled 才 FAILED，不复用 startPolling 的 catch 直判失败；提交体 {prompt 原样, seed?（面板所填、空不带）, duration=min(apiDurationSec, wf.maxDur), resolution（面板所选）, ref_image_N（bindings 顺序、图片先压最长边 1536px JPEG 副本约 300KB/张）}、不带 ref_audio、工作流走当前所选（默认 minimax_h3_zm_u24、P4 gating 复用）、密钥/Authorization/演示判定复用现有路径；401/402 或余额不足文案→熔断暂停剩余队列、面板明示；成功后视频本体拉回存 batch-video-{shotId} 本地缓存、播放/下载走缓存，并按 finishTask 同一形状写画布历史（prompt=H3 全文、meta=批量·镜头名·画幅·时长）但不设 s.view、不弹播放窗（裁决7）；刷新续跑：RUNNING 带 taskId 自动续查（演示 taskId 重走演示流程）、提交期间切项目的 taskId 补写回原项目存档。【D 批量面板】入口：分镜页发送自动打开＋画布右岛新增「批量」按钮可重开；每行：序号/镜头名/时长（实际→提交）/缩略图＋token 徽章「<Picture N> · 人物名 (ref_image_N-1)」（点按在提示词抽屉里 <mark> 高亮对应 <Picture N> 与 <Subject N>）/提示词字数/状态/预估费用（rateFor 高峰价）/失败原因与重试钮；面板头：画幅锁定四档 pill 默认「768p竖」（不继承画布默认 768p横）、总预估=ΣREADY 镜头 duration×rateFor、工作流只显示当前所选不可改、「先试生首镜」（只提首个 READY、旁标单镜预估，看完点「继续生成剩余」）与「全部开始」并排、「一键下载全部已完成视频」、音色差异提示（本期不带参考音频，各镜头配音音色可能有差异）、强制重生勾选、种子输入（全批共用）；校验 pill（非阻塞）：提示词>6800 字警告、切镜过密（拍数/时长>0.45，H3 口径约 2.5–4 秒一拍）；提示词抽屉每行可展开只读看全文；下载命名 01_镜头名_时长s.mp4（序号两位补零＋标题清洗），下载锚点挂 app 不用 body.appendChild；shotHash=fnv1a(workflowId|resolution|duration|prompt|图地址串)，二次发送命中 doneHashes 的 SUCCESS 记录标 SKIPPED 不扣费、勾强制重生才重提，分辨率切换后按新 hash 重判。【E 校验松绑】批量路径 validateBatchShot 跳过 maxShotsFor 一条，保留提示词非空、≥1 图、[Shot] 编号连续、<d> 成对、每句台词前有说话人、Subject 编号集合连续；未绑定提醒在批量模式不弹；手动模式校验与提醒一字未动。【抽取】sync.mjs 全过：CSS 356 条（314→356，批量面板 +42），顶层函数 268 个（220→268，批量 +48），顶层变量 40 个（36→40：BATCH_MAX_CONCURRENT/BATCH_POLL_MAX_ERRORS/BATCH_RES_OPTIONS/batch），on* 模板 165 处（148→165：click +14、input +1、change +2），引用函数 100 个全在字典（83→100，批量 +17），全动态模板 2 处不变（连线 onClickJs 与菜单 fn、均既有）；锚点 winAdd=12 winRemove=8 setInterval=2 clearInterval=3 clearTimeout=3 DEFAULT_TOKEN 置空=1 不变，setTimeout 9→14——批量新增 5 处（演示完成定时 1、轮询续查/退避 2、下载撤销对象地址 1、全部下载间隔 1），sync.mjs 对应断言已同步改 14 并注明出处。【密钥零改动】grep 证实密钥三处读/用路径、DEFAULT_TOKEN 置空保险、autodl Authorization、DeepSeek Bearer、演示判定逐字未变；assembleSubmission（P3 Subject 定义行）、P4 预设与 gating、v6.56 连线、v6.57 雷达与项目菜单、手动模式全部交互与校验一字未动；平台版本仍 28（brief 裁决2 明定 v29 全站迁移不在本版范围、未做）。【未核实项（不得当已核实）】apiDurationSec 取整：手动路径时长滑条是整数秒（step=1），批量按四舍五入取整＋maxDur 封顶，接口是否接受小数时长未实测；ref_image 上限 9 张沿用工作流预设 maxImages、未经接口实测；提示词 7000 字上限未核实（面板只按 6800 字给非阻塞提醒）；U24 时长范围未向接口核实（沿用预设 maxDur=15）。真机待核：项目 50 首镜真跑一次（验时长、图序、费用、结果字段）、填 Key 真生成整批、刷新后续跑、缺图/超长镜头标出、下载命名、批量跑完手动线无弹窗且内容未动。",
+  },
+  {
+    version: "v6.57",
+    date: "2026-11-18",
+    text: "Flor911 左下角的小地图和左上角的项目菜单按你定的 Gemini 方案重做了一遍。先说小地图：以前它只是一排灰扑扑的方块，画面放大一点，蓝色的视野框就冲出地图边被切掉一半，看不出自己在哪。现在它变成一个真正的雷达：每张卡片按种类上色——图片卡紫色、音频卡黄色、角色和场景卡用它们自己的颜色，卡片之间连着的细线也画出来了，一眼能看出谁连着谁；你正在看的那块区域是亮的，区域外罩了一层暗色，选中的卡片在雷达里有一圈白边，不会找不着。用法也顺手了：点雷达里任意一个地方，画面立刻跳过去还能接着拖；在亮框里面拖，画面跟着平移、不乱跳；在雷达上滚滚轮就能缩放画面。右上角多了个「适配」小按钮，点一下全图收回视线；不用它的时候点减号收成一条小条，下次打开还记得。画布空了它自己也会收成小条。再说项目菜单：以前点开是一块半透明的灰板，下面的图标都透出来，选项全一个样、点下去没感觉。现在菜单是实心的深色面板，底下东西透不过来；鼠标停在某一项上，它会微微往右挪、图标变蓝；按下去会往里陷一下，像真的按钮；你正在用的项目那一行一直陷着，左边有个绿点、右边写着「当前」，一眼能认。点另一个项目切换时，会先让你看清按下去那一下再切过去。菜单底下那行多余的「关闭」删了：再点一下项目按钮、点菜单外任意处、或者按 Esc 都能关。只剩一个项目时，「删除当前项目」会变灰点不动，防误删。密钥这次一个字没动，还是各填各的、只存自己电脑。真机请你亲手验：打开「生成视频」，把画面拖到空地看雷达的亮框跟不跟得上、会不会再被切；在雷达里点、拖、滚轮各试一次；把雷达收起来再展开、刷新页面看它记不记得；点开项目菜单，停在选项上看挪不挪、按下去看陷不陷，切到另一个项目看数据对不对，再用按钮、点外面、按 Esc 三种办法各关一次菜单。",
+    features: "Flor911 小地图雷达与项目切换菜单重做（v6.57，用户主聊直派，无 flor 编号，用户 2026-11-18 16:23 发两张真机截图判小地图不好看不实用、项目菜单点起来没反馈感选项扁平不立体，令问 Gemini；用户亲手在左侧 Chrome 提问，Gemini Argon 回完完整规格存 hidden_files/gemini-flor911-minimap-menu-design-2026-11-18.md，用户 16:48 令「你看一下它的方案是什么，你去执行」直接按 Gemini 方案施工，未要求 GPT 审核；纯客户端 laoluo/source.html 继续改写为新底版 + sync.mjs 一处锚点更新（setTimeout 8→9，见下）+ 重跑 sync.mjs 再生 generated.* + videogen.tsx 诊断区版本行 + laoluo/README.md 新底版警告更新 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证）：【新底版】source.html 在 v6.56 底版（ef8a0dd0…）之上改写为 v6.57 新底版（SHA-256 80b6e984a136ef6a9d2372ec710aad5782bb91cbd5a9c1eb7617adb70ffaeaac，LAOLUO_SOURCE_HASH=80b6e984a136ef6a）；README 新底版加粗警告同步更新。【标识符映射（裁决1）】Gemini 自标 [Builder-Verify-v656] 的名字逐个实读 v6.56 底版映射：projMenuOpen→projMenuOpen（顶层 let，真实）、projIndex→projIndex（顶层 let，含 .projects 与 .activeProjectId，真实）、curProjId()→curProjId()（真实）、switchProject(id)→switchProject(pid)（真实、async）、openProjDialog(mode)→openProjDialog(mode)（真实；模式实参是 'new' 不是草图的 'create'，'rename'/'delete' 同名）、closeProjMenu→不存在，本版新增；minimapHtml/mmItems/applyCam/centerCamOn/canvasEl/icon/S()/app 均真实；tidyMeasure(id,kind) 真实存在（cardEl 实测 ÷ zoom、tidyFallbackSize 兜底，与 Gemini 假设一致，裁决4 按实测走）；zoomBy(factor) 真实且以画布中心为锚——画布中心即当前视野中点，裁决5 的「围绕视野中点缩放」直接成立、无需换算；Esc 关菜单在现行全局 keydown 里已含 projMenuOpen（与 st.menu 等并列），本版未改键处理。【A 雷达】computeMinimapBounds 新增：viewBox = union（卡片包围盒， 当前相机视野矩形） + 8% 边距（裁决2 取代码值不用散文 12%），单卡/少卡以卡片簇为中心保证最小 1600×1000 footprint；mmItems 全量改 tidyMeasure 实测（图/音/组/三张固定面板，含 P1 自适应高），每项带 hc/bc/sc 三色（图 #a78bfa、音 #fbbf24、组 g.color 回落 角色 #38bdf8/场景 #3ecf8e、固定面板 #64748b 系，描边不透明度按派工口径 0.55 不用草图 0.6）；骨架线只画素材 groupId 绑定边，端点复用画布连线同套 edgeMeasure（素材右中 im.x+m.w, im.y+m.h/2 → 组卡左中 g.x, g.y+gm.h/2），不写死草图的 280/107/48/78 死值（裁决3），线宽 1.5px（派工口径，不用草图 1px）、vector-effect non-scaling-stroke、stroke rgba(255,255,255,0.22)；双色剪影 = body 半透明 rect rx14 + 头条 rect（高 = clamp(18, h×0.22, 34)，即草图代码口径）rx10 opacity 0.92；选中节点描边 #ffffff 1.5px（派工口径，不用草图 1.6）+ drop-shadow(0 0 4px rgba(91,140,255,0.8))；聚光灯罩 = SVG mask（mm-mask-bg 白底 + mm-mask-hole 黑洞）+ mm-dim fill rgba(6,8,13,0.52)，视野框 fill rgba(91,140,255,0.06)、描边 #5b8cff 1.5px 非缩放，CSS 补 :hover #7da2ff / .dragging #93c5fd + grabbing；面板 184px 宽、头条 24px（裁决2 取代码值不用散文 22px）、雷达区 184×104 底色 #0b0d13 + 12px 点阵、面板背景 rgba(15,18,26,0.92) + blur 14px + 边框 rgba(255,255,255,0.11) + 阴影 0 14px 34px rgba(0,0,0,0.58) + 内上沿高光；交互按裁决5 构建方自实现（草图只给名字）：minimapDown 分框内/框外——框内记 mode=pan（存按下屏幕坐标）、框外 mode=jump 先 centerCamOn 居中再续拖；minimapMove 的 pan 分支按屏幕位移 ÷ minimapScale()（逐帧按当前 mmBounds 与 mm-svg 实测矩形重算比例）换算世界 delta 平移视野中心，viewBox 中途扩缩不跳；jump 分支逐帧 centerCamOn 指针世界点；minimapWheel 新增（factor 1.12/0.89、preventDefault + stopPropagation 防主画布 wheelZoom 二次触发，走委托 wheel 通道）；收起存 localStorage 键 llpub-mm-collapsed，收起小条宽 auto 内容定（裁决2 不用散文 88/96px）、高 28px「雷达 · 百分比 + 展开」，画布完全空（mmItems 为空：无素材/分组且描述/提升/设置均未开）自动收成小条；applyCam 内旧 mm-view 单框同步整段换成 syncMinimapCam(s)（同步 viewBox/mask 三件/mm-view/mm-zoom 百分比，收起态只更新百分比）；保留旧 fid minimap/mm-view，新增 mm-svg/mm-zoom/mm-stage/mm-mask-bg/mm-mask-hole/mm-dim；三不抄全守（无 image/foreignObject、无文字标签、描边全 non-scaling-stroke 定宽，旧 stroke-width=Math.max(2,bw/90) 随缩放算法已删）。【B 菜单】projMenuHtml 整体重写为 .uv-pmenu 三区：区1 头条「切换项目」+「N 个项目」+ .uv-pmenu-list 可滚列表（max-height 204px，裁决2 取代码值不用散文 210px）；区2 .uv-pmenu-sep 刻蚀分隔线（1px rgba(255,255,255,0.08) + 0 1px 0 rgba(0,0,0,0.55) + margin 6px 6px）；区3 三动作项文案沿用 v6.55 原文「新建项目」「改名当前项目」「删除当前项目」（裁决8：不加省略号、不改「重命名」，新建项的「＋」由 plus 图标承担）；面板 rgba(22,26,36,0.98) + blur(20px) saturate(140%) + 边框 rgba(255,255,255,0.13) + 内上沿高光 + 双层阴影（0 20px 48px rgba(0,0,0,0.72) + 0 4px 12px rgba(0,0,0,0.45)）、圆角 13px、宽 224px、内边距 6px、开启动画 uv-pop-in 120ms cubic-bezier(0.16,1,0.3,1)；定位按裁决9 实读定：菜单仍挂 .uv-hud 内绝对定位 left 16px / top 66px（左岛 top 14 + 高 44 = 底边 58、留 8px 间隔，与 v6.55 现行值相同、非草图猜值巧合一致），z-index 按 HUD 内实测层级定：遮罩 .uv-pmenu-overlay fixed inset 0 z 75、菜单 z 80（高于岛 34/坞 26/工具栏、低于对话框 100），不用草图 top 64/left 16/z 80 里的 64；.uv-pmenu 与 .uv-pmenu-overlay 已加入 .uv-hud 指针事件放行名单；四态触感 .uv-pmenu-item（34px 高、圆角 8px）：静止透明、悬停 rgba(255,255,255,0.075) + 右移 1.5px（110ms cubic-bezier(0.2,0.8,0.2,1)）+ 图标 #7da2ff、按下 rgba(79,124,255,0.24) + inset 0 1px 3px rgba(0,0,0,0.5) + scale(0.975)（40ms）、当前行 .is-current 凹陷 pill（rgba(79,124,255,0.14) + 边框 rgba(91,140,255,0.35) + 600 字重）+ 左绿发光点（6px #3ecf8e + 0 0 6px 光晕）+ 右「当前」pill 徽章 + check 图标、:focus-visible 2px #5b8cff 圈；.just-clicked 类散文有代码无、不做（裁决2）；触发钮 .uv-proj-btn 补 transition + :active scale(0.97) + .open 态（rgba(79,124,255,0.18) + 边框 rgba(91,140,255,0.55)），open 类由 projMenuOpen 渲染时决定、与开合实时一致；onPickProject 新增：点当前行只 closeProjMenu 不重切、点他行 65ms 后 switchProject（裁决2 取代码值不用散文 60/75ms）、projSwitchPending 标志防延迟内重复排队；删除行改常驻渲染、仅剩 1 个项目时 disabled + opacity 0.38 + title「至少保留 1 个项目」（裁决11 行为变更：v6.55 是 1 个项目时整行不渲染）；底部「关闭」行删除（裁决7 前提三路：触发钮再点——菜单开时触发钮被遮罩盖住、点击落在遮罩走 closeProjMenu，效果同路；遮罩点击；Esc——三路均须探针验通，验不通一路即恢复关闭行，结论见回执）；icon() 补 check/plus/edit/folder 四个 case（路径按 Gemini 代码块逐字；trash 本已存在未动），另补 chevD case——触发钮自 v6.55 起就引用 icon('chevD') 与 icon('folder') 但两个 case 都不存在、一直渲染空 svg，本版补齐后触发钮才真显示文件夹与下拉箭头（属触发钮 B4 范围内的顺手补齐、单列在此）。【删除对话框（裁决10）】本版不动 confirmProjDialog 逻辑；v6.55 遗留的「探针点确认删除后对话框停留」只重探回报、不称已修复。【抽取】sync.mjs 全过：CSS 314 条（282→314：雷达 +19（.uv-minimap 改写计 1 + :hover/.is-collapsed/.uv-mm-head ×2/.uv-mm-title/.uv-mm-dot/.uv-mm-actions/.uv-mm-btn ×2/.uv-mm-stage ×2/svg/mm-view ×3）、菜单净 +13（删 .uv-proj-menu 系 8 条、新增 @keyframes uv-pop-in 不计规则 + .uv-pmenu 系 23 条 + 触发钮 :active/.open 2 条）），顶层函数 220 个（213→220，新增 computeMinimapBounds/toggleMinimap/minimapWheel/syncMinimapCam/minimapScale/closeProjMenu/onPickProject），顶层变量 36 个（35→36，新增 projSwitchPending），on* 模板 148 处（141→148：wheel +1 minimapWheel、pointerdown +3 雷达头条/菜单遮罩/菜单本体 stopPropagation、click 净 +3 雷达三处（收起条 toggleMinimap/适配 fitView/收起 toggleMinimap）与菜单行口径互换（switchProject 直调换 onPickProject、closeProjMenu 新增、删关闭行 toggleProjMenu 一处）），引用函数 83 个全在字典（80→83：+toggleMinimap/minimapWheel/closeProjMenu/onPickProject、−switchProject 模板直调），全动态模板 2 处不变；锚点：winAdd=12 winRemove=8 setInterval=2 不变，setTimeout 8→9——onPickProject 的 65ms 延迟是 brief B5 点名行为、必须新增一个 setTimeout，sync.mjs 对应断言已同步改 9 并注明出处（这是本版唯一一处 sync.mjs 改动），DEFAULT_TOKEN 置空=1 在位。【密钥零改动】grep 逐处证实：读 token/dskey 两行（lsGet llpub-token/llpub-dskey）、persistKeys 写两键、loadKeys 回填两行、autodl Authorization ×2、DeepSeek Bearer ×1、演示判定 if (!token.trim()) demoRun 逐字未变；assembleSubmission（含 P3 Subject 定义行）、项目 IndexedDB 键与迁移、P4 预设与 gating、v6.56 连线四档/贝塞尔/拖动跟随/点线解绑一字未动。【不动】onZoomBlur、手机宽品牌岛项目按钮被右岛遮挡、其余 v6.55/v6.56 证据缺口均未搭车（裁决13）；四台 / 监控页 / 储存库 / 封面 / 生图 / 设置、服务端动作与 schema 一字未动；无新表、无新迁移、无新 npm 依赖；平台版本仍 28（brief 裁决12 明定 v29 全站迁移不在本版范围、未做）。真机待核：雷达多卡下视野框完整不裁、pan 到空处 viewBox 跟扩、雷达点/拖/滚轮三交互、收起记忆与空画布自动小条、三比例参考图雷达矩形与画布一致、选中白描边、骨架线走向；菜单三区与当前行徽章/绿点/✓、悬停右移与按下内缩肉眼确认、切项目 65ms 后真切且数据对、三路关菜单、新建/改名/删除三对话框、1 个项目删除禁用、删除确认对话框重探结论、手机宽菜单不溢出且徽章不透出。",
+  },
+  {
+    version: "v6.56",
+    date: "2026-11-18",
+    text: "Flor911 画布的连线按你定的 Gemini 方案重做了一遍。第一，箭头没了：以前线头上顶着个小三角、卡片离得近时扭成一团，现在线干干净净收到卡片边上的小圆点下面，方向看线的颜色就知道——出发那头淡、接收那头亮。第二，卡片离得近时线不再绕圈打结：距离越近线压得越平，几乎贴上时就是一条直的短线；把卡拖到另一张卡左边去，线会柔和地绕个弯过去，不穿卡也不打结。第三，拖卡片时线跟着走了：以前拖动时线冻在原地、线头悬空，现在你拖到哪线跟到哪，松手也不会闪。第四，卡片边上的小圆点现在能看状态：没连东西时是空心圈，连上了是发亮的实心点。第五，多了两个顺手的操作：鼠标停在一条线上，线会变红，点一下就把这条绑定解开（不用再开右键菜单）；拖着图片卡往角色卡上放、还没松手时，会先出现一条蓝色虚线告诉你将连到哪，松手才真连上。密钥这次一个字没动，还是各填各的、只存自己电脑。真机请你亲手验：打开「生成视频」，绑一张图到角色卡，拖着图卡到处走看线跟不跟；把两张卡拉到几乎贴上看线平不平；把图卡拖到角色卡左边看线绕不绕；把鼠标停在线上看变不变红、点一下看绑定解没解；再拖图卡悬到角色卡上空看虚线出不出来。",
+    features: "Flor911 连线重做（v6.56，用户主聊直派，无 flor 编号，用户 2026-11-18 15:33 发两张截图判 v6.55 连线 verdict——拖动不跟随、颜色箭头不喜欢、近距离回环，令问 Gemini；Gemini Argon 15:54 回完完整规格存 hidden_files/gemini-flor911-edges-design-2026-11-18.md，用户 15:58 点选「按这个方案改连线」直接施工，未要求 GPT 审核；纯客户端 laoluo/source.html 继续改写为新底版 + 重跑 laoluo/sync.mjs 再生 generated.* + videogen.tsx 诊断区版本行 + laoluo/README.md 新底版警告更新 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证）：【新底版】source.html 在 v6.55 底版（06583506…）之上改写为 v6.56 新底版（SHA-256 ef8a0dd038135cecf9b63bc27c6197ced2a2938625cd76ae8c41edcd2b7b96c5，LAOLUO_SOURCE_HASH=ef8a0dd038135cec）；README 新底版加粗警告同步更新。【5.1 行号核对】Gemini 行号针对 v6.54 底版全部作废，逐个以函数名实读 v6.55 底版核对：edgeMeasure / bezierPath / bindLinesHtml / beginDrag / refreshEdges / refreshPill / cardEl 均在且签名与草图一致；unbindAsset(kind, id) 与 unbindGroupPrompt(gid) 均真实存在且签名与 Gemini 补丁逐字相同（另有 menuUnbind / 菜单项已在用）；boundPromptGroups(s) 签名与返回值（角色先、场景后、按 bindPromptOrder）与草图一致；s.hoverId 是真实状态字段（newLine 初值 + hoverCard/unhoverCard 维护），变暗按 highlightGroup/selectedId/hoverId 三者实现；g.color 真实存在（组卡色点/徽标在用），缺失时回落 kind 色（角色 #38bdf8 / 场景 #a78bfa）与现行口径一致；s.promptOpen / s.promptPos 真实存在；beginDrag 的 s.drag 现行结构为 {id,lastX,lastY}（另有 moved 标记），startObjX/startObjY 是 beginDrag 内的局部变量（v6.55 已按 P3 落地），本版 sizes/rect/dropTargetId 挂进同一 s.drag 对象、不另起全局。【去箭头与新视觉】bindLinesHtml 整体重写：全部 <marker> 与 SVG <circle> 端点删除（grep marker=0、bindLinesHtml 内 circle=0，文件里其余 <circle> 是图标字形无关）；每条边一个 <linearGradient gradientUnits=userSpaceOnUse>（id uv-eg-N 每次渲染重建、与小地图渐变零撞名）：素材→组卡平时 1.5px rgba(148,163,184,0.18)→rgba(203,213,225,0.34)，组卡→描述词平时 1.75px rgba(125,211,252,0.22)→rgba(165,180,252,0.42)；变暗 1.25px 实色 rgba(255,255,255,0.07)；激活素材边 2px 语义色（图 #a78bfa / 音频 #fbbf24）→组色（g.color 回落 kind 色）、描述词边 2.25px 组色→#93c5fd，均带 drop-shadow(0 0 4px rgba(148,163,184,0.28)) + 白色流动细虚线（.uv-edge-flow 改 dasharray 4 8、keyframes uv-edge-flow 改 dashoffset -24、0.75s，与 Gemini 补丁同名同值、文件内仅一处定义无冲突）；SVG 覆盖层定位/尺寸/viewBox/z-index 以现行代码为准一字未动（left/top -2000、6200、z 4、卡片 z 6+ 压线、端口 z 7 压线头）。【三档贝塞尔】bezierPath 照 Gemini 第 2 节逐字落地（阈值 140/16/8/4/160/40 与系数 0.45/0.8/0.35/0.25 未调参）；数值断言以 bun 直接执行 source.html 抽出的函数本体全过：Δx=200→c=90；Δx=28→c=16 且 x′(t) 全程最小 18>0 不回环；Δx=4→c=3.2（x2−c 浮点呈现 0.7999… 系公式原样浮点、无碍）；Δx≤8 且 Δy<4→直线段（含边界 Δx=8/Δy=3）；Δx=−200/Δy=40→c=80 柔和绕行、Δx=−10→c=40 下限；Δx=0/Δy=100→c=0 竖直。【拖动跟随】beginDrag 按下时 snapshotCardSizes(s) 快照全部卡片尺寸——走现行 edgeMeasure 实测路径（getBoundingClientRect ÷ zoom），兜底值与现行各调用点相同（图 280×214 / 音 280×96 / 组 300×156 / 描述 300×110 / 提升 320×150 / 设置 288×110，与 tidyFallbackSize 同口径）；主代理裁决：Gemini 草图的 214 不是写死值而是现行兜底，快照以实测优先、P1 自适应高（84–360）靠实测进快照，拖动中图片恰好载完改高时以 pointerup 的 render() 实测复位为准、不在拖动中途用过期尺寸（快照在拖动期间恒定、线头位置随卡片 x/y+快照高中点走）；edgeMeasure 开头命中 s.drag.sizes 直接返回，拖动中 bindLinesHtml 全部量测走快照、零 getBoundingClientRect；move() 末尾调 scheduleDragSync()（模块级 dragSyncRaf 合并、与现行 camRaf 同风格、sync 锚点计数未变：winAdd=12 winRemove=8 setInterval=2 setTimeout=8），rAF 回调里 refreshEdges()+refreshPill() 且先判 s.drag 还在；up()（pointerup/pointercancel/blur 共用）开头 cancelDragSync() 清待处理 rAF，最终态仍由原 render() 落定、无双渲染抢跑。【点线解绑（5.2 实测结论：落地）】委托机制实读 delegate.ts：祖先遍历在事件时从 live DOM 读 on* 属性、派发只查 handlers 字典（字典含全部顶层函数），动态拼进 innerHTML 的 onclick 与静态模板同路；unbindAsset/unbindGroupPrompt 本就在字典内（菜单项 menuUnbind/unbindGroupPrompt 已实证在用）。落地写法从 Gemini 草图：每条边一个 <g class=uv-edge-group onpointerdown=event.stopPropagation() onclick=unbindAsset('image'|'audio','id') 或 unbindGroupPrompt('gid')>，内含 <title>点击解除绑定</title>、可见路径 .uv-edge-vis、激活流动虚线、12px 透明命中路径 .uv-edge-hit（pointer-events:stroke、cursor:pointer）；onpointerdown 拦事件是必需的——画布祖先 canvasDown 在 pointerdown（select 模式）会取消选中并 refreshEdges 重绘掉被点中的 <g>、click 将无目标可派发，拦下后 click 目标存活（此 stopPropagation 写法与平台菜单遮罩/动作 pill 现行同款）；.uv-bind-svg 保持 pointer-events:none、只命中路径以 stroke 重新启用命中（Leaflet 同款模式）；CSS .uv-edge-group:hover .uv-edge-vis 悬线变珊瑚红 #f87171 2.25px。sync.mjs 审计：全动态模板由 1 处变 2 处（新增的正是这条边 onclick，运行时定型、靠委托大声报错兜底，与菜单项同口径单列）。【拖放预览】updateDropTarget(s,id,ev) 在 move() 里以快照尺寸 + 卡片位置 + 指针世界坐标（(clientX − 画布 rect.left − cam.x)/zoom，画布矩形 beginDrag 时缓存进 s.drag.rect，.uv-world 在画布左上 0,0、transform-origin 0 0 已实读核对）探测：拖素材卡记指针悬着的组卡、拖组卡记是否悬在描述词卡上，存 s.drag.dropTargetId；bindLinesHtml 据此多画一条 1.75px #38bdf8 dasharray 5 5 虚线（被拖卡右端口→目标卡左端口、走同一 bezierPath）；松手绑定判定仍是 up() 现行 getBoundingClientRect 路径一字未动，预览只画线不改状态。【接口点】.uv-port-dot 改空心暗环（background #0e1015、border 1.5px rgba(255,255,255,0.32)），新增 .connected 实心亮点（background/border 走 --port-c、box-shadow 0 0 6px 同色 + 原底环）；五处端口模板把 inline background 改 --port-c（现行端口色逐处不变：描述词 #5b8cff、组左/右 kind 色、图 #a78bfa、音频 #fbbf24），connected 类由真实绑定态决定：描述词左进口=有组绑描述词、组卡左进口=该组已绑图或音频数>0、组卡右出口=g.bindPrompt、图/音频右出口=getGroup(groupId) 存在；8px 尺寸与端口定位（左进右出）未动。【P1 联动】bindCardImgLoads 的 load 监听与 onCardImgLoad 节流刷新（120ms）一字未动，非拖动时 refreshEdges 仍走 edgeMeasure 实测，图载完卡高变了连线端点照常重瞄；拖动中载完的情形以 pointerup render 复位（见拖动跟随条）。【抽取】sync.mjs 全过：CSS 282 条（279→282，新增 .uv-edge-hit / .uv-edge-group:hover .uv-edge-vis / .uv-port-dot.connected 三条，.uv-edge-flow 与 keyframes 改值不计数），顶层函数 213 个（209→213，新增 snapshotCardSizes/scheduleDragSync/cancelDragSync/updateDropTarget），顶层变量 35 个（34→35，新增 dragSyncRaf），on* 模板 141 处（139→141：pointerdown +1 为边 <g> 的 stopPropagation、click +1 为边 <g> 的动态 onclick），引用函数 80 个全在字典，全动态模板 2 处单列。【密钥零改动】grep 逐处证实：读 token/dskey 两行（lsGet llpub-token/llpub-dskey）、persistKeys 写两键、loadKeys 回填两行、autodl Authorization ×2、DeepSeek Bearer ×1、演示模式判定 if (!token.trim()) demoRun 一字未动，sync 锚点 DEFAULT_TOKEN 置空=1 在位；本版改动文件仅 source.html/generated.*/videogen 版本行/README/App 版本日志/replication/DATA-PLAN，密钥相关代码零涉及。【不动】assembleSubmission / submitTask 动态地址 / 工作流预设与能力 gating / rateFor、IndexedDB 项目系统与项目切换器、dock / 双岛 / 小地图 / 整理撤销 / 缩放三档 / 右键菜单 / 诊断区（仅版本行）、四台 / 监控页 / 储存库 / 封面 / 生图 / 设置、服务端动作与 schema 一字未动；无新表、无新迁移、无新 npm 依赖；平台版本 v29 全站迁移按 v6.55 定论不与本单捆绑、未做。真机待核：拖动跟随肉眼确认（拖已绑素材卡看线头贴口）、五档间距线形（200/28/4/贴上/反向）、悬线变红与点线解绑三处一致（组卡计数/chips/连线）、拖放虚线预览与松手绑定、两类边激活色调、换不同比例图后连线重瞄、onZoomBlur 与连接 C 遗留项。",
+  },
+  {
+    version: "v6.55",
+    date: "2026-11-18",
+    text: "Flor911 画布这次修好了你提的四个问题。第一，参考图以前在卡片里被裁掉一块，现在完整显示了：不管图是横的、方的还是竖的，都按原样整张放进去、不裁边；图一载完，连线会自动重新对准卡片中间。第二，以前关掉窗口记录就容易丢、密钥还得重填，现在记录、素材和画布状态都存进了浏览器的大仓库（IndexedDB），刷新、关窗都还在；历史记录里每条还会带一张小缩略图。密钥改成边打字边存：你在密钥框里一输入就存好了，关掉窗口、刷新页面，打开还是连着的状态，不用再重填。第三，左上角 Flor911 牌子旁边多了「项目」按钮：可以新建项目、切换、改名、删除，每个项目是一块独立画布，各自的状态、素材、记录分开存；切项目之前会先把当前项目存好，不会丢东西。第四，角色卡、场景卡现在能绑到描述词了：把组卡拖到描述词卡上松手，或者右键菜单、选中后的小条、编辑条里点「绑定到描述词」，就会出现一条连线，描述词卡上也会挂上这个角色的名字牌；生成时发出去的提示词会自动在前面补上这个角色对应哪张图的说明，画布上你写的原文一个字不动。绑了却还没给它图，点生成会先拦下来提醒你。第五，设置里多了「工作流」下拉：默认还是原来那个，不动它就和以前一模一样；也可以换成超清、高速、文生（不用图、光靠文字生成）等十几种，或者粘贴自己的工作流 ID；换了工作流，时长上限和最多能带几张图、几段音频都会跟着变。注意：工作流下拉里有两种的名字是照着你发的截图抄的、截图里被截断了一截，没核实准，先别用那两种；工作流的价格也没核实过，费用显示还是按原来的口径算。密钥这次除了「输入即存」这一处按你定的方案改了存储写法，读和用的地方一个字没动，还是各填各的、只存自己电脑。真机请你亲手验：打开「生成视频」，传三张不同比例的图看是不是整张显示；密钥框里打几个字、关窗刷新，看是不是还在；新建一个项目、切回来，看记录还在不在；把角色卡拖到描述词卡上绑一下，再点一次生成（演示模式就行）看提示词前面有没有补上角色说明；最后在设置里换一次工作流，看副标题和时长上限有没有跟着变。",
+    features: "Flor911 四问题修复（v6.55，用户主聊直派，无 flor 编号，用户 2026-11-18 04:22 提 4 个问题，04:24 定三方分工 Gemini 出方案，用户 14:43 原话「不用gpt审核了，直接用」跳过 GPT 审核直接按 Gemini 方案施工；纯客户端 laoluo/source.html 继续改写为新底版 + 重跑 laoluo/sync.mjs 再生 generated.* + videogen.tsx 诊断区版本行 + laoluo/README.md 新底版警告更新 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证）：【新底版】source.html 在 v6.54 底版（a1031a52…）之上改写为 v6.55 新底版（SHA-256 06583506fd368338fa2a563f0de1186d8e0a8677f2b30efb1eea5fcfff33c631，LAOLUO_SOURCE_HASH=06583506fd368338）；README 新底版加粗警告同步更新。【P1 参考图完整显示】.uv-icard-img 改 height:auto/min-height:84px/max-height:360px/object-fit:contain（卡宽 280、.uv-icard-frame、.uv-gthumb 72×88 cover、.uv-port 定位不动）；fitView 与 mmItems 的图片项改 tidyMeasure 实测高度（不再写死 h:214）；render() 末尾调 refreshEdges() 首帧重测连线；onload 裁决（主代理定，不照抄 Gemini 行内 onload）：load 事件不冒泡、活不过现行祖先遍历委托（构建产物委托字典里无 load 项、平台函数在 bootLaoluo 作用域内原生内联也调不到），落地写法为渲染后给每张 .uv-icard-img 元素级 addEventListener('load')（bindCardImgLoads，dataset 防重复绑，不进委托字典、不新增 window 监听器），载完节流 120ms 调 refreshEdges()+refreshPill()，已缓存图靠 edgeMeasure 的 getBoundingClientRect 实测兜底。【P2 持久化＋项目＋密钥输入即存】状态/历史主存 IndexedDB（库 ll-platform-pub），项目级键 proj-{pid}-line-{n}-state / proj-{pid}-line-{n}-assets，localStorage 只作兜底镜像（写失败静默、读优先 IDB）；相机随状态包 cam 字段存取、另留项目级相机键，默认项目迁移期回退旧 llpub{n}-camera；projects-index（IDB＋llpub-projects-index 镜像）、initProjects 首次启动建「默认项目」并把旧键 llpub{n}-state/-camera、assets-{n} 迁入 proj_default（旧键保留不删）；项目切换器在左岛品牌区（项目按钮＋下拉菜单），新建/改名/删除走现有 .uv-overlay/.uv-dialog 样式、绝不用 window.prompt；切换前四线 persistLayout 全落盘、切换后 resetLineData 只重置数据域字段（任务状态/定时器/音频对象/拖拽菜单选中态等运行时字段不冲，与 loadLine 白名单回填同口径）、有任务在跑时禁止切换/删除；loadLine 改 async 后调用点核查：boot 已 await、switchLine 原本就 await、applyCopyAssets 原本就 await（其内部 loadLine(line).then(render) 的 then 仍成立）、render/generate 不直接调 loadLine，无先渲染后读回竞态；历史缩略图 makePosterThumb 压 160×100 JPEG，historyForSave 保留 http(s) 与 ≤32768 字符的 data:image/jpeg；完成视频缓存 blob（video-blob-{histId}）供回放/下载优先用、失败静默回落远程 videoUrl；密钥 persistKeys 双写（IDB auth-keys＋localStorage 原键名）接入 onTokenInput/onDsInput/saveToken/clearToken 输入即存，loadKeys IDB 优先；dskey 正则裁决（主代理定，推翻 Gemini 草图）：旧启动代码里按 /^sk-[A-Za-z0-9]{16,}$/ 不合就清空 dskey 的一行已删除，已存密钥无论格式只读不删。【P3 组卡绑描述词】组对象加 bindPrompt/bindPromptOrder（随 groups 整体存取/复制/整理自动带走）；boundPromptGroups 角色先场景后按绑定序；手势复用现有两种：connect 模式拖组卡到描述词卡上（命中用描述词卡 getBoundingClientRect 与 clientX/clientY 同坐标系判定，与缩放平移无关；绑定后组卡弹回拖动起点 startObjX/startObjY——该变量 v6.54 不存在，本版在 beginDrag 内按 target 起点新增局部变量）、右键菜单＋actionPill＋editor 三处开关 toggleGroupPrompt；组卡右出端口（角色 #38bdf8/场景 #a78bfa）、描述词卡左进端口 #5b8cff＋已绑 chips、组卡「已绑描述词」徽标；bindLinesHtml 追加同款贝塞尔绑定边（描述词卡未打开不画）；tidyCanvas 改左到右流向（绑定素材列→组卡列→无连接列→固定卡列最右），快照/撤销规则一字不动；新增 assembleSubmission：无绑定时 prompt/images/audios 与 v6.54 逐项一致，有绑定时按主体序排素材、前置 <Subject N> (组名) is the character/scene environment in <Picture K> 定义行、正文 @组名/组名加注 (Subject N)、正文未提及的主体在正文前加标签前缀，界面 s.prompt 原文不动；已绑组无图时 validateBeforeGenerate 用 Gemini 中文文案拦截；现有 im.groupId/a.groupId 绑定解绑一字未动。【P4 工作流选择】WORKFLOW_PRESETS 13 预设＋__custom__（默认仍 minimax_h3_zm_u24 新线零变化），能力档案 {maxImages,maxAudios,maxDur,minImages} 做 UI gating（设置编辑条工作流 select＋能力徽标＋自定义 ID 输入＋时长滑条 max 随 maxDur）与提交切片；submitTask(wfId, body) 改动态地址（唯一调用点 generate 已审计）；设置卡副标题 data-fid=settings-wf 显示当前工作流、patchUI 局部刷新；workflowId/customWorkflowId 进 newLine/persistState/loadLine；canGenerate 助手统一三处 canGen（文生版 minImages=0 时无图可生成）；onWorkflowChange/onCustomWorkflowInput 走现有 onchange/oninput 委托（change 模板进委托字典、sync 审计在册），自定义 ID 输入按 Gemini 草图过滤（只留字母/数字/下划线/连字符/点号，其余字符即时剔除）。【未核实清单（按 Gemini 给值落地、不得编造）】两个带星 slug minimax_h3_image_audio_to_video_15s 与 minimax_h3_image_audio_to_video 在截图里被截断；首尾帧工作流图片字段名是否为 first/last_frame、音频字段名、分辨率枚举（含不含 1080p）、每秒价格（Gemini 称 10 月 16 日起 H3 涨 1 分/秒）均未核实；indextts2 与 wan2.2 动作迁移第一版不进；RESULT_PATH/queryTask/rateFor 计费口径不动。【5.5 接线】persistState/loadLine 完整携带 bindPrompt/bindPromptOrder（随 groups）与 workflowId/customWorkflowId（显式字段），旧数据迁移不丢字段；诊断区布局版本号升 v6.55。【抽取】sync.mjs 全过：CSS 279 条（264→279，新增工作流 select 与项目菜单样式），顶层函数 209 个（175→209，新增 P1 bindCardImgLoads/onCardImgLoad、P2 idbDel/makePosterThumb/attachPosterThumb/cacheVideoBlob/persistKeys/loadKeys/persistProjIndex/initProjects、P3 boundPromptGroups/bindGroupPrompt/unbindGroupPrompt/toggleGroupPrompt/assembleSubmission、P4 activeWorkflowProfile/activeWorkflowId/onWorkflowChange/onCustomWorkflowInput/canGenerate、项目 toggleProjMenu/projMenuHtml/anyLineBusy/openProjDialog/onProjNameInput/closeProjDialog/confirmProjDialog/resetLineData/switchProject 等），顶层变量 34 个，on* 模板 139 处（124→139：click +13 项目菜单/对话框/绑定开关/组右键绑定等、input +2 项目名与自定义工作流 ID、change +1 工作流 select；load 事件按裁决走元素级监听不进模板），引用函数 80 个全在字典，全动态模板仍 1 处单列；锚点计数与 v6.54 全同（winAdd=12 winRemove=8 setInterval=2 setTimeout=8， 未新增 window 监听器/定时器）。【密钥口径】除 persistKeys/loadKeys/输入即存与删除 dskey 正则清空行外，密钥读/用路径（autodl Authorization ×2、DeepSeek Bearer ×1）与 DEFAULT_TOKEN 置空保险逐字未变，grep 证实；密钥钮只开现有对话框，未做金库/PIN/上锁；演示模式判定未变。【不动】委托常开＋捕获屏蔽、mount-once 保活、诊断区、错误横幅、三档语义缩放、整理快照规则、onZoomBlur 遗留疑点与连接 C 开关；工作台其余四台、监控/项目/储存库/封面/设置一字未动；不做清单导入导出/资产库抽屉/卡点播放器/密钥金库/多轨时间轴/画布内修图/嵌套分组/分镜卡新节点。真机待核：三比例图完整显示与连线对中、密钥输入即存 Esc 关窗刷新仍连接、历史与缩略图刷新后仍在、项目新建/切换/改名/删除与旧数据迁移、拖绑与右键绑出连线与 chips、演示模式提交体对照、已绑无图拦截、工作流切换与副标题/刷新 persistence、文生版 0 图提交体、无音频版提交体、真实视频 blob 缓存、填 Key 真生成一次。",
+  },
+  {
+    version: "v6.54",
+    date: "2026-11-18",
+    text: "「生成视频」里的画布照着正规 LibTV 的样子又重做了一遍，名字也正式改成了 Flor911。以前顶部是两条灰栏堆着一堆看不懂的英文和文件名，现在改成左右两座小悬浮岛：左边是 Flor911 的牌子，右边是状态、四条线切换、预计费用、密钥和「生成视频」按钮，画布从窗口最顶上一直铺到最底下，看着敞亮多了。卡片整体放大了一圈、颜色也换成了深蓝灰，图片卡里的图多了一层深色内框，白底的三视图不再直接贴在黑底上；角色卡上直接能看到绑定的那张图的缩略图和音色，没绑的会写明「未绑定音色」。卡片右上角的 × 都去掉了，关卡、删卡改用点中卡片后上方的小条、右键菜单、左边的工具栏开关，或者选中后按 Delete 键。连线改成从图片卡右边出来、进角色卡左边，不再绕回去打结；鼠标停在卡片上或者点中它，连着的线会变蓝变粗。屏幕下方中间多了一条生成条：没选卡片时显示当前描述、分辨率和生成按钮，点中哪张卡，它就展开成那张卡的编辑区（和以前的编辑条一样，东西一样没少）。左下角多了小地图，能看到全部卡片的位置，点一下就把画布移过去、按住拖也能平移；画布全空时会有一张引导卡教你从哪开始。左边的工具栏变瘦了贴在左边中间，缩放和模式按钮合并到了右下角一排，「整理」还在一排里。密钥这次照样一个字没动：还是各填各的、只存自己电脑。你点开「生成视频」亲手看看新样子：确认不再是以前那个寒碜样，建卡、拖一拖、绑张图看角色卡上的缩略图、点小地图移一移、把卡全关掉看引导卡，再填自己的密钥跑一次真生成确认。",
+    features: "Flor911 画布按正规 LibTV 重做（v6.54，用户主聊直派，无 flor 编号，用户 2026-11-18 01:36 发截图说画布「太寒碜」、名字没改，令查正规 LibTV，Gemini 第四次咨询已回，用户 01:51 点选按 6 项开工；纯客户端 laoluo/source.html 继续改写为新底版 + 重跑 laoluo/sync.mjs 再生 generated.* + laoluo/delegate.ts 补 4 种 pointer 委托事件 + videogen.tsx 去通栏标题条改悬浮关闭钮 + laoluo/README.md 新底版警告更新 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证）：【新底版】source.html 在 v6.53 底版（265b7e17…）之上改写为 v6.54 新底版（SHA-256 a1031a5274e20fe0068352734a1aa823fdea45d9513c56fcddb38d3e8da6b165，LAOLUO_SOURCE_HASH=a1031a5274e20fe0）；README 新底版加粗警告同步更新。【口径】Gemini 给的尺寸/配色/阴影数值其自标为推断（Inference），非 LibTV 官网原文，落地以视觉效果为准微调，不得称官网原样。【4.1 双岛顶栏＋改名】平台内通栏顶栏与底部状态条整体删除，画布占满窗口：左岛（F9/胶片框渐变 logo 28px＋Flor911 wordmark＋STUDIO 标签）、右岛（状态 pill 演示模式/AutoDL 已连接、四线分段 pill、费用 pill 只留金额、密钥钮只开现有对话框、渐变主按钮调现有 generate()）；「牢络生成平台公开版」界面可见文字清零（代码注释/历史日志除外）；工作流文件名移入生成设置卡与设置编辑区展示；顶栏原始后端字符串（工作流名/四线并行/直连 autodl.art）清零；复制素材入口从顶栏移入画布右键菜单（menuCopyAssets 调现有 openCopyAssets，能力不丢）；品牌岛不做项目下拉/清单导入（后续模块，不留假控件）。Wrapper：通栏标题条删除、画布顶到窗口顶，关闭改右上角悬浮圆钮（平台右岛经 sync.mjs wrapper 覆盖规则 right:58px 左移让位），副标题随之删除、密钥位置说法由平台右岛「密钥」钮自明。【4.2 色板/尺寸/去×】画布底 #0e1015＋24px 点阵（点 alpha 0.085）、卡面 #161922、悬浮层 #1e222e、边框 rgba(255,255,255,0.08)、选中 #5b8cff＋光晕、主字 #f3f4f6/次字 #9ca3af/弱字 #6b7280、卡影 0 10px 28px rgba(0,0,0,0.45)、圆角 14px；媒体卡宽 280（图带 #11131a 内框衬底、高度随 16/10 比例）、组卡宽 300 最小高 156、固定三卡沿用 v6.52 瘦身形态只换色板；fitView 与 tidy 兜底尺寸同步新卡型（图 280×214/音 280×96/组 300×156，运行时实测优先口径不变）。× 盘点：描述/提升/设置三卡 × 删除→左侧 rail 开关＋选中动作 pill「收起这张卡」＋Delete 键收起；组卡 × 删除→右键菜单删除＋dock 删除按钮＋动作 pill 删除＋Delete 键；图片/音频卡 × 删除→右键菜单删除卡片＋dock 移除＋动作 pill 移除＋Delete 键；结果卡关闭钮保留（closeView 无其它入口，按「盘点不到替代路径不许删」口径）；编辑条头关闭钮保留（dock 自身收起钮，另有点击空白/Esc 取消选中）。选中态：#5b8cff 边框＋光晕＋卡片上方悬浮动作 pill（世界层内随相机移动，只放现成函数动作：点亮 toggleHighlight、删除 deleteGroup、移除 removeImage/removeAudio、试听 toggleAudio、收起 toggle*）。新增 Delete/Backspace 删除选中（并入现有 keydown 处理器，不新增监听器；输入框焦点时原有早退逻辑保护）。【4.3 底部 dock】v6.52 编辑条与生成条合并为一条 dock（.uv-dock，宽 min(680px,100vw-760px)@≥1100px 且中心左移 70px、≤1099px 时抬高 bottom:62px（审计复核修正：原 100vw-440px 口径下 dock 会压住缩放 pill 最左的「选择 V」、手机宽下整条压住缩放 pill，修正后四档宽度几何核算不重叠；创作记录条同步左移避开右岛、小地图在 ≤900px 抬到 dock 之上）、毛玻璃、底部居中）：未选中=生成摘要态（描述摘要＋分辨率 pill 点开设置编辑区 dockOpenSettings＋通道 pill＋主按钮 generate() 与右岛同一函数）；选中=摘要行＋v6.52 编辑条全字段一项不丢；patchUI 的 gen-btn/gen-t 改 querySelectorAll 双按钮同步。不新增节点类型/状态字段。【4.4 锚点卡】组卡改锚点结构：头（色点＋类型＋锚点徽章＋点亮）＋身（左 72×88 缩略图槽：已绑定显示首张绑定图实时缩略图、未绑定虚线拖入区；右：名字＋@触发标签 pill＋绑定计数＋音色子 pill——已绑定显示迷你播放钮＋音频名走现有 toggleAudio、未绑定显示「未绑定音色」）；微调说明：音色时长未显示——平台数据模型不存音频时长（只有文件名/URL），显示时长须新拉元数据，本版以音频名代替、播放能力不变。绑定/解绑/改名/点亮/删除行为一字未动，缩略图只读。【4.5 连线改向】边模型（groupId 绑定）一字不动，只改绘制：锚点改素材卡右侧中点出（edgeMeasure 量实际渲染宽高，兜底新卡型）→组卡左侧中点进；贝塞尔改 dx=max(60,|x2-x1|*0.45)；默认 1.5px rgba(255,255,255,0.20)，悬浮/选中/点亮任一端卡时 2px #5b8cff＋光晕＋流动虚线（新增 hoverId 瞬时态＋onpointerover/onpointerout 模板，delegate.ts 补 pointerover/pointerout/pointermove/pointerup 四种委托事件）；组卡色点口移到左侧中点、素材色点口移到右侧中点。【4.6 小地图＋空态】左下小地图 168×108（全部卡片按类型色块鸟瞰＋视口框，applyCam 实时同步视口 rect；点按居中 centerCamOn、按住拖动平移，靠 minimap 元素自身 pointer capture＋新增 pointermove/pointerup 委托，不新增 window 监听器）；状态信息移入小地图下方状态岛（statusHtml 原样、patchStatus 不变）；创作记录移入顶部居中悬浮条（historyHtml 原样）；空态引导改为「画布上无任何可见卡片」（无素材/组且三固定卡全关）时显示引导卡，动作全部映射现有函数（上传参考图/音频 label、createGroup 新建角色卡、togglePrompt 打开描述词），有卡自动消失；双击空白加图为现行行为保留未新增。左侧工具栏改瘦 rail（52px 口径、左中悬浮、8 入口与角标一字不丢；「清空」二次确认：brief 称现行有确认，实测 v6.53 代码 clearCanvas 是点即清、无确认——本版按 brief 落点补上确认对话框（clearCanvas 改开确认、doClearCanvas 执行原清空逻辑、Esc 可关），属按 brief 补齐而非删除）。【4.7 整理保留】整理/撤销整理随缩放 pill 在右下角（[选择 V][抓手 H][连接 C] | [− % +][适配][整理/撤销整理][复位]，v6.52 独立鼠标工具条并入此 pill，原禁用的撤销/重做占位钮随之移除——本就是 disabled 无后端占位）；整理算法/快照失效规则一字不动，尺寸口径按新卡型更新。【4.8 抽取】sync.mjs 全过：CSS 264 条（222→264，新色板/岛/dock/小地图/锚点卡/动作 pill 等新规，含 wrapper 覆盖新增右岛让位 1 条），顶层函数 175 个（158→175：+edgeMeasure/mmItems/minimapHtml/minimapPoint/centerCamOn/minimapDown/minimapMove/minimapUp/hoverCard/unhoverCard/deleteSelected/dockOpenSettings/menuCopyAssets/dockHtml/actionPillHtml/refreshPill/doClearCanvas/closeClearConfirm 共 18，−mouseToolsHtml 并入 zoomHtml 1），顶层变量 29 不变，on* 模板 124 处（新增 pointerover 6/pointerout 6/pointermove 1/pointerup 1 四种新类型，click 71：去 6 个卡片 × 与顶栏复制素材、加 dock/动作 pill/音色播放/空态/菜单/清空确认等新按钮，逐项以 sync AST 与原文双向对账为准），引用函数 71 个全在字典，全动态模板仍 1 处单列；锚点计数与 v6.53 全同（app=1 imgInput=2 audioInput=1 toastAppend=1/3 winAdd=12 winRemove=8 setInterval=2 setTimeout=8 clearInterval=3 clearTimeout=2 DEFAULT_TOKEN 置空=1——本版未新增任何 window 监听器/定时器）。【4.9 密钥零改动】grep 证实：读 token/dskey 两行、persistAll 写两键、autodl Authorization ×2、DeepSeek Bearer ×1、DEFAULT_TOKEN 为空逐字未变；sync.mjs 强制置空保险保留；密钥钮只开现有对话框，未做金库/PIN/上锁；演示模式判定未变。【不动】v6.51 起的委托常开＋捕获屏蔽（本版仅在 delegate.ts 事件表补 4 种 pointer 事件、机制不变）、mount-once 保活、诊断区（版本行升 v6.54）、错误横幅、三档语义缩放、一键整理行为；工作台其余四台、监控/项目/储存库/封面/设置一字未动；不做分镜卡/清单导入/资产库/卡点播放器/密钥金库/项目切换。真机待核：点开生成视频看双岛与新画布、悬浮关闭钮、绑图看锚点卡缩略图与音色 pill、连线左进右出与悬浮变蓝、小地图点按拖动、dock 两态切换、整理/撤销复验、缩放框失焦（v6.51 遗留）、填 Key 真生成一次。",
+  },
+  {
+    version: "v6.53",
+    date: "2026-11-18",
+    text: "「生成视频」的画布加了一个「整理」按钮，就在右下角缩放那一排、「适配」旁边。以前卡片摆得乱七八糟、互相压着，全靠自己一张张拖；现在点一下「整理」，画布上所有卡片会按绑定关系自动排整齐：描述词、提升、设置三张固定卡排在最左边一列；每个角色/场景卡带着绑在它身上的图片和音频自成一列，素材紧跟在组卡正下方不会被拆散；还没绑定到任何组的素材排在最后一列；排完画布会自动缩放成刚好全部看得见。排得不满意也不怕：整理完按钮会变成「撤销整理」，点一下就精确回到整理前的位置和视角；但只要你手动拖动过任何一张卡、或者新建/删了卡、或者切换了线，这个撤销就自动作废（按钮变回「整理」），免得把你后来的调整冲掉。画布是空的时候点整理不会出错，只会提醒一句没有可整理的卡片。密钥这次照样一个字没动：还是各填各的、只存自己电脑。你点开「生成视频」亲手试试：先把卡片故意摆乱摆重叠，点「整理」看排得齐不齐，再点「撤销整理」看能不能回到乱的样子，然后拖动一张卡确认撤销按钮变回「整理」。",
+    features: "一键整理画布（v6.53，用户主聊直派，无 flor 编号，用户 2026-11-18 00:50 问为什么没有一键整理画布、当场点选加上；纯客户端 laoluo/source.html 继续改写为新底版 + 重跑 laoluo/sync.mjs 再生 generated.* + videogen.tsx 诊断区版本行 + laoluo/README.md 新底版警告更新 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证）：【新底版】source.html 在 v6.52 底版（766c9de8…）之上改写为 v6.53 新底版（SHA-256 265b7e17dfdee883e63a53c3a0d20cbbf0d1d70250d6a7dc6de290064a7f8dd0，LAOLUO_SOURCE_HASH=265b7e17dfdee883）；README 新底版加粗警告同步更新（以后 GPT 升级必须拿本版改后文件去改）。【连线/绑定模型盘点】现行代码唯一的边是素材 groupId 绑定：s.images[]/s.audios[] 每项可带 groupId 指向 s.groups[] 组卡，连线（bindLinesHtml）从组卡右缘锚点 (g.x+208, g.y+44) 画到素材左缘锚点（图 y+80 / 音 y+55）；无组↔组、素材↔素材边，无其它连接字段。故分层图是「组卡为根、绑定素材为叶」的森林。【入口】zoomHtml 在「适配」后加按钮：无快照时文案「整理」title「一键整理画布」onclick=tidyCanvas()，有快照时同位置变「撤销整理」onclick=undoTidy()；走现有 on* 委托路径，不新增快捷键。【排布算法 tidyCanvas】列构成：①固定卡列（最左，只排 Open 为真的，顺序 描述→提升→设置，未打开的位置一字不动）②组单元列（组卡+其绑定图片/音频为一整体绝不拆列，素材在组卡正下方按当前从上到下、从左到右排；单元之间互无边、同层，按组卡当前从上到下、从左到右依次成列）③无连接列（无 groupId 或指向已删组的素材，最后单独成列，按当前从上到下、从左到右）；列间距 48px、行间距 32px；列宽取列内最大卡宽；原点取全部可见卡片当前包围盒左上角；尺寸运行时量实际渲染尺寸（getBoundingClientRect ÷ 当前 zoom），取不到用兜底常量（图 200×170、音 240×110、组 208×100、描述 300×110、提升 320×150、设置 288×110，与 fitView 现行估值同口径，不硬编码旧数）；排序用稳定排序、无随机数，同一输入必出同一输出；只整理当前线，收起状态/卡片内容/连线关系一字不动。【写回】新位置经现有 persistLayout 写回（groups 与三 pos 进 llpub{n}-state、images/audios 进 IndexedDB assets-{n}），不新增存储键；写回后 render 重绘（连线按新位置重画、无残线）再调现有 fitView() 适配视图（视角经现有路径存 llpub{n}-camera）。【撤销 undoTidy】点整理前把六处位置（images/audios/groups 逐 id 坐标 + promptPos/boostPos/settingsPos）与 cam 快照进 s.tidySnap（纯内存、不落存储，刷新即失效）；撤销按 id 逐项精确写回 + 视角写回并 lsSet camera + persistLayout + render。快照失效点（invalidateTidySnap）：真拖动过卡片（beginDrag 的 move 置 moved 标记、up 时才失效，纯点击选中不算）、createGroup/deleteGroup/removeImage/removeAudio/deleteAsset/handleFiles（真加进素材才算）/addUrlAsset/clearCanvas/applyCopyAssets 目标线、switchLine 离开该线时清该线快照；连续点整理时每次重新快照（永远是最近一次整理前的样子）。空画布（无可见卡片）点整理只 toast「画布上没有可整理的卡片」、不动视角不报错；单卡整理位置即其自身包围盒原点、合理。【密钥零改动】grep 证实：读 let token = lsGet(llpub-token, DEFAULT_TOKEN) / let dskey = lsGet(llpub-dskey, \"\") 两行、persistAll 写 lsSet 两键、autodl headers Authorization: token ×2、DeepSeek \"Authorization\": \"Bearer \" + dskey.trim() ×1、DEFAULT_TOKEN 为空（引号内 0 字符）逐字未变；sync.mjs 强制置空保险保留、锚点计数与 v6.52 全同（app=1 imgInput=2 audioInput=1 toastAppend=1/3 winAdd=12 winRemove=8 setInterval=2 setTimeout=8 clearInterval=3 clearTimeout=2 DEFAULT_TOKEN 置空=1）。【抽取重跑】sync.mjs 全过：CSS 222 条不变，顶层函数 158 个（+6：tidyFallbackSize/tidyMeasure/tidyByPos/invalidateTidySnap/tidyCanvas/undoTidy），顶层变量 29 个（+2 间距常量），on* 模板 103 处（click 60＝58+2 整理/撤销整理两按钮、其余不变），引用函数 63 个全在字典，全动态模板仍 1 处单列；诊断区与复制诊断文本画布布局版本升 v6.53。【不动】v6.51/v6.52 的委托常开+捕获屏蔽、mount-once 保活、诊断区、错误横幅、三档语义缩放与 HUD 行为一字未动；其余页面、数据、模型调用逻辑未动；监控/达人/分组/墓碑/清除下限/3 天清理/解剖模板/预设/复刻/下载队列/封面 id 43/项目/分析记录一律未动；不恢复自动下载；不碰 flor/选配页/新台/GitHub/exe；不做密钥金库/资产库/清单解析/卡点播放器/多步撤销/自动整理。真机待核：点开生成视频点整理看排布、撤销整理回原位、拖卡后撤销失效、切换线后整理结果还在、空画布点整理、填 Key 真生成一次。",
+  },
+  {
+    version: "v6.52",
+    date: "2026-11-18",
+    text: "「生成视频」里的画布照着 LibTV 的样子重新收拾了一遍，看着清爽多了：以前每张卡片里都塞着大段输入框和一堆参数，现在卡片只留一张主图、一行标题和一个小徽章；点中哪张卡，屏幕下方中间会浮出一条编辑条，那个节点要改的东西——描述词、中文英文提示词、时长分辨率种子、角色改名——全在编辑条里改，改完照样自动存好。画布缩得很小时卡片自动变简单，只剩色块和主图，不再挤成一团；连接线平时是细细的淡线，只有你点亮某个角色组或选中一张卡时，那条线才亮起来流动；卡片边缘的小圆点是接口（蓝色人物、黄色音色、紫色镜头），鼠标凑近才显示名字，按住拖动照样能连线绑定。密钥这次一个字没动：还是各填各的、只存自己电脑，不同步、不用重填。你点开「生成视频」亲手看看新样子：建卡、拖一拖、点中卡片在编辑条里改几个字、滚轮缩放看三档变化、拖素材到角色卡上绑定，再填自己的密钥跑一次真生成确认。",
+    features: "Flor911 画布重构对标 LibTV（v6.52，用户主聊直派，无 flor 编号，用户 2026-11-18 00:27 定口径：密钥不同步更新、各填各的、本版只改画布；纯客户端 laoluo/source.html 直接改写为新底版 + 重跑 laoluo/sync.mjs 再生 generated.* + videogen.tsx 诊断区加一行 + laoluo/README.md 新底版警告 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证）：【新底版】source.html 由 interaction v1（SHA-256 a9e8d3d1…）直接改写为 v6.52 新底版（SHA-256 766c9de8cd3dd45fed12bef852fde212dc683d644c0a6ecac32e6c3adcd34e84，LAOLUO_SOURCE_HASH=766c9de8cd3dd45f）；README 与 replication 已加粗注明：以后 GPT 升级此文件必须拿本版改后文件去改、不得拿旧版覆盖。【卡片盘点】平台共 6 种卡：描述词卡（textarea×1＋字数计数）、提示词提升卡（中文 textarea、英文 textarea、一键转写/复制中文/一键绑定/复制英文/应用到描述词 5 按钮、绑定清单预览、流程说明）、生成设置卡（时长滑条、分辨率 6 档、种子输入、价格表、预计价）、角色/场景组卡（改名输入、已绑定计数、点亮按钮、删除）、图片卡（图面、ref_image_N 字段徽章、绑定组徽章、移除）、音频卡（试听按钮、文件名、ref_audio_N、移除）。【5.1 卡片降噪】前四类卡的 textarea/输入/滑条/按钮全部移出，卡片只留主预览、1 行标题、紧凑徽章与 1 行预览/摘要（描述词首 80 字、提升卡中英各一行、设置卡参数摘要＋预计价、组卡名字＋绑定计数）；图片卡/音频卡本就以预览为主只加色点；状态角标（字数计数、点亮按钮）加 uv-state-badge 只在悬浮/选中时显形；卡片 overflow 改 visible 供色点贴边（图片圆角改由 img 自身底角承担）。【5.2 悬浮编辑条】HUD 层底部居中毛玻璃编辑条（.uv-editor，bottom 56px 让开底部鼠标工具条），绑定 s.selectedId：点中任意卡片即选中（beginDrag 首行更新 selectedId + patchSelection 局部刷新描边/编辑条/连线，不整页重绘不打断拖拽；点画布空白/Esc/编辑条关闭按钮收起）；编辑条字段与盘点逐项对应——描述词 textarea（data-fid prompt-ta 不变）、提升卡全套（zh-ta/en-ta/transcribe/copy-zh/bind-btn/bind-pv/copy-en/apply-en 与处理函数全不变）、设置卡全套（时长 onDurationInput、分辨率 pills、种子、价格表 pt-row/cell、price-est）、组卡改名（onGroupName，卡片名字文本同步局部刷新）＋点亮/删除、图片卡（名/绑定状态/点亮所在组/移除）、音频卡（试听/移除）；改动走原 on*Input→persistState/persistLayout 写回，关窗重开仍在；未选中返回空串不渲染、不遮挡画布中央。【5.3 语义缩放】lodName(zoom)：<0.45 macro、<0.85 standard、其余 detail；render 首帧给画布根写 data-lod，applyCam 仅档位变化时改属性（无逐帧重排）；macro 用 CSS 藏卡片头/体/色点只留色块与主图，standard 藏次要摘要行；缩放控件/滚轮/适配行为不变，节点位置不丢。【5.4 连线】bindLinesHtml 重写：默认 1.5px rgba(255,255,255,0.16)＋暗箭头，贝塞尔水平切线公式不变；点亮组或选中路径（组卡/其素材被选中）全亮组色＋流动虚线＋辉光，有激活路径时其余路径压暗到 0.4 分主次；端点圆改 r4 色点（组端按人物 #38bdf8/镜头 #a78bfa、素材端图 #a78bfa/音 #fbbf24）；谁连谁/断线重连逻辑一字未动，refreshEdges 只重画 SVG 层。【5.5 色点接口】组卡右缘（人物 #38bdf8/场景 #a78bfa）、图片卡左缘（镜头 #a78bfa）、音频卡左缘（音色 #fbbf24）各一个 .uv-port：8px 色点＋24px 命中区，名字标签默认藏、:hover（即光标进入 24px 命中区）才展开；色点不拦事件、拖拽建连线/拖到组卡绑定与右键绑定照旧。【5.6 世界层/HUD 分离】世界层 div 加 id=flor911-world（只装连线 SVG＋节点、承受相机 transform）；兄弟覆盖层 #flor911-hud（position absolute inset 0、pointer-events:none、z 30）装结果卡/空状态/忙碌条/工具栏/菜单/鼠标工具/缩放/编辑条/画布提示与资产空位 .uv-asset-slot（display:none、本版不做资产库、不搭半截功能），交互面板各自 pointer-events:auto；canvasDown/Dbl/Ctx 的忽略名单加 .uv-editor（点编辑条不平移不取消选中）；applyCam/cam 状态与平移缩放拖拽行为不变，HUD 不拦画布滚轮与拖拽。【密钥零改动】diff 证实：读 token/dskey 两行、persistAll 写两键、autodl Authorization ×2、DeepSeek Bearer ×1、DEFAULT_TOKEN 置空保险、演示模式判定（!token.trim() 走 demoRun）逐字未变；sync.mjs 锚点计数与 v6.51 全同（winAdd 12/winRemove 8/setInterval 2/setTimeout 8/bodyAppend 3 中只改 toast 1 处）；存储键 llpub-* 读写语义未变、用户现有布局可读回。【抽取重跑】sync.mjs 全过：CSS 222 条（+24 为 HUD/LOD/色点/编辑条/降噪新规），顶层函数 152 个（+6：lodName/editorHtml/refreshDock/refreshEdges/patchSelection/closeEditor），on* 模板 101 处（click 58＝51+7 编辑条按钮、pointerdown 18＝22−4 四张卡 body 已无输入控件不再需要 stopPropagation、input 10 不变、其余不变），引用函数 61 个全在字典，全动态模板仍 1 处单列；诊断区与复制诊断文本加「画布布局版本：v6.52」＋新指纹。【不动】挂载架构（直接挂载/委托常开/blur 屏蔽/mount-once 保活/suspend/resume/双探针/错误横幅）一字未动；其余页面、数据、模型调用逻辑未动；监控/达人/分组/墓碑/清除下限/3 天清理/解剖模板/预设/复刻/下载队列/封面 id 43/项目/分析记录一律未动；不恢复自动下载；不碰 flor/选配页/新台/GitHub/exe。真机待核：点开生成视频看新画布、建卡拖拽连线、点卡在编辑条改 6 段与参数并确认关窗重开还在、缩放三档、右键菜单、缩放框失焦、填 Key 真生成一次。",
+  },
+  {
+    version: "v6.51",
+    date: "2026-11-17",
+    text: "「生成视频」换了个彻底的打开方式。之前几版都是把平台当成一个小网页嵌进工作台，怎么嵌在你那边都加载不出来；这一版按新办法把平台直接装进工作台里面，和工作台长在一起，不再隔着那层嵌套，顺带换上了你新发来的平台新版文件。平台打开后，里面的按钮要是被浏览器拦下，工作台会自动接手让它们照样能点；实在打不开时窗口里会直接把错误写出来，不会再是黑屏一片。左下角有个小的「诊断」块，点开能看到平台的启动状态和版本指纹，万一还有问题，把里面的信息复制发我就能接着查。你点开「生成视频」亲手看看：画布和卡片出来了，就建张卡、拖一拖、连条线试试，再填上你自己的密钥跑一次真生成确认。",
+    features: "「生成视频」直接挂载重做（v6.51，用户主聊直派，无 flor 编号，用户 2026-11-17 23:14 下令按其 Gemini 对话两轮回答改造，旧 v6.51 地址解析 brief 已叫停作废、本版顶替该版本号；纯客户端 laoluo/source.html 换新版 + laoluo/sync.mjs 新增 + laoluo/generated.css/generated.js/generated.d.ts 抽取产物新增 + laoluo/delegate.ts 新增 + videogen.tsx 重写 + 删除 prepare.mjs/diagnostics.js/platform.html + laoluo/README.md 重写 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证提交真实生成任务）：【背景】v6.48 srcDoc、v6.49 独立文档地址两版真机始终黑屏，v6.50 诊断版回传证实平台文档在真机根本没加载进来（只走到 load、boot/挂载/app-ready 全未确认、无报错无 CSP 违规、页面协议 blob:）；用户否决继续修 iframe，改向 Gemini 附新版文件请教两轮后下令按其回答改造：iframe 三条路全放弃，改构建时抽取 + React 树内直接挂载。本版同时换上新版平台文件 laoluo-libtv-canvas-libtv-interaction-v1.html（SHA-256 a9e8d3d1…与 brief 一致，覆盖 source.html 一字未改）。【一、构建时抽取 sync.mjs 取代 prepare.mjs】读 source.html 抽 style/script 生成 generated.css 与 generated.js（产物提交入库，构建不挂钩，换源必须重跑抽取，README 已写明）。CSS：带字符串/括号感知的解析，逐条规则加 .laoluo-host 前缀，html, body 规则丢弃恰好 1 条（宿主另给 #0a0a0a 底色），@keyframes 步骤选择器不加前缀，产物再解析断言除 keyframe 外每条选择器都以 .laoluo-host 开头，共 198 条规则；末尾附 .uv-root 高度改走宿主的覆盖规则。JS：用 TypeScript 编译器 API（仓库既有 devDependency）确定性解析——顶层函数声明 + 顶层 const 函数表达式共 146 个全部收集进 handlers 字典（另顶层变量 27 个）；六类锚点替换逐项断言次数：const app 的 getElementById(app) 改 mountEl ×1、uv-img-input 改 app.querySelector ×2、uv-audio-input ×1、仅 toast 那处 document.body.appendChild(t) 改 app.appendChild（共 3 处 body append 只动 1 处）、DEFAULT_TOKEN 强制置空 ×1（找不到即停）、window.addEventListener ×12 与 removeEventListener ×8 改走追踪包装器 __llAdd/__llRemove，裸 setInterval ×2/setTimeout ×8/clearInterval ×3/clearTimeout ×2 同步改走追踪包装器，window.innerWidth/window.open 一字不动。产物导出 LAOLUO_SOURCE_HASH=a9e8d3d192f5c611（源 SHA 前 16 位），bun build 语法检查通过。【模板审计】把字符串拼接链还原成逻辑字符串抽全部 on* 模板：共 98 处（click 51/contextmenu 6/pointerdown 22/input 10/dblclick 2/keydown 2/blur 1/change 3/wheel 1，与原文文本计数逐项对账一致；brief 实测 pointerdown 21 处与原文不符，以原文与 AST 双证的 22 为准），遮掉动态拼接段后逐语句验白名单文法（event.stopPropagation()/preventDefault()/this.value=''/fnName(白名单参数)），三元/&&/||/成员调用出现即停；引用的 60 个函数名全部断言在字典里；全动态模板 onclick=\"' + fn + '\" 1 处静态验不了，审计输出单列为运行时大声报错兜底、不谎称已覆盖。抽取中途曾漏下钻 .map().join() 内层拼接链丢了 setResolution/setMouseMode 两处模板，已修下钻逻辑并加原文计数对账断言堵死。【二、事件委托 delegate.ts 取代 MutationObserver 方案】宿主上挂 9 个捕获阶段监听器（click/contextmenu/pointerdown/dblclick/input/change/keydown/wheel/focusout，focusout 对应 onblur），祖先遍历从 event.target 走到宿主、每层有 on* 就执行、遇 event.cancelBubble 即停（保真 stopPropagation）；派发过处理器的事件在派发完后 stopPropagation 拦在宿主层、不再下到目标元素；blur 不冒泡单独处理：另挂 blur 捕获屏蔽（只拦截不派发、执行仍归 focusout 那一路），否则目标元素自己的原生 onblur 会单独触发刷「onZoomBlur is not defined」（沙箱实测后补）。解析器分号/逗号切分识别引号，参数只认白名单（event/this/this.files/this.checked/this.value/布尔/null/undefined/字符串/数字），删掉未知参数当字符串的兜底、一律抛错；逐节点容错：解析失败或函数缺失记 console.error 并经回调在宿主上方显示红色横幅（事件类型/元素/表达式/原因 + 累计计数 + 点按复制全部明细），只跳过当前语句/节点、祖先链照常走完；on* 属性保留不删。【三、挂载 wrapper】挂载点不用 id=app（用 data 属性，启动前断言 id 不是 app 否则抛错）；宿主 .laoluo-host 占满覆盖窗内容区、#0a0a0a 底、overflow hidden；只启动一次（bootedRef + 模块级 WeakSet 双保险）。双重触发防护（沙箱实测后定的最终形态）：brief 原设计是探针测原生内联可执行就不挂委托，但沙箱点穿实测证明这条路走不通——沙箱无 CSP 时原生内联处理器能编译执行，却因平台函数全在 bootLaoluo 作用域内、没挂 window，一律报「openTokenDialog is not defined」、按钮点了没反应；故改为委托常开 + 捕获阶段派发后屏蔽原生触发：有且仅有一路生效，探针（隐藏按钮程序点击、节点与临时全局事后清除）保留只作诊断显示、结果进诊断区；平台无任何元素级/文档级 addEventListener（已核查），捕获拦截不会饿死它自己的监听器；style 属性探针：测试节点 style=width:7px 读计算样式，被剥离才启用只同步新节点 style 属性到 cssText 的轻量 MutationObserver，未剥离不启用。启动失败（boot 抛错/断言失败）内容区显示错误层（错误原文 + 重试按钮，重试清挂载点重跑启动），绝不静默黑屏。诊断区为覆盖窗左下角可折叠小块：启动状态、产物指纹、两项探针结果、处理器错误计数 + 复制诊断信息按钮，不遮挡画布主体。【四、生命周期 mount-once + hide/show 保活】embed 只渲染一次、放在条件卸载之外，覆盖窗开关只改 display；关窗 suspend：经追踪包装器登记的 window 监听器全摘（beforeunload 保留）、暂停四条线正在播的音频并清播放态，setInterval/setTimeout 一律保留（生成轮询关窗继续跑）；开窗 resume：挂回监听 + 调 handlers.applyCam() 重算画布；dispose 只供整页卸载（摘全部监听 + 清全部追踪定时器），正常开关窗不调；bootLaoluo 返回 { handlers, suspend, resume, dispose }。Esc 口径补一处：焦点在平台内部时 Esc 归平台关菜单、不连带关覆盖窗。【五、旧代码清理】覆盖窗头部「新窗口打开」、iframe、srcDoc、平台独立文档地址与 llb 缓存戳、加载提示轮询、postMessage boot 协议、v6.50 四步诊断面板、diagnostics.js 注入、prepare.mjs、platform.html 全部删除；videogen 与 laoluo 目录内 grep platform-/srcDoc/iframe/postMessage/diagnostics 零残留（历史更新日志原文与监控 platform 字段等无关命中不算）。存储键 llpub-* 一字不动。【不动】五个现有工作台的页面/数据/模型调用逻辑一字未动；监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层。基线升 v6.51（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：点开「生成视频」确认不再黑屏、画布卡片工具栏齐全，建卡/拖拽/连线/开密钥对话框（只看不填）/切线/开关设置/输入框输入逐项有反应，关窗再开状态还在，填自己的 autodl Token 与 DeepSeek Key 亲手跑一次真生成。",
+  },
+  {
     version: "v6.50",
     date: "2026-11-17",
-    current: true,
     text: "上一版把「生成视频」改成独立地址打开后，你那边刷新了还是加载不出来，而且连报错提示都没见着。这一版先不猜原因，给这个窗口装上了一双眼睛：打开平台的每一步——页面打开、平台脚本启动、界面挂载、真正显示出来——都摆在明面上，卡在哪一步直接写在窗口里，还把抓到的报错和安全拦截一并列出来，下面有「复制全部诊断」按钮，你点一下、把诊断粘到聊天里发我，就能对着它继续查到底卡在哪。另外窗口右上角和诊断面板里都加了「新窗口打开」：点它平台会在一个单独的浏览器窗口里打开，绕开嵌进工作台的这一层——要是新窗口里能打开、嵌着打不开，就说明问题出在嵌入这一层；诊断面板里的「重新挂载」就是原来的重试，点一下重新打开一次。这版交付的是「让问题看得见」的工具，还不能说已经修好：你点开「生成视频」，平台出来了就正常用；要是出来的是诊断面板，把诊断复制发我，再点「新窗口打开」看看能不能单独打开。",
     features: "「生成视频」加载诊断版（v6.50，用户主聊直派，无 flor 编号，用户已点头按其 ChatGPT 对话里 GPT 的办法修：加载过程可观测 + 独立新窗口备用入口；纯客户端 laoluo/diagnostics.js 新增 + laoluo/prepare.mjs 注入 + laoluo/platform.html 重新生成 + videogen.tsx wrapper 诊断面板与新窗口入口 + laoluo/README.md 同步 + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未调用 DeepSeek 真实改写、未用任何凭证提交真实生成任务；本版交付的是让问题看得见的诊断工具，不声称已修好真机加载失败）：【背景】v6.49 改独立文档地址后用户 2026-11-17 21:02 真机回报刷新后依旧加载不出来、且未见到 v6.49 的错误提示层；GPT 结论：换独立地址只解决 srcDoc 继承 CSP 一处，父页面 frame-src、子页面 frame-ancestors/X-Frame-Options、平台自身 CSP、sandbox、静态资源返回、JS 启动异常、存储分区都还可能拦，最优先把加载过程做成可观测（子页面分阶段上报 + 窗口内可见诊断面板 + securitypolicyviolation 捕获），另加独立新窗口备用入口绕开 iframe；响应头是 Muse 平台定的、工作台侧改不了，本版只做工作台代码内能做的三件事。【一、子页面诊断上报】新增 client/src/laoluo/diagnostics.js（工作台侧工具、非平台本体）：prepare.mjs 生成 platform.html 时把它以内联 <script> 注入 <head> 末尾、跑在平台主程序之前（注入后实测：去掉注入块，产物与 source.html 逐字节一致；DEFAULT_TOKEN 强制置空保险与找不到赋值报错停下不变）。脚本职责：捕获 window.onerror（带 message/文件名/行列）与 unhandledrejection；监听子页面 document 的 securitypolicyviolation（带指令与被拦地址）；localStorage 探查（只写自己的测试键 __laoluo_diag_probe__ 随即删除、不读任何业务数据）；上报 boot（存储探查结果/视口/UA/路径）；每 500ms 轮询观测平台根节点 #app（只看存在/子节点数/尺寸等通用结构，不依赖平台内部类名文案），确认渲染后上报 app-ready，20 秒未渲染上报 render-timeout 带最后观测状态。postMessage 固定 channel laoluo-diag + build v6.50，父页面校验 event.source（必须是本 iframe 的 contentWindow）与 event.origin（工作台自身来源或平台资源来源）后才采信。【注入方式与理由】选内联注入、不用外联 script src：platform.html 打包后是带内容哈希的 assets 资源（platform-<hash>.html），外联诊断文件同理会被打包器改成哈希名，而 prepare.mjs 在打包之前运行、算不出哈希，写进 platform.html 的相对地址必然对不上、迟早 404——内联是这条构建管线里唯一可重复的做法。若平台文档自身 CSP 连内联脚本都拦，诊断脚本同样跑不起来，但「iframe 已导航、boot 没到」本身就是 wrapper 能判读的明确信号（平台主程序同为内联脚本、同命），面板照实显示卡在该阶段。【二、wrapper 诊断面板】videogen.tsx：加载拆成四阶段显示（1 iframe 导航 load 事件 → 2 诊断脚本 boot → 3 挂载观测（wrapper 每 500ms 直读同源 #app 状态 + 子页面观测，两路并行）→ 4 app-ready 渲染确认）；未确认渲染时窗口内显示诊断面板：各阶段状态（已触发/进行中/未确认）、最后到达阶段、捕获到的报错与 CSP 违规（子页面上报 + 父页面 document 的 securitypolicyviolation 监听两路，frame-src 等父页面拦截也能记下）、环境信息（带 build 缓存戳的 iframe 地址、浏览器 UA、协议、诊断 build 号）。面板由 wrapper 自己的 setTimeout 硬截止驱动（挂载后 15 秒未确认渲染必转面板），不依赖 iframe 的任何事件——专堵 v6.49 错误层在真机没出现的缺口；iframe onError 不再作为失败判据（浏览器通常不派发）。面板三按钮：复制全部诊断（拼纯文本：阶段/最后阶段/报错/CSP/环境，navigator.clipboard 优先、失败退回临时文本框复制，再失败提示截图）、重新挂载（attempt 自增重挂 iframe、诊断状态清零）、新窗口打开。平台确认渲染后面板与加载层自动消失；原有加载提示、Esc、滚动锁、保活（首次打开后保持挂载只切可见性）全部保留；子页面 window.onerror 的 wrapper 直挂监听保留为并行兜底一路。【三、新窗口备用入口】覆盖窗头部（关闭按钮左侧）加「新窗口打开」按钮，诊断面板里同名按钮一个：在用户点击手势里 window.open(同一带缓存戳的平台地址, _blank, noopener)，绕开 iframe 嵌入限制，既是备用入口也是诊断手段；打开后不改变工作台状态。【保持不动】平台本体 source.html 一字未动；可替换结构不破坏（换 source.html → 跑 prepare.mjs → 重建验证 → 上线，prepare 现自动多做诊断注入一步、README 已同步）；Token 强制置空保险、密钥对话框与 llpub-* 存取逻辑、演示模式一字未动。【不动】五个现有工作台的页面/数据/模型调用逻辑一字未动；监控卡片数据、达人、分组、墓碑、清除下限 clearedAtMs、3 天清理判定、视图/排序/筛选、DISSECT_CHAT_RULES 与解剖指令模板、预设库、「复刻」、下载任务队列、封面/项目/分析记录一律未动；不恢复自动下载；封面记录 id 43 不动；不碰 flor / 选配页 / 新台「监控账号」/ GitHub / exe 移植层（资源仍全在 client/src 内）。基线升 v6.50（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：①点开「生成视频」：平台出来了就正常用；如出现诊断面板，把诊断信息复制发来或截图，再点「新窗口打开」看平台能不能单独打开；②诊断面板出现时点「重新挂载」看能否加载出来；③平台能打开后建卡绑图、填自己的 autodl Token 与 DeepSeek Key 亲手跑一次真生成。",
   },
@@ -16565,6 +16651,10 @@ heightAnchor: string;
 /** v5.49：确认时一并递交的待确认草稿全量快照（深存的页面权威
  * 副本），实现方随整份稿落盘并为被确认的人存 rollback 回退点。 */
 pendingSnapshot?: CharPendingMap,
+/** v6.61：人物表在别处增 / 删 / 改后、没有待确认修改时的
+ * 「重新匹配」确认：edits 传空数组 + rematchOnly，实现方不改
+ * 人物行、只落盘收敛并回重新匹配回执。 */
+opts?: { rematchOnly?: boolean },
 ) => Promise<{ ok: boolean; message: string }>;
 /** v4.93：项目级「全片风格」设置保存（改一处全片镜头一起变）。 */
 onUpdateFilmStyle?: (text: string) => void;
@@ -16987,6 +17077,130 @@ e.heightAnchor !== b.heightAnchor
 );
 };
 const charDirty = script.characterRows.some(charRowDirty);
+// v6.61 人物表变化印记（用户报障：去人物与大纲页删了人物卡、
+// 回分镜页点「确认并同步」却不亮——旧点亮条件只有 charDirty，
+// 只看本页面板里对现有人物行字段的待确认修改；删卡走的是
+// characters 表的 deleteCharacter、加行 / 删行走审查页与自动
+// 加入流程，都不经过 charEdits，按钮自然不亮）。改法：把所有
+// 会喂进提示词拼装的人物数据（人物行已存字段、音色覆盖、别名
+// 钉死、人物卡的备注 / 角色 / 有无图、以及分镜里出场却已无人
+// 物行也无人物卡的代号集合）拼成一份印记，与「上次点确认时
+// 的印记」比对：不一样 = 人物表变了，按钮同样亮起，点确认走
+// 既有同步通道（有待确认修改转正、没有就 rematchOnly 重新对
+// 一遍）。上次印记存本机 localStorage（按项目一份，与
+// charAnalysisJob 同制式）；本版第一次打开某项目时把当时印
+// 记记为基线、不亮（避免老项目一升级全亮），此后的增 / 删 /
+// 改才亮。任何自动路径都不写这个印记——只有用户亲手点确认
+// 同步成功后才更新（裁决：绝不擅自重拼 / 擅自确认）。
+const charTableStamp = useMemo(() => {
+  const parts: string[] = [];
+  for (const r of script.characterRows)
+    parts.push(
+      [
+        "R",
+        r.name,
+        r.identity,
+        r.look,
+        r.voice,
+        r.tone,
+        r.gender ?? "",
+        r.heightAnchor ?? "",
+      ].join("\u0001"),
+    );
+  const vm = script.voiceMap ?? {};
+  for (const k of Object.keys(vm).sort())
+    parts.push(["V", k, vm[k] ?? ""].join("\u0001"));
+  const ao = script.aliasOverrides ?? {};
+  for (const k of Object.keys(ao).sort())
+    parts.push(["A", k, ao[k] ?? ""].join("\u0001"));
+  for (const c of mappingCtx?.characters ?? charCards ?? [])
+    parts.push(
+      [
+        "C",
+        String(c.id),
+        c.name,
+        c.role ?? "",
+        c.note ?? "",
+        c.imageUrl ? "1" : "0",
+      ].join("\u0001"),
+    );
+  // 已存提示词残留：分镜里出场（说话人 / 画面提及，口径同
+  // lensCastEntries）的代号，既不在人物行、也不在人物卡里
+  // ——有人被删干净后这份集合会变，印记跟着变、按钮亮起。
+  if (script.stage === "storyboard") {
+    const rowNames = new Set(script.characterRows.map((r) => r.name.trim()));
+    const cardNames = new Set(
+      (mappingCtx?.characters ?? charCards ?? []).map((c) => c.name.trim()),
+    );
+    const orphan = new Set<string>();
+    for (const g of script.groups)
+      for (const e of lensCastEntries(script, g, mappingCtx)) {
+        const code = e.code.trim();
+        if (code && !rowNames.has(code) && !cardNames.has(code))
+          orphan.add(code);
+      }
+    for (const code of [...orphan].sort()) parts.push(["X", code].join("\u0001"));
+  }
+  const raw = parts.join("\u0002");
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 0x01000193);
+    h2 = Math.imul(h2 ^ (ch + i), 0x85ebca6b);
+  }
+  return `${raw.length}:${(h1 >>> 0).toString(36)}${(h2 >>> 0).toString(36)}`;
+}, [script, mappingCtx, charCards]);
+const charStampKey =
+  projectId != null && onSyncCharBasics
+    ? `scriptbench.charSyncStamp.${projectId}.v1`
+    : null;
+const [charStampRec, setCharStampRec] = useState<{
+  key: string;
+  value: string | null;
+}>({ key: "", value: null });
+const savedCharStamp =
+  charStampRec.key === charStampKey ? charStampRec.value : null;
+useEffect(() => {
+  if (!charStampKey) return;
+  let v: string | null = null;
+  try {
+    v = window.localStorage.getItem(charStampKey);
+  } catch {
+    v = null;
+  }
+  if (v == null) {
+    // 第一次打开（或本机存不下）：把当前印记记为基线，不亮。
+    try {
+      window.localStorage.setItem(charStampKey, charTableStamp);
+    } catch {
+      /* 存不下就只记内存态，刷新后重新记基线 */
+    }
+    v = charTableStamp;
+  }
+  setCharStampRec({ key: charStampKey, value: v });
+  // 只在切换项目时读一次；印记本身的变化不触发重读。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [charStampKey]);
+const charTableChanged = savedCharStamp != null && savedCharStamp !== charTableStamp;
+// 确认同步成功后由 doCharSync / runCharRematch / runCharRollback
+// 置位；下面的 effect 在父级存盘回渲染、印记落定后把基线更新
+// 为当前印记（按钮随之熄灭）。失败不置位、基线不动、灯保持。
+const restampAfterSyncRef = useRef(false);
+useEffect(() => {
+  if (!restampAfterSyncRef.current) return;
+  if (charSync?.busy || !charSync?.ok) return;
+  restampAfterSyncRef.current = false;
+  if (charStampKey) {
+    try {
+      window.localStorage.setItem(charStampKey, charTableStamp);
+    } catch {
+      /* 存不下只更新内存态 */
+    }
+    setCharStampRec({ key: charStampKey, value: charTableStamp });
+  }
+}, [charTableStamp, charSync, charStampKey]);
+const charSyncNeeded = charDirty || charTableChanged;
 const setCharField = (
 r: CharacterRow,
 field: "look" | "voice" | "gender" | "tone" | "heightAnchor",
@@ -17060,6 +17274,9 @@ setCharSync({ busy: true, ok: false, message: "" });
 try {
 const res = await onSyncCharBasics(edits, charPendingRef.current);
 if (res.ok) {
+// v6.61：确认成功后把人物表印记基线更新到当前数据（按钮
+// 熄灭）；实际写入在 restamp effect 里等父级回渲染后做。
+restampAfterSyncRef.current = true;
 const codes = new Set(edits.map((e) => e.name));
 updateCharEdits((prev) => {
 const next = { ...prev };
@@ -17116,6 +17333,35 @@ const runCharSync = async () => {
 if (!charDirty) return;
 await doCharSync(script.characterRows);
 };
+// v6.61：人物表在别处增 / 删 / 改（印记不一致）、但本页没有
+// 待确认修改时的「确认并同步」——走既有同步通道的
+// rematchOnly：不改人物行、不动待确认值，只落盘收敛一次并
+// 回「已重新匹配」回执；成功后更新印记基线、按钮熄灭。拼装
+// 本来就随当前数据现算，这一遍确认的是「以现在的人物表为准」。
+const runCharRematch = async () => {
+if (!onSyncCharBasics || charSync?.busy) return;
+setCharSync({ busy: true, ok: false, message: "" });
+try {
+const res = await onSyncCharBasics([], charPendingRef.current, {
+rematchOnly: true,
+});
+if (res.ok) restampAfterSyncRef.current = true;
+setCharSync({ busy: false, ok: res.ok, message: res.message });
+} catch (e) {
+const message = `重新匹配没做成：${describeThrownError(e)}。人物表没有被改动，再点一次「确认并同步到分镜提示词」即可。`;
+setCharSync({ busy: false, ok: false, message });
+}
+};
+// 同步按钮的统一入口：有待确认修改走原来的转正同步；只有
+// 人物表变化（删卡 / 加卡 / 改卡等）走重新匹配。
+const runCharSyncOrRematch = async () => {
+if (charSync?.busy) return;
+if (charDirty) {
+await runCharSync();
+return;
+}
+if (charTableChanged) await runCharRematch();
+};
 // 面板内「只确认此人」：只转正当前打开的这一个人，其余人的待确
 // 认值原样留着。
 const runCharSyncOne = async (r: CharacterRow) => {
@@ -17171,6 +17417,8 @@ const res = await onSyncCharBasics(
 snapshot,
 );
 if (res.ok) {
+// v6.61：恢复也是一次确认落盘，印记基线随之更新。
+restampAfterSyncRef.current = true;
 updateCharEdits((prev) => {
 const next = { ...prev };
 delete next[r.name];
@@ -18277,6 +18525,52 @@ window.setTimeout(() => setH3CopyFail((c) => (c === key ? null : c)), 3000);
 }
 });
 };
+// v6.58 分镜 H3 批量生成：只在「每镜 10–15 秒版」出现「发送到
+// 画布批量生成」。点按后用 scriptlib buildH3ShotBundles 现算整批
+// ShotBundle（prompt 与「复制本镜头 H3」同一拼装函数逐字一致；
+// bindings 带人物卡图片地址），交给画布批量面板接管（提交、轮
+// 询、下载都在画布侧，本页不提交任何生成）。整批 0 个可提交镜
+// 头时只在本页给一句说明，不打开空清单。
+const [h3BatchNote, setH3BatchNote] = useState<string | null>(null);
+const sendH3Batch = () => {
+const chars = mappingCtx?.characters ?? [];
+const urlOf = (b: H3ShotBinding): string | null => {
+const hit =
+(b.assetId != null
+? chars.find((c) => c.id === b.assetId)
+: undefined) ?? chars.find((c) => c.name === b.code);
+const u = (hit?.imageUrl ?? "").trim();
+return u === "" ? null : u;
+};
+const shots = buildH3ShotBundles(script, mappingCtx).map((s) => {
+const bindings = s.bindings.map((b) => ({ ...b, url: urlOf(b) }));
+const missingUrls = bindings
+.filter((b) => !b.url)
+.map((b) => b.roleName);
+return {
+...s,
+bindings,
+excludedReason:
+s.excludedReason ??
+(missingUrls.length > 0
+? `缺参考图：${missingUrls.join("、")}`
+: null),
+};
+});
+const readyCount = shots.filter((s) => !s.excludedReason).length;
+if (readyCount === 0) {
+setH3BatchNote(
+`这批 ${shots.length} 个镜头暂时都不能批量生成（缺参考图、超过 15 秒或编号核对没通过），先处理好再发送。`,
+);
+window.setTimeout(() => setH3BatchNote(null), 6000);
+return;
+}
+setH3BatchNote(null);
+openVideoGenPanelWithBatch({
+projectId: projectId ?? null,
+shots,
+});
+};
 // v5.38 Seedance 提示词（v5.90 起三版）：与 H3 区并排的汇总区
 // （v5.39 起左右并排：H3 左、Seedance 右，窄屏上下堆叠 H3 在
 // 上）。每镜头文本由 scriptlib buildSeedancePlotVersion /
@@ -18997,11 +19291,20 @@ Seedance、通用版与导出都跟着变；角色映射的造型句、每拍的
 type="button"
 className="btn btn-primary"
 aria-label="确认并同步到分镜提示词"
-disabled={!charDirty || charSync?.busy}
-onClick={() => void runCharSync()}
+disabled={!charSyncNeeded || charSync?.busy}
+onClick={() => void runCharSyncOrRematch()}
 >
 {charSync?.busy ? "正在同步…" : "确认并同步到分镜提示词"}
 </button>
+{!charDirty && charTableChanged && (
+<span
+className="text-sm font-medium"
+style={{ color: "var(--terra)" }}
+role="status"
+>
+人物表变了，点确认重新匹配角色映射
+</span>
+)}
 {projectId != null && (
 <button
 type="button"
@@ -19047,7 +19350,7 @@ onChange={(e) => setAutoAnalyzeAfterMatch(e.target.checked)}
 匹配后自动分析
 </label>
 )}
-{!charDirty && !charSync && (
+{!charSyncNeeded && !charSync && (
 <span className="text-xs text-[var(--dim)]">
 还没有改动，改了造型 / 性别 / 音色 / 语气基调后按钮才会亮。
 </span>
@@ -19181,9 +19484,9 @@ onClick={() => setH3Version("short")}
 <p className="mt-2 text-xs leading-5 text-[var(--dim)]">
 {h3Version === "plot"
 ? "按剧情版：镜头就是上面确认好的分镜镜头，一镜一段 H3，[Shot N] 是镜头里的节拍，一拍一镜、不删不并。"
-: "每镜 10–15 秒版：把全片节拍按剧情重新并成每镜 10–15 秒的组，一组一段 H3；换镜优先落在剧情转折点上——攒够 10 秒后，遇到场景转场、悬念/反转、人物出入场、情绪转折、说话人切换或换段处就切，新镜头从转折点开始；没攒够 10 秒不切，一直没等到转折点、满 15 秒才切。还有一条硬规矩：同一个动作没做完不切新镜头——切点正赶上一个动作做到一半时，等动作做完再切，所以个别组可能到 18 秒左右；动作本身比 18 秒还长时，才在节拍与节拍之间切开。每段提示词开头还写死了一句切镜规则给视频模型。只改这里的分组，不动上面已确认的分镜。节拍不能拆，最后一组可能不足 10 秒，每段标题上都标了实际秒数。"}
+: "每镜 10–15 秒版：把全片节拍按剧情重新并成每镜 10–15 秒的组，一组一段 H3；换镜优先落在剧情转折点上——攒够 10 秒后，遇到场景转场、悬念/反转、人物出入场、情绪转折、说话人切换或换段处就切，新镜头从转折点开始；没攒够 10 秒不切，一直没等到转折点、满 15 秒才切。还有一条硬规矩：同一个动作没做完不切新镜头——切点正赶上一个动作做到一半时，等动作做完再切。v6.58 起再加一条 15 秒硬顶：任何一组都不会超过 15 秒，再并一拍就会超 15 秒时先收组（动作太长装不下时在节拍与节拍之间切开），为的是批量生成时每镜都能直接提交。每段提示词开头还写死了一句切镜规则给视频模型。只改这里的分组，不动上面已确认的分镜。节拍不能拆，最后一组可能不足 10 秒，每段标题上都标了实际秒数。"}
 </p>
-<div className="mt-3">
+<div className="mt-3 flex flex-wrap items-center gap-2">
 <button
 type="button"
 className="btn btn-sm"
@@ -19196,7 +19499,22 @@ onClick={() => copyH3("all", buildH3FullText(h3Lenses, h3VersionLabel))}
 ? "✓ 已复制全部"
 : `复制全部（${h3VersionLabel}，共 ${h3Lenses.length} 段）`}
 </button>
+{h3Version === "short" && (
+<button
+type="button"
+className="btn btn-sm btn-primary"
+aria-label="把每镜 10–15 秒版的全部镜头发送到画布批量生成"
+onClick={sendH3Batch}
+>
+发送到画布批量生成
+</button>
+)}
 </div>
+{h3Version === "short" && h3BatchNote && (
+<p className="mt-2 text-xs leading-5" style={{ color: "var(--bad)" }}>
+{h3BatchNote}
+</p>
+)}
 <div className="mt-3 space-y-3">
 {h3Lenses.map((l) => {
 const key = `lens-${l.lensIndex}`;
