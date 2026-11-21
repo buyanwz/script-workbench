@@ -170,7 +170,7 @@ function emitCssRules(rules, insideKeyframes) {
       cssOutRules.push(prelude + " {\n" + innerText + "\n}");
       continue;
     }
-    if (/^@(media|supports)\b/i.test(prelude)) {
+    if (/^@(media|supports|container)\b/i.test(prelude)) {
       const before = cssOutRules.length;
       emitCssRules(parseCssRules(rule.block), insideKeyframes);
       const inner = cssOutRules.splice(before);
@@ -204,7 +204,7 @@ const generatedCss =
   const check = (rules, inKf) => {
     for (const rule of rules) {
       if (/^@keyframes\b/i.test(rule.prelude)) { check(parseCssRules(rule.block), true); continue; }
-      if (/^@(media|supports)\b/i.test(rule.prelude)) { check(parseCssRules(rule.block), inKf); continue; }
+      if (/^@(media|supports|container)\b/i.test(rule.prelude)) { check(parseCssRules(rule.block), inKf); continue; }
       if (inKf) continue;
       for (const sel of splitSelectors(rule.prelude)) {
         if (!sel.startsWith(HOST)) fail("generated.css 断言失败：选择器未加宿主前缀：" + sel);
@@ -465,6 +465,34 @@ for (const type of Object.keys(eventTypeCounts)) {
 }
 for (const name of handlerCallees) {
   if (!topFunctionSet.has(name)) fail("on* 模板引用的函数不在顶层函数字典里：" + name);
+}
+
+// ---------------------------------------------------------------- v6.63 委托完整性门禁（裁决7）
+// 静态门禁：全部 on* 模板引用的函数必须 1:1 落在 handlers 字典
+// （= 全部顶层函数）里——上面的循环已逐个验，这里再做一次汇总
+// 断言，缺任何一项构建失败（非零退出）；参数形式已由上面的
+// ARG_OK 白名单审计覆盖（不在白名单内的参数形式同样停下）。
+// 另验 v6.63 自测基建齐备：5 个 data-fid 控件（batch-open-
+// picker / batch-picker-row-N / batch-picker-confirm / batch-
+// start-all / batch-proj-switch-btn）、自测钩子
+// __flor911TestBatchClicks、且选择器确认按钮必须是零参模板
+// onclick="batchConfirmShotPick()"（确认类按钮不许带动态参数，
+// 读 JS 内部 state）。本门禁只做静态检查，不改抽取逻辑。
+{
+  const missing = [...handlerCallees].filter((n) => !topFunctionSet.has(n));
+  if (missing.length) fail("委托完整性门禁失败：模板引用函数缺字典项：" + missing.join(", "));
+  for (const fid of ["batch-open-picker", "batch-picker-row-", "batch-picker-confirm", "batch-start-all", "batch-proj-switch-btn"]) {
+    if (!rawJs.includes('data-fid="' + fid)) {
+      fail("委托完整性门禁失败：缺少自测控件 data-fid=\"" + fid + "\"，已停下。");
+    }
+  }
+  if (!rawJs.includes('data-fid="batch-picker-confirm" onclick="batchConfirmShotPick()"')) {
+    fail("委托完整性门禁失败：选择器确认按钮不是零参模板 onclick=\"batchConfirmShotPick()\"，已停下。");
+  }
+  if (!rawJs.includes("__flor911TestBatchClicks")) {
+    fail("委托完整性门禁失败：缺少自测钩子 __flor911TestBatchClicks，已停下。");
+  }
+  console.log("  委托完整性门禁: " + handlerCallees.size + " 个模板引用函数全部在 handlers 字典内（1:1）；5 个 data-fid 自测控件、零参确认模板与自测钩子齐备");
 }
 
 // ---------------------------------------------------------------- 组装 generated.js

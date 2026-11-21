@@ -39,17 +39,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  bootLaoluo,
-  LAOLUO_SOURCE_HASH,
-  type LaoluoBootHandle,
+bootLaoluo,
+LAOLUO_SOURCE_HASH,
+type LaoluoBootHandle,
 } from "./laoluo/generated.js";
 import "./laoluo/generated.css";
 import {
-  attachDelegation,
-  probeNativeInline,
-  probeStyleAttr,
-  startStyleHydration,
-  type HandlerError,
+attachDelegation,
+probeNativeInline,
+probeStyleAttr,
+startStyleHydration,
+type HandlerError,
 } from "./laoluo/delegate";
 
 let openListener: (() => void) | null = null;
@@ -73,6 +73,23 @@ let pendingBatch: ShotBundlePayload | null = null;
 export function openVideoGenPanelWithBatch(payload: ShotBundlePayload) {
   pendingBatch = payload;
   openListener?.();
+}
+
+// v6.63 批量窗项目快速切换：宿主 App 把与分镜页同一份未归档项
+// 目列表（id + name）推过来，面板启动完成且打开时经 handlers
+// 交给平台的 receiveStoryboardProjects（平台侧先归一化再用）。
+// 列表变化时若面板正开着就再推一次，切换下拉里永远是最新名单。
+export interface StoryboardProjectInfo {
+  id: number | string;
+  name: string;
+}
+
+let sbProjectsLatest: StoryboardProjectInfo[] = [];
+let sbProjectsListener: (() => void) | null = null;
+
+export function setStoryboardProjects(list: StoryboardProjectInfo[]) {
+  sbProjectsLatest = list;
+  sbProjectsListener?.();
 }
 
 type BootPhase = "idle" | "booting" | "ready" | "error";
@@ -111,6 +128,7 @@ export function VideoGenPanelHost() {
   const [styleOk, setStyleOk] = useState<boolean | null>(null);
   const [handlerErrors, setHandlerErrors] = useState<HandlerError[]>([]);
   const [copyNote, setCopyNote] = useState("");
+  const [batchTestLines, setBatchTestLines] = useState<string[]>([]);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const mountRef = useRef<HTMLDivElement | null>(null);
   const handleRef = useRef<LaoluoBootHandle | null>(null);
@@ -233,6 +251,24 @@ export function VideoGenPanelHost() {
     fn(payload);
   }, [open, phase ]);
 
+  // v6.63：把宿主的未归档项目列表推给平台（批量窗项目切换下
+  // 拉用）。打开/启动完成时推一次；列表变化且面板开着时再推。
+  useEffect(() => {
+    const pushSbProjects = () => {
+      if (!openRef.current) return;
+      const handle = handleRef.current;
+      if (!handle) return;
+      const fn = handle.handlers["receiveStoryboardProjects"];
+      if (typeof fn !== "function") return;
+      fn(sbProjectsLatest);
+    };
+    sbProjectsListener = pushSbProjects;
+    if (open && phase === "ready") pushSbProjects();
+    return () => {
+      if (sbProjectsListener === pushSbProjects) sbProjectsListener = null;
+    };
+  }, [open, phase ]);
+
   // 整页卸载时才 dispose（正常开关窗不调）。
   useEffect(() => {
     return () => {
@@ -258,7 +294,7 @@ export function VideoGenPanelHost() {
     lines.push("生成视频 · 直接挂载诊断（v6.51 挂载架构 / v6.54 画布布局）");
     lines.push("时间：" + new Date().toISOString());
     lines.push("启动状态：" + phase + (bootError ? "（" + bootError + "）" : ""));
-    lines.push("画布布局版本：v6.60（批量面板改居中悬浮窗＋面板内可选工作流与暂停后续排队＋按项目存档记录；BatchScheduler 与 v6.57 雷达/菜单保留）");
+    lines.push("画布布局版本：v6.65（批量窗滚动保位＋镜头选择器多选批量生成＋密钥存储域豁免与失败原因明示；v6.63 四区布局与 v6.64 分域/权限矩阵保留）");
     lines.push("平台产物指纹 LAOLUO_SOURCE_HASH：" + LAOLUO_SOURCE_HASH);
     lines.push(
       "探针 · 原生内联处理器：" +
@@ -276,6 +312,18 @@ export function VideoGenPanelHost() {
     for (const e of errorsRef.current) {
       lines.push("  - [" + e.eventType + "] " + e.element + " :: " + e.expr + " :: " + e.reason);
     }
+    // v6.65（Task D）：平台侧密钥存储诊断（只报映射/有无/锁状态，
+    // 绝不含密钥内容）——钩子未就绪时跳过，不影响其余诊断。
+    const keyDiag = (window as unknown as Record<string, unknown>)[
+      "__flor911KeyDiag"
+    ];
+    if (typeof keyDiag === "function") {
+      try {
+        lines.push((keyDiag as () => string)());
+      } catch {
+        lines.push("密钥存储诊断：读取失败（平台钩子异常）");
+      }
+    }
     lines.push("浏览器：" + (window.navigator.userAgent || "未知"));
     return lines.join("\n");
   };
@@ -283,6 +331,59 @@ export function VideoGenPanelHost() {
   const copyDiag = async () => {
     const ok = await copyText(buildDiagText());
     setCopyNote(ok ? "诊断信息已复制，去聊天里粘贴发出来就行。" : "复制没成功，请把诊断区截图发出来也行。");
+  };
+
+  // v6.63：批量按钮自测——调平台挂在 window 上的自测钩子（用
+  // dispatchEvent 沿真实委托路径逐个点批量窗的 5 个关键控件并
+  // 断言状态流转），结果逐行显示在诊断区。演示模式下会真走一
+  // 遍单镜提交流程（不出真视频、不花钱）。
+  // v6.68（危-03）订正：旧注释称「填了密钥时钩子只测打开/选
+  // 择/关闭，不会替用户提交」对钩子第 5 步不成立（曾真点「全
+  // 部开始」真扣费）。现口径：填了密钥时钩子只做只读验证，第
+  // 5 步不点「全部开始」，零提交、零扣费。宿主侧先探
+  // __flor911HasToken（只回布尔值）：探不到按「有密钥」处理、
+  // 强制只读（fail-closed），并把 dryRunOnly 传给钩子作第二道
+  // 防线（真正的保护在钩子内部，它自己读 token）。
+  const runBatchTest = () => {
+    const w = window as unknown as Record<string, unknown>;
+    const hook = w["__flor911TestBatchClicks"];
+    if (typeof hook !== "function") {
+      setBatchTestLines([
+        "自测钩子还没就绪：平台未启动完成，或批量窗还没打开过。先打开批量窗再点一次。",
+      ]);
+      return;
+    }
+    const hasTokenFn = w["__flor911HasToken"];
+    const hasToken =
+      typeof hasTokenFn === "function"
+        ? !!(hasTokenFn as () => boolean)()
+        : true; // 探测钩子不存在：按有密钥处理，强制只读
+    try {
+      const res = (hook as (opts: { dryRunOnly: boolean }) => {
+        ok: boolean;
+        demo: boolean;
+        skippedRealSubmit?: boolean;
+        results: { step: string; ok: boolean; detail: string }[];
+      })({ dryRunOnly: hasToken });
+      const lines = res.results.map(
+        (r) => (r.ok ? "✓ " : "✗ ") + r.step + (r.detail ? "——" + r.detail : ""),
+      );
+      lines.push(
+        hasToken
+          ? "自测模式：已填密钥，只读保护（第 5 步不点「全部开始」，零提交、零扣费）"
+          : "自测模式：无密钥演示态",
+      );
+      lines.push(
+        res.ok
+          ? "自测结论：全部通过" + (res.demo ? "（演示模式）" : "") + (res.skippedRealSubmit ? "（已跳过真实点击）" : "")
+          : "自测结论：有未通过项，看上面 ✗ 的行",
+      );
+      setBatchTestLines(lines);
+    } catch (e) {
+      setBatchTestLines([
+        "自测执行出错：" + (e instanceof Error ? e.message : String(e)),
+      ]);
+    }
   };
 
   const copyErrors = async () => {
@@ -424,7 +525,7 @@ export function VideoGenPanelHost() {
             </summary>
             <div className="px-2 pb-2">
               <p>启动状态：{phase === "ready" ? "已启动" : phase === "error" ? "启动失败" : "启动中"}</p>
-              <p>画布布局版本：v6.60</p>
+              <p>画布布局版本：v6.63</p>
               <p className="break-all">产物指纹：{LAOLUO_SOURCE_HASH}</p>
               <p>
                 按钮处理：
@@ -445,6 +546,21 @@ export function VideoGenPanelHost() {
               >
                 复制诊断信息
               </button>
+              <button
+                type="button"
+                className="btn btn-sm mt-1 ml-1"
+                aria-label="运行批量生成按钮自测"
+                onClick={runBatchTest}
+              >
+                批量按钮自测
+              </button>
+              {batchTestLines.length > 0 && (
+                <div className="mt-1" role="status" aria-label="批量按钮自测结果">
+                  {batchTestLines.map((line, i) => (
+                    <p key={i}>{line}</p>
+                  ))}
+                </div>
+              )}
               {copyNote && (
                 <p className="mt-1" role="status">
                   {copyNote}

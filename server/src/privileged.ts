@@ -380,8 +380,14 @@ export const privileged = definePrivilegedContracts({
     request: z.object({
       videoIds: z.array(z.string().min(1).max(120)).max(500),
     }),
+    // v6.68（危-07）：删除结果如实回——deleted 是真删掉（含文件本
+    // 就不存在的孤儿条目清理），failed 是没删成且账本条目已保留
+    // 的，warnings 是附带清理失败；绝不再无条件 ok:true。
     response: z.object({
       ok: z.boolean(),
+      deleted: z.array(z.string()),
+      failed: z.array(z.object({ id: z.string(), error: z.string() })),
+      warnings: z.array(z.object({ id: z.string(), warning: z.string() })),
       deletedCount: z.number(),
       error: z.string().nullable(),
     }),
@@ -2542,49 +2548,82 @@ export const privilegedHandlers = definePrivilegedHandlers(privileged, {
     const ids = [
       ...new Set(args.videoIds.filter((id) => CLOUD_VIDEO_ID_RE.test(id))),
     ];
-    let deletedCount = 0;
-    for (const id of ids) {
-      try {
-        await fs.unlink(cloudVideoFilePath(id));
-        deletedCount += 1;
-      } catch {
-        // 文件不存在不报错（删除同步的既定口径）。
-      }
+    if (ids.length === 0) {
+      return { ok: true, deleted: [], failed: [], warnings: [], deletedCount: 0, error: null };
     }
-    // state.json 同步移除条目：文件缺失 / 损坏时容错跳过（视频文件
-    // 已经删掉，清单下次由下载任务重写时也不会再算这条）。
-    try {
+    // v6.68（危-07）：删除全程走 withCloudStateLock（与写路径同一
+    // 把锁）——旧版无锁 plain 读改写 + 固定名 .tmp，并发删除/下
+    // 载会互相覆盖账本条目；且 unlink 失败被吞、账本照删、永远
+    // 回 ok:true。现口径：锁内重读最新账本；逐条先删文件，非
+    // ENOENT 错误保留账本条目并记入 failed；仅账本变更时才用进
+    // 程唯一 tmp 名写回，写失败清理 tmp 并抛错（调用方看得到）。
+    return await withCloudStateLock(async () => {
       const statePath = cloudStatePath();
-      const raw = await fs.readFile(statePath, "utf8");
-      const parsed: unknown = JSON.parse(raw);
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        "downloaded" in parsed &&
-        (parsed as { downloaded?: unknown }).downloaded &&
-        typeof (parsed as { downloaded?: unknown }).downloaded === "object"
-      ) {
-        const state = parsed as {
-          downloaded: Record<string, unknown>;
-          [k: string]: unknown;
-        };
-        let changed = false;
-        for (const id of ids) {
-          if (id in state.downloaded) {
-            delete state.downloaded[id];
-            changed = true;
-          }
+      let state: { downloaded?: Record<string, unknown>; [k: string]: unknown } = {};
+      try {
+        const raw = await fs.readFile(statePath, "utf8");
+        const parsed: unknown = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+          state = parsed as typeof state;
         }
-        if (changed) {
-          const tmp = statePath + ".tmp";
+      } catch {
+        // state.json 不存在或损坏：按空账本处理，只删文件。
+      }
+      const downloaded =
+        state.downloaded && typeof state.downloaded === "object"
+          ? (state.downloaded as Record<string, unknown>)
+          : {};
+      const deleted: string[] = [];
+      const failed: Array<{ id: string; error: string }> = [];
+      const warnings: Array<{ id: string; warning: string }> = [];
+      let mutated = false;
+      for (const id of ids) {
+        try {
+          await fs.unlink(cloudVideoFilePath(id));
+        } catch (err: unknown) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code !== "ENOENT") {
+            failed.push({
+              id,
+              error: `删除物理文件失败(${code || "ERR"}): ${err instanceof Error ? err.message : String(err)}`,
+            });
+            continue; // 非 ENOENT 错误：账本条目保留，绝不删
+          }
+          // 文件不存在不报错（删除同步的既定口径）：孤儿条目照常清理。
+        }
+        if (id in downloaded) {
+          delete downloaded[id];
+          mutated = true;
+        }
+        deleted.push(id);
+      }
+      if (mutated) {
+        state.downloaded = downloaded;
+        const tmp =
+          statePath + `.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+        try {
           await fs.writeFile(tmp, JSON.stringify(state, null, 2), "utf8");
           await fs.rename(tmp, statePath);
+        } catch (writeErr: unknown) {
+          try {
+            await fs.unlink(tmp);
+          } catch {
+            // 清理 tmp 失败只记日志口径：此处抛错会带上原始写错误。
+          }
+          throw writeErr; // 写不回必须抛错，调用方看得到
         }
       }
-    } catch {
-      // state.json 读不到 / 写不回都不拦删除本身。
-    }
-    return { ok: true, deletedCount, error: null };
+      return {
+        ok: failed.length === 0,
+        deleted,
+        failed,
+        warnings,
+        deletedCount: deleted.length,
+        error: failed.length
+          ? `云端删除未完全成功：${failed.map((f) => `${f.id}: ${f.error}`).join("; ")}`
+          : null,
+      };
+    });
   },
   async cloudVideoDownload(args) {
     const fail = (error: string) => ({
@@ -3878,10 +3917,12 @@ async function readCloudDownloaded(): Promise<{
 // ② 拿到锁后重读 state.json 最新全文（顶层其它键原样保留），
 // 只改 downloaded[videoId] 一条；
 // ③ tmp + rename 原子写回，读到一半的进程永远看不到半截 JSON。
-async function upsertCloudDownloaded(
-  videoId: string,
-  entry: { file: string; size: number; at: string },
-): Promise<void> {
+// v6.68（危-07）：state.json 文件锁共用 helper——口径与
+// upsertCloudDownloaded 原内联锁一字相同：wx 独占创建，抢不到
+// 每 100ms 重试、最多约 10 秒；锁文件超 60 秒视为残留死锁、强
+// 行接管；finally 关句柄并删锁文件。写路径与删除路径共用同一
+// 把锁，并发读写删严格串行化、互不丢条目。
+async function withCloudStateLock<T>(fn: () => Promise<T>): Promise<T> {
   const statePath = cloudStatePath();
   const lockPath = statePath + ".lock";
   let lockFh: Awaited<ReturnType<typeof fs.open>> | null = null;
@@ -3906,6 +3947,29 @@ async function upsertCloudDownloaded(
     throw new Error("云端清单正忙（文件锁等不到），请稍后再试");
   }
   try {
+    return await fn();
+  } finally {
+    try {
+      await lockFh.close();
+    } catch {
+      // 关不上不影响释放。
+    }
+    try {
+      await fs.unlink(lockPath);
+    } catch {
+      // 锁文件不在不报错。
+    }
+  }
+}
+
+async function upsertCloudDownloaded(
+  videoId: string,
+  entry: { file: string; size: number; at: string },
+): Promise<void> {
+  // v6.68（危-07）：改为经 withCloudStateLock 执行锁内部分，锁内
+  // 行为（重读最新全文、只改一条、唯一 tmp 名、rename）一字不变。
+  await withCloudStateLock(async () => {
+    const statePath = cloudStatePath();
     let state: Record<string, unknown> = {};
     try {
       const raw = await fs.readFile(statePath, "utf8");
@@ -3927,18 +3991,7 @@ async function upsertCloudDownloaded(
       `.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     await fs.writeFile(tmp, JSON.stringify(state, null, 2), "utf8");
     await fs.rename(tmp, statePath);
-  } finally {
-    try {
-      await lockFh.close();
-    } catch {
-      // 关不上不影响释放。
-    }
-    try {
-      await fs.unlink(lockPath);
-    } catch {
-      // 锁文件不在不报错。
-    }
-  }
+  });
 }
 
 // ---------------------------------------------------------------------------

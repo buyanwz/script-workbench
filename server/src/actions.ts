@@ -462,6 +462,9 @@ type MonitorCleanupRunResult = MonitorCleanupEvaluation & {
   deletedCount: number;
   ranAtMs: number;
   trigger: "manual" | "auto";
+  // v6.68（危-07）：本轮云端文件没删成的清单（卡片已删、账本条
+  // 目保留），写进清理报告供状态接口透出告警。
+  cloudFailed: Array<{ videoId: string; error: string }>;
 };
 
 // 真删一轮：按当前库重判 → 逐卡留墓碑 + 删行 + 写删除日志 → 云端
@@ -475,6 +478,8 @@ async function executeMonitorCleanup(
   const nowMs = Date.now();
   const evaluation = await evaluateMonitorCleanup(ctx, nowMs);
   const runId = `cleanup-${nowMs}`;
+  let cloudFailed: Array<{ videoId: string; error: string }> = [];
+  let cloudWarnings: Array<{ videoId: string; warning: string }> = [];
   if (evaluation.candidates.length > 0) {
     const accounts = await db.select().from(schema.monitorAccounts);
     const urlById = new Map(accounts.map((a) => [a.id, a.url]));
@@ -505,10 +510,20 @@ async function executeMonitorCleanup(
         deletedAt: new Date(nowMs),
       });
     }
-    await syncDeleteCloudVideos(
+    // v6.68（危-07）：云端删除结果不再丢弃——失败与警告写进本轮
+    // 清理报告（cloudFailed / cloudWarnings），卡片删除流程本身
+    // 不变（云端失败绝不拦卡片删除，既定口径）。
+    const cloudRes = await syncDeleteCloudVideos(
       ctx,
       evaluation.candidates.map((c) => c.videoId),
     );
+    cloudFailed = cloudRes.failed.map((f) => ({ videoId: f.id, error: f.error }));
+    cloudWarnings = cloudRes.warnings.map((w) => ({ videoId: w.id, warning: w.warning }));
+    if (!cloudRes.ok) {
+      console.error(
+        `[monitor-cleanup] 本轮 ${cloudFailed.length} 条云端文件没删成（卡片已删、账本条目保留）：${cloudFailed.map((f) => f.videoId).join(", ")}`,
+      );
+    }
   }
   await writeMonitorMetaValue(
     ctx,
@@ -523,6 +538,8 @@ async function executeMonitorCleanup(
       trigger,
       deletedCount: evaluation.candidates.length,
       unjudged: evaluation.unjudged,
+      cloudFailed,
+      cloudWarnings,
     }),
   );
   ctx.invalidateQueries();
@@ -531,6 +548,7 @@ async function executeMonitorCleanup(
     deletedCount: evaluation.candidates.length,
     ranAtMs: nowMs,
     trigger,
+    cloudFailed,
   };
 }
 
@@ -752,28 +770,63 @@ function cloudVideoBlobKey(videoId: string): string {
   return `cloud-videos/${videoId}.mp4`;
 }
 
+// v6.68（危-07）：返回结构化结果（删了哪些 / 没删成哪些 / 附带
+// 警告），调用方据此记录与告警；「云端侧失败只打日志，绝不拦卡
+// 片删除」的口径保留——本函数永不抛错。
+type SyncDeleteCloudResult = {
+  ok: boolean;
+  deleted: string[];
+  failed: Array<{ id: string; error: string }>;
+  warnings: Array<{ id: string; warning: string }>;
+};
+
 async function syncDeleteCloudVideos(
   ctx: Ctx,
   videoIds: string[],
-): Promise<void> {
+): Promise<SyncDeleteCloudResult> {
   const ids = [...new Set(videoIds.filter((id) => CLOUD_VIDEO_ID_RE.test(id)))];
-  if (ids.length === 0) return;
+  if (ids.length === 0) return { ok: true, deleted: [], failed: [], warnings: [] };
+  const warnings: Array<{ id: string; warning: string }> = [];
   for (const id of ids) {
     const key = cloudVideoBlobKey(id);
     try {
       if (await ctx.blobs.head(key)) await ctx.blobs.delete(key);
-    } catch {
-      // 缓存清理失败不拦删除。
+    } catch (e) {
+      // 缓存清理失败不拦删除，但不再静默吞掉：记进 warnings。
+      warnings.push({
+        id,
+        warning: `本站缓存清理失败：${e instanceof Error ? e.message : String(e)}`,
+      });
     }
   }
   try {
-    await ctx.executePrivileged(privileged.cloudVideoDelete, {
+    const res = await ctx.executePrivileged(privileged.cloudVideoDelete, {
       videoIds: ids,
     });
+    if (!res.ok) {
+      console.error(
+        `[cloud-video] 云端删除未完全成功（卡片已删，云端文件未删）：${res.error ?? ""}`,
+      );
+    }
+    return {
+      ok: res.ok,
+      deleted: res.deleted ?? [],
+      failed: res.failed ?? [],
+      warnings: [...warnings, ...(res.warnings ?? [])],
+    };
   } catch (e) {
-    console.log(
+    console.error(
       `[cloud-video] 删除同步失败（卡片已删，云端文件未删）：${e instanceof Error ? e.message : String(e)}`,
     );
+    return {
+      ok: false,
+      deleted: [],
+      failed: ids.map((id) => ({
+        id,
+        error: e instanceof Error ? e.message : String(e),
+      })),
+      warnings,
+    };
   }
 }
 
@@ -1623,6 +1676,17 @@ const charPendingRecordIn = z.object({
     .nullable(),
 });
 
+// v6.70 审片台审查标记记录（scriptJson 顶层 reviewMarks 的值，按拍
+// 键「组-拍」记）：打勾（pass）／有问题（issue）＋一句话备注＋被忽略
+// 的检查项。只写标记、不动剧本正文；存储口径宽松（只卡形状与防爆
+// 上限），拼装永不读它。只标了忽略、还没给结论时 state 可缺省。
+const reviewMarkIn = z.object({
+  state: z.enum(["pass", "issue"]).optional(),
+  note: z.string().max(500).optional(),
+  ignoredChecks: z.array(z.string().max(60)).max(20).optional(),
+  updatedAt: z.string().max(60),
+});
+
 const storedScript = genScript.extend({
 groups: z.array(storedGroup).min(1).max(500),
 storyboardGroups: z.array(storedGroup).optional(),
@@ -1771,6 +1835,9 @@ filmStyle: z.string().max(2000).optional(),
 // 上方注释。旧稿没有这个键照样解析；saveScript 存原文 JSON、键能
 // 落库，本声明保证将来「解析后重拼再存」的路径不会把它静默剥掉。
 charPending: z.record(z.string(), charPendingRecordIn).optional(),
+// v6.70 审查标记（顶层键，按拍键「组-拍」记）：见 reviewMarkIn 上方
+// 注释。旧稿没有这个键照样解析；口径同 charPending。
+reviewMarks: z.record(z.string(), reviewMarkIn).optional(),
 });
 
 /**
@@ -1823,6 +1890,29 @@ function stripCharPending(scriptJson: string): string {
     const obj = parsed as Record<string, unknown>;
     if ("charPending" in obj) {
       delete obj.charPending;
+      return JSON.stringify(obj);
+    }
+  }
+  return scriptJson;
+}
+
+/**
+ * v6.70：导入口径——与 stripCharPending 同理，导入项目 / 备份导入
+ * 新建项目时，源文件 scriptJson 里带的 reviewMarks（审查标记）一律
+ * 清掉：标记是按拍位置键记的，导入别人的稿子不应带上别人的审查
+ * 结论。只用于导入路径；正常保存（saveScript）绝不调用本函数。
+ */
+function stripReviewMarks(scriptJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(scriptJson);
+  } catch {
+    return scriptJson;
+  }
+  if (parsed != null && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    if ("reviewMarks" in obj) {
+      delete obj.reviewMarks;
       return JSON.stringify(obj);
     }
   }
@@ -3010,14 +3100,165 @@ const rows = await db
 return rows.length > 0;
 }
 
+// v6.68（危-08）：第四道引用检查——删除快照里是否还引用着这个
+// blob。解析每行 payloadJson 后按字段比对（blobKeys 数组、各表
+// 行的 imageBlobKey、imageGenRecords 的 stagedKey），禁用子串
+// 匹配；快照还在，图就绝不删（恢复后图要能打开）。
+async function blobUsedByDeleteSnapshot(ctx: Ctx, key: string): Promise<boolean> {
+const db = ctx.db<typeof schema>();
+const rows = await db
+.select({ payloadJson: schema.projectDeleteSnapshots.payloadJson })
+.from(schema.projectDeleteSnapshots);
+for (const r of rows) {
+try {
+const payload = JSON.parse(r.payloadJson) as Record<string, unknown>;
+const bundles =
+payload.version === 2 && Array.isArray(payload.bundles)
+? (payload.bundles as Record<string, unknown>[])
+: [payload];
+for (const b of bundles) {
+if (!b || typeof b !== "object") continue;
+if (Array.isArray(b.blobKeys) && b.blobKeys.includes(key)) return true;
+for (const field of ["characters", "sceneAssetCards", "sceneImages"]) {
+const list = b[field];
+if (Array.isArray(list)) {
+for (const row of list) {
+if (row && typeof row === "object" && (row as { imageBlobKey?: unknown }).imageBlobKey === key) return true;
+}
+}
+}
+const recs = b.imageGenRecords;
+if (Array.isArray(recs)) {
+for (const row of recs) {
+if (row && typeof row === "object" && (row as { stagedKey?: unknown }).stagedKey === key) return true;
+}
+}
+}
+} catch {
+/* 损坏的快照跳过，不拦 GC */
+}
+}
+return false;
+}
+
 async function deleteBlobIfUnreferenced(ctx: Ctx, key: string) {
 if (await blobUsedByCharacter(ctx, key)) return;
 if (await blobUsedByLibrary(ctx, key)) return;
 if (await blobUsedBySceneAsset(ctx, key)) return;
+if (await blobUsedByDeleteSnapshot(ctx, key)) return;
 await ctx.blobs.delete(key);
 // v3.64：原图删掉时，它的预览图一并删，不留孤儿预览。
 const tk = thumbKeyFor(key);
 if (await ctx.blobs.head(tk)) await ctx.blobs.delete(tk);
+}
+
+// v6.68（危-08）：单删与批量删共用——先写 v2 完整快照（8 张关
+// 联表 + blobKeys，projectDeleteSnapshots 表结构不动、版本信息
+// 放 payloadJson），再按固定顺序删 8 张关联表 + 项目行，最后对
+// 收集到的 blob 逐个走 deleteBlobIfUnreferenced（含快照引用检
+// 查：快照还引用着的绝不删，恢复后图能打开）。本仓库服务端没
+// 有事务 API（ctx.db.transaction 全仓库零命中），用「快照先行」
+// 保证删失败也能从快照找回，不谎报 ok。
+type DeleteProjectsResult = {
+snapshotIds: number[];
+names: string[];
+skipped: number[];
+deleted: number;
+};
+
+async function deleteProjectsWithFullSnapshot(
+ctx: Ctx,
+rawIds: number[],
+kind: "single_project" | "batch_projects",
+): Promise<DeleteProjectsResult> {
+const db = ctx.db<typeof schema>();
+const projectIds = Array.from(
+new Set(rawIds.filter((n) => Number.isInteger(n) && n > 0)),
+);
+if (projectIds.length === 0) throw new Error("未指定有效的项目 ID");
+const projRows: (typeof schema.projects.$inferSelect)[] = [];
+for (const id of projectIds) {
+const rows = await db
+.select()
+.from(schema.projects)
+.where(eq(schema.projects.id, id))
+.limit(1);
+if (rows[0]) projRows.push(rows[0]);
+}
+const foundIds = new Set(projRows.map((p) => p.id));
+const skipped = projectIds.filter((id) => !foundIds.has(id));
+if (kind === "single_project" && projRows.length === 0) {
+throw new Error(`项目 #${projectIds[0]} 不存在，可能已经被删除`);
+}
+const snapshotIds: number[] = [];
+const names: string[] = [];
+const blobKeysAll: string[] = [];
+for (const p of projRows) {
+const id = p.id;
+const [chars, sceneCards, sceneImgs, versions, covers, coverJobs, coverDrafts, imageRecs] =
+await Promise.all([
+db.select().from(schema.characters).where(eq(schema.characters.projectId, id)),
+db.select().from(schema.sceneAssetCards).where(eq(schema.sceneAssetCards.projectId, id)),
+db.select().from(schema.sceneImages).where(eq(schema.sceneImages.projectId, id)),
+db.select().from(schema.projectVersions).where(eq(schema.projectVersions.projectId, id)),
+db.select().from(schema.coverGenerations).where(eq(schema.coverGenerations.projectId, id)),
+db.select().from(schema.coverAnalysisJobs).where(eq(schema.coverAnalysisJobs.projectId, id)),
+db.select().from(schema.coverPromptDrafts).where(eq(schema.coverPromptDrafts.projectId, id)),
+db.select().from(schema.imageGenRecords).where(eq(schema.imageGenRecords.projectId, id)),
+]);
+const blobKeys: string[] = [];
+for (const c of chars) if (c.imageBlobKey) blobKeys.push(c.imageBlobKey);
+for (const s of sceneCards) if (s.imageBlobKey) blobKeys.push(s.imageBlobKey);
+for (const s of sceneImgs) if (s.imageBlobKey) blobKeys.push(s.imageBlobKey);
+for (const r of imageRecs) if (r.stagedKey) blobKeys.push(r.stagedKey);
+// 1) 快照先行：一项目一行快照（保持现行形状），删动作之前落盘。
+const payload = {
+version: 2,
+kind,
+bundles: [
+{
+project: p,
+characters: chars,
+sceneAssetCards: sceneCards,
+sceneImages: sceneImgs,
+coverGenerations: covers,
+coverAnalysisJobs: coverJobs,
+coverPromptDrafts: coverDrafts,
+imageGenRecords: imageRecs,
+versions,
+blobKeys,
+},
+],
+};
+const snapIns = await db
+.insert(schema.projectDeleteSnapshots)
+.values({ projectName: p.name, payloadJson: JSON.stringify(payload) })
+.returning({ id: schema.projectDeleteSnapshots.id });
+const snapId = snapIns[0]?.id ?? null;
+if (snapId) snapshotIds.push(snapId);
+// 删除审计日志（服务端日志）：删了什么、快照在哪、各表多少行。
+console.log(
+`[project-delete] ${kind} 项目 #${id}「${p.name}」快照 #${snapId}（v2：人物 ${chars.length}、场景资产卡 ${sceneCards.length}、场景图 ${sceneImgs.length}、封面 ${covers.length}、封面任务 ${coverJobs.length}、封面草稿 ${coverDrafts.length}、生图 ${imageRecs.length}、版本 ${versions.length}）`,
+);
+// 2) 按固定顺序删 8 张关联表 + 项目行（顺序与旧 deleteProject 一致并补齐封面/生图两表）。
+await db.delete(schema.projectVersions).where(eq(schema.projectVersions.projectId, id));
+await db.delete(schema.characters).where(eq(schema.characters.projectId, id));
+await db.delete(schema.sceneAssetCards).where(eq(schema.sceneAssetCards.projectId, id));
+await db.delete(schema.sceneImages).where(eq(schema.sceneImages.projectId, id));
+await db.delete(schema.coverGenerations).where(eq(schema.coverGenerations.projectId, id));
+await db.delete(schema.coverAnalysisJobs).where(eq(schema.coverAnalysisJobs.projectId, id));
+await db.delete(schema.coverPromptDrafts).where(eq(schema.coverPromptDrafts.projectId, id));
+await db.delete(schema.imageGenRecords).where(eq(schema.imageGenRecords.projectId, id));
+await db.delete(schema.projects).where(eq(schema.projects.id, id));
+names.push(p.name);
+blobKeysAll.push(...blobKeys);
+}
+// 3) blob 一律走引用检查（含快照引用检查）：快照保护中的、与
+// 其它项目/储存库共享的都不删；独占且无快照引用的才真删。
+for (const key of Array.from(new Set(blobKeysAll))) {
+await deleteBlobIfUnreferenced(ctx, key);
+}
+return { snapshotIds, names, skipped, deleted: names.length };
 }
 
 /** 备注 for a sent preset: the ten Chinese part descriptions, labelled. */
@@ -4012,6 +4253,27 @@ type ModeHints = {
   note?: string;
 };
 
+// v6.68（危-04）：基因卡结构校验——ctx.inference.complete 传了
+// schema: modeDraft，运行时已按 modeDraft 做 zod 校验并在校验
+// 失败时抛错（校验失败与推理失败走同一个 catch），所以这里只
+// 补运行时 schema 挡不住的语义关：viralSummary / summary 必须
+// 非空，否则抛错走失败分支，绝不让空摘要的卡冒充分析成功。
+function validateStyleDraft(draft: z.infer<typeof modeDraft>): void {
+  if (!draft || typeof draft !== "object") {
+    throw new Error("AI 返回的基因卡结构不完整（不是有效对象）");
+  }
+  if (typeof draft.viralSummary !== "string" || !draft.viralSummary.trim()) {
+    throw new Error("AI 返回的基因卡结构不完整（缺爆款逻辑摘要 viralSummary）");
+  }
+  if (typeof draft.summary !== "string" || !draft.summary.trim()) {
+    throw new Error("AI 返回的基因卡结构不完整（缺分析摘要 summary）");
+  }
+}
+
+// v6.68（危-04）：fallbackDraft 自本版起不再被 submitModeTraining
+// 调用（失败不再拿现编草稿冒充成功）；函数按方案口径保留备查，
+// 用 void 显式标记保留、避免未引用报错。
+void fallbackDraft;
 function fallbackDraft(hints: ModeHints & { transcript?: string }, videoName: string, prev: z.infer<typeof styleCardOut> | null, frames?: { timeSec: number; label: string }[], rhythmHint?: string): z.infer<typeof modeDraft> {
   const g = hints.genre?.trim() || "日常冲突题材";
   const mood = hints.mood?.trim() || "先压抑后释放";
@@ -6735,59 +6997,27 @@ return { ok: true};
 }),
 
 deleteProject: defineAction({
-description: "删除一个项目及其人物卡、剧本等全部内容，不可恢复。",
+description: "删除一个项目：删前先存一份完整快照（可在删除快照区恢复），再删项目及全部关联数据；项目不存在时明确报错。",
 request: z.object({ id: z.number().int().positive()}),
-response: z.object({ ok: z.literal(true)}),
-async handler(ctx, args): Promise<{ ok: true}> {
-const db = ctx.db<typeof schema>();
-const chars = await db
-.select()
-.from(schema.characters)
-.where(eq(schema.characters.projectId, args.id));
-const scenes = await db
-.select()
-.from(schema.sceneImages)
-.where(eq(schema.sceneImages.projectId, args.id));
-for (const s of scenes) {
-await ctx.blobs.delete(s.imageBlobKey);
-const stk = thumbKeyFor(s.imageBlobKey);
-if (await ctx.blobs.head(stk)) await ctx.blobs.delete(stk);
-}
-const sceneCards = await db
-.select()
-.from(schema.sceneAssetCards)
-.where(eq(schema.sceneAssetCards.projectId, args.id));
-await db
-.delete(schema.projectVersions)
-.where(eq(schema.projectVersions.projectId, args.id));
-await db
-.delete(schema.characters)
-.where(eq(schema.characters.projectId, args.id));
-await db
-.delete(schema.sceneAssetCards)
-.where(eq(schema.sceneAssetCards.projectId, args.id));
-await db
-.delete(schema.sceneImages)
-.where(eq(schema.sceneImages.projectId, args.id));
-await db
-.delete(schema.coverAnalysisJobs)
-.where(eq(schema.coverAnalysisJobs.projectId, args.id));
-await db
-.delete(schema.coverPromptDrafts)
-.where(eq(schema.coverPromptDrafts.projectId, args.id));
-await db
-.delete(schema.projects)
-.where(eq(schema.projects.id, args.id));
-// Character blobs may be shared with library cards (published from
-// the library): only delete a blob once nothing references it.
-for (const c of chars) {
-if (c.imageBlobKey) await deleteBlobIfUnreferenced(ctx, c.imageBlobKey);
-}
-for (const s of sceneCards) {
-if (s.imageBlobKey) await deleteBlobIfUnreferenced(ctx, s.imageBlobKey);
-}
+response: z.object({
+ok: z.boolean(),
+error: z.string().nullable(),
+snapshotId: z.number().nullable(),
+}),
+async handler(ctx, args) {
+// v6.68（危-08）：单删与批量删统一走 deleteProjectsWithFullSnapshot
+//（快照先行 + 删 8 张关联表 + blob 走引用检查含快照保护）。
+try {
+const res = await deleteProjectsWithFullSnapshot(ctx, [args.id], "single_project");
 ctx.invalidateQueries();
-return { ok: true};
+return { ok: true, error: null, snapshotId: res.snapshotIds[0] ?? null };
+} catch (e) {
+return {
+ok: false,
+error: e instanceof Error ? e.message : String(e),
+snapshotId: null,
+};
+}
 },
 }),
 
@@ -7043,101 +7273,43 @@ return { ok: true, error: null };
 
 batchDeleteProjects: defineAction({
 description:
-"批量删除项目：每个项目删除前先存一份完整快照（可从快照恢复），再删项目及全部关联数据。",
+"批量删除项目：每个项目删除前先存一份完整快照（v2，8 张关联表，可从快照恢复），再删项目及全部关联数据；不存在的项目跳过并列进 skipped。",
 request: z.object({
 ids: z.array(z.number().int().positive()).min(1).max(200),
 }),
 response: z.object({
-ok: z.literal(true),
+ok: z.boolean(),
+error: z.string().nullable(),
 deleted: z.number(),
 names: z.array(z.string()),
+skipped: z.array(z.number()),
+snapshotIds: z.array(z.number()),
 }),
-async handler(
-ctx,
-args,
-): Promise<{ ok: true; deleted: number; names: string[] }> {
-const db = ctx.db<typeof schema>();
-const names: string[] = [];
-for (const id of args.ids) {
-const projRows = await db
-.select()
-.from(schema.projects)
-.where(eq(schema.projects.id, id))
-.limit(1);
-const p = projRows[0];
-if (!p) continue;
-// 删除前快照：整项目序列化存档（项目行 + 人物 + 场景资产卡 +
-// 场景图 + 版本快照 + 封面记录），误删可整项目恢复。图片只记
-// blob key；本路径不删这些 blob，留给快照恢复。
-const [chars, sceneCards, sceneImgs, versions, covers] =
-await Promise.all([
-db
-.select()
-.from(schema.characters)
-.where(eq(schema.characters.projectId, id)),
-db
-.select()
-.from(schema.sceneAssetCards)
-.where(eq(schema.sceneAssetCards.projectId, id)),
-db
-.select()
-.from(schema.sceneImages)
-.where(eq(schema.sceneImages.projectId, id)),
-db
-.select()
-.from(schema.projectVersions)
-.where(eq(schema.projectVersions.projectId, id)),
-db
-.select()
-.from(schema.coverGenerations)
-.where(eq(schema.coverGenerations.projectId, id)),
-]);
-const payload = {
-version: 1,
-project: p,
-characters: chars,
-sceneAssetCards: sceneCards,
-sceneImages: sceneImgs,
-versions,
-coverGenerations: covers,
-};
-await db.insert(schema.projectDeleteSnapshots).values({
-projectName: p.name,
-payloadJson: JSON.stringify(payload),
-});
-// 与 deleteProject 同一套清理（唯一差别：不删人物 / 场景资产卡
-// 的图片 blob——快照恢复要用；场景图是项目独占图，照旧删）。
-for (const s of sceneImgs) {
-await ctx.blobs.delete(s.imageBlobKey);
-const stk = thumbKeyFor(s.imageBlobKey);
-if (await ctx.blobs.head(stk)) await ctx.blobs.delete(stk);
-}
-await db
-.delete(schema.projectVersions)
-.where(eq(schema.projectVersions.projectId, id));
-await db
-.delete(schema.characters)
-.where(eq(schema.characters.projectId, id));
-await db
-.delete(schema.sceneAssetCards)
-.where(eq(schema.sceneAssetCards.projectId, id));
-await db
-.delete(schema.sceneImages)
-.where(eq(schema.sceneImages.projectId, id));
-await db
-.delete(schema.coverGenerations)
-.where(eq(schema.coverGenerations.projectId, id));
-await db
-.delete(schema.coverAnalysisJobs)
-.where(eq(schema.coverAnalysisJobs.projectId, id));
-await db
-.delete(schema.coverPromptDrafts)
-.where(eq(schema.coverPromptDrafts.projectId, id));
-await db.delete(schema.projects).where(eq(schema.projects.id, id));
-names.push(p.name);
-}
+async handler(ctx, args) {
+// v6.68（危-08）：与单删统一走 deleteProjectsWithFullSnapshot
+//（v2 完整快照；旧版 v1 快照缺封面任务/草稿/生图三表且场景图
+// blob 照删、恢复后图打不开）。
+try {
+const res = await deleteProjectsWithFullSnapshot(ctx, args.ids, "batch_projects");
 ctx.invalidateQueries();
-return { ok: true as const, deleted: names.length, names };
+return {
+ok: true,
+error: null,
+deleted: res.deleted,
+names: res.names,
+skipped: res.skipped,
+snapshotIds: res.snapshotIds,
+};
+} catch (e) {
+return {
+ok: false,
+error: e instanceof Error ? e.message : String(e),
+deleted: 0,
+names: [],
+skipped: [],
+snapshotIds: [],
+};
+}
 },
 }),
 
@@ -7174,7 +7346,7 @@ createdAt: r.createdAt.toISOString(),
 }),
 
 restoreDeleteSnapshot: defineAction({
-description: "把一份批量删除快照恢复成一个新项目（数据完整还原）。",
+description: "把一份删除快照恢复成一个新项目（数据完整还原，封面记录的人物引用重映射到新人物；中途失败自动清理半截项目、快照保留可重试）。",
 request: z.object({ snapshotId: z.number().int().positive() }),
 response: z.object({
 ok: z.boolean(),
@@ -7198,16 +7370,9 @@ projectId: null,
 name: "",
 };
 }
-let payload: {
-project?: Record<string, unknown>;
-characters?: Record<string, unknown>[];
-sceneAssetCards?: Record<string, unknown>[];
-sceneImages?: Record<string, unknown>[];
-versions?: Record<string, unknown>[];
-coverGenerations?: Record<string, unknown>[];
-};
+let payload: Record<string, unknown>;
 try {
-payload = JSON.parse(snap.payloadJson) as typeof payload;
+payload = JSON.parse(snap.payloadJson) as Record<string, unknown>;
 } catch {
 return {
 ok: false,
@@ -7216,7 +7381,25 @@ projectId: null,
 name: "",
 };
 }
-const proj = payload.project;
+// v6.68（危-08）：兼容 v1（顶层平铺）与 v2（bundles）两种快照
+// 形状；v1 没有的表（封面任务/草稿/生图）本来就没快照，恢复时
+// 没有就是没有，不编数据。
+type SnapBundle = {
+project?: Record<string, unknown>;
+characters?: Record<string, unknown>[];
+sceneAssetCards?: Record<string, unknown>[];
+sceneImages?: Record<string, unknown>[];
+versions?: Record<string, unknown>[];
+coverGenerations?: Record<string, unknown>[];
+coverAnalysisJobs?: Record<string, unknown>[];
+coverPromptDrafts?: Record<string, unknown>[];
+imageGenRecords?: Record<string, unknown>[];
+};
+const bundle: SnapBundle =
+payload.version === 2 && Array.isArray(payload.bundles)
+? ((payload.bundles as SnapBundle[])[0] ?? {})
+: (payload as SnapBundle);
+const proj = bundle.project;
 if (!proj) {
 return {
 ok: false,
@@ -7253,11 +7436,12 @@ name: "",
 }
 const restoreRows = async (
 table:
-| typeof schema.characters
 | typeof schema.sceneAssetCards
 | typeof schema.sceneImages
 | typeof schema.projectVersions
-| typeof schema.coverGenerations,
+| typeof schema.coverAnalysisJobs
+| typeof schema.coverPromptDrafts
+| typeof schema.imageGenRecords,
 list: Record<string, unknown>[] | undefined,
 ) => {
 for (const row of list ?? []) {
@@ -7270,11 +7454,98 @@ if (values[k] != null) values[k] = asDate(values[k]);
 await db.insert(table as any).values(values as any);
 }
 };
-await restoreRows(schema.characters, payload.characters);
-await restoreRows(schema.sceneAssetCards, payload.sceneAssetCards);
-await restoreRows(schema.sceneImages, payload.sceneImages);
-await restoreRows(schema.projectVersions, payload.versions);
-await restoreRows(schema.coverGenerations, payload.coverGenerations);
+try {
+// 人物逐行插并记录旧→新 id 映射（封面记录的 refCharIds 靠它重映射）。
+const charIdMap = new Map<number, number>();
+for (const row of bundle.characters ?? []) {
+const { id: oldCharId, projectId: _pid, ...rest } = row;
+const values: Record<string, unknown> = { ...rest, projectId: newId };
+for (const k of ["createdAt", "updatedAt"]) {
+if (values[k] != null) values[k] = asDate(values[k]);
+}
+const cins = await db
+.insert(schema.characters)
+.values(values as typeof schema.characters.$inferInsert)
+.returning({ id: schema.characters.id });
+if (typeof oldCharId === "number" && cins[0]?.id) {
+charIdMap.set(oldCharId, cins[0].id);
+}
+}
+await restoreRows(schema.sceneAssetCards, bundle.sceneAssetCards);
+await restoreRows(schema.sceneImages, bundle.sceneImages);
+await restoreRows(schema.projectVersions, bundle.versions);
+// 封面记录：refCharIds（JSON 数组）逐项经 charIdMap 重映射到新
+// 人物 id，映射不到的旧 id 丢弃——绝不让恢复出的封面记录指向
+// 已删的旧人物。
+for (const row of bundle.coverGenerations ?? []) {
+const { id: _rid, projectId: _pid, ...rest } = row;
+const values: Record<string, unknown> = { ...rest, projectId: newId };
+for (const k of ["createdAt", "updatedAt"]) {
+if (values[k] != null) values[k] = asDate(values[k]);
+}
+const rawRefs = values.refCharIds;
+let refList: unknown[] | null = null;
+if (typeof rawRefs === "string" && rawRefs.trim()) {
+try {
+const parsedRefs: unknown = JSON.parse(rawRefs);
+if (Array.isArray(parsedRefs)) refList = parsedRefs;
+} catch {
+refList = null;
+}
+} else if (Array.isArray(rawRefs)) {
+refList = rawRefs;
+}
+if (refList) {
+const mapped = refList
+.map((x) => charIdMap.get(Number(x)))
+.filter((x): x is number => typeof x === "number");
+values.refCharIds = JSON.stringify(mapped);
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+await db.insert(schema.coverGenerations as any).values(values as any);
+}
+await restoreRows(schema.coverAnalysisJobs, bundle.coverAnalysisJobs);
+await restoreRows(schema.coverPromptDrafts, bundle.coverPromptDrafts);
+await restoreRows(schema.imageGenRecords, bundle.imageGenRecords);
+} catch (e) {
+// v6.68（危-08）：无事务 API，用失败补偿代替——清掉新项目及
+// 已恢复的全部子行，快照行保留可重试；补偿本身也失败必须看
+// 得见（写服务端审计日志、error 带 newId 明说需手动删），绝
+// 不静默留半截项目假装没事。
+const rawMsg = e instanceof Error ? e.message : String(e);
+let compensated = true;
+try {
+await db.delete(schema.projectVersions).where(eq(schema.projectVersions.projectId, newId));
+await db.delete(schema.characters).where(eq(schema.characters.projectId, newId));
+await db.delete(schema.sceneAssetCards).where(eq(schema.sceneAssetCards.projectId, newId));
+await db.delete(schema.sceneImages).where(eq(schema.sceneImages.projectId, newId));
+await db.delete(schema.coverGenerations).where(eq(schema.coverGenerations.projectId, newId));
+await db.delete(schema.coverAnalysisJobs).where(eq(schema.coverAnalysisJobs.projectId, newId));
+await db.delete(schema.coverPromptDrafts).where(eq(schema.coverPromptDrafts.projectId, newId));
+await db.delete(schema.imageGenRecords).where(eq(schema.imageGenRecords.projectId, newId));
+await db.delete(schema.projects).where(eq(schema.projects.id, newId));
+} catch {
+compensated = false;
+}
+if (compensated) {
+return {
+ok: false,
+error: `恢复失败，已清理一半成果（新项目 #${newId}），快照仍在可重试：${rawMsg}`,
+projectId: null,
+name: "",
+};
+}
+console.error(
+`[project-restore] 恢复失败且补偿删除也失败：半截项目 #${newId} 需手动删除，快照 #${args.snapshotId} 仍保留。原因：${rawMsg}`,
+);
+return {
+ok: false,
+error: `恢复失败且补偿清理也失败：半截项目 #${newId} 需手动删除，快照仍在。原因：${rawMsg}`,
+projectId: null,
+name: "",
+};
+}
+// 快照行只在全部恢复成功后才消费（删除），失败重试不会建重复项目。
 await db
 .delete(schema.projectDeleteSnapshots)
 .where(eq(schema.projectDeleteSnapshots.id, args.snapshotId));
@@ -7303,15 +7574,40 @@ const snap = rows[0];
 if (snap) {
 const blobKeys: string[] = [];
 try {
+// v6.68（危-08）：收集范围补齐 sceneImages 的 imageBlobKey 与
+// imageGenRecords 的 stagedKey，并兼容 v2 的 bundles 形状与
+// blobKeys 清单（否则快照保护的场景图/生图暂存图在快照永久删
+// 除后永远泄漏成孤儿）。
 const payload = JSON.parse(snap.payloadJson) as {
 characters?: { imageBlobKey?: string | null }[];
 sceneAssetCards?: { imageBlobKey?: string | null }[];
+sceneImages?: { imageBlobKey?: string | null }[];
+imageGenRecords?: { stagedKey?: string | null }[];
+blobKeys?: string[];
+version?: number;
+bundles?: unknown[];
 };
-for (const c of payload.characters ?? []) {
+const bundles = (
+payload.version === 2 && Array.isArray(payload.bundles)
+? payload.bundles
+: [payload]
+) as (typeof payload)[];
+for (const b of bundles) {
+for (const c of b.characters ?? []) {
 if (c.imageBlobKey) blobKeys.push(c.imageBlobKey);
 }
-for (const s of payload.sceneAssetCards ?? []) {
+for (const s of b.sceneAssetCards ?? []) {
 if (s.imageBlobKey) blobKeys.push(s.imageBlobKey);
+}
+for (const s of b.sceneImages ?? []) {
+if (s.imageBlobKey) blobKeys.push(s.imageBlobKey);
+}
+for (const r of b.imageGenRecords ?? []) {
+if (r.stagedKey) blobKeys.push(r.stagedKey);
+}
+for (const k of b.blobKeys ?? []) {
+if (k) blobKeys.push(k);
+}
 }
 } catch {
 /* 快照损坏时只删记录本身 */
@@ -10266,6 +10562,17 @@ states: scriptView.tempCharacterStates,
 });
 const speakerIssues = collectSpeakerIssues(scriptView, registry);
 const aliasSpeakers = new Set(speakerIssues.filter((i) => i.kind === "alias").map((i) => i.speaker));
+// v6.65 删除墓碑门禁：tempCharacterStates 里 disposition=deleted
+// 的名字是用户在审查页亲手删掉的（客户端删除时 extra/formal 一
+// 律写墓碑并立即落库）。下面四条候选路径全部先过这道门禁，墓碑
+// 名永不被自动加回——此前只有 temps 一路认墓碑（collectTemp-
+// Characters 的检出口径），其余三路能把删掉的人重新检出、设计、
+// 建卡，表现为「删完重载又复活」。用户日后亲手给墓碑名写了新台
+// 词时，collectTempCharacters 仍会把它按 pending 检出交待确认
+// 清单人工定夺（那是人工入口，不经本函数自动入表）。
+const tombstoneStates = scriptView.tempCharacterStates ?? {};
+const isTombstonedForAutoAdd = (name: string): boolean =>
+tombstoneStates[name.trim()]?.disposition === "deleted";
 
 interface Cand {
 name: string;
@@ -10291,18 +10598,21 @@ return c;
 // 1) 未登记说话人（有台词、不是任何已有人的称呼）→ 正式人物。
 for (const issue of speakerIssues) {
 if (issue.kind !== "unregistered" || !issue.speaker.trim()) continue;
+if (isTombstonedForAutoAdd(issue.speaker)) continue;
 ensureCand(issue.speaker.trim(), "formal");
 }
 // 2) 人物表里已有行、但还没建人物卡的人 → 正式人物（补建卡）。
 for (const row of rawRows) {
 const n = row.name.trim();
 if (!n || cardNames.has(n)) continue;
+if (isTombstonedForAutoAdd(n)) continue;
 const c = ensureCand(n, "formal");
 c.row = row;
 }
 // 3) 临时人物检出：有台词 / 已记群演却有台词 → 正式；无台词 → 群演。
 for (const t of temps) {
 if (aliasSpeakers.has(t.name)) continue;
+if (isTombstonedForAutoAdd(t.name)) continue;
 if (t.hasDialogue || t.status === "extra-with-dialogue") {
 const c = ensureCand(t.name, "formal");
 c.temp = t;
@@ -10321,6 +10631,7 @@ const n = b.speaker.trim();
 if (!n || !b.line.trim()) continue;
 if (cardNames.has(n) || rawRows.some((r) => r.name.trim() === n)) continue;
 if (aliasSpeakers.has(n)) continue;
+if (isTombstonedForAutoAdd(n)) continue;
 ensureCand(n, "formal");
 }
 }
@@ -11385,6 +11696,9 @@ delete next.overlongOverride;
 // v4.18 起没有审核放行这回事了：旧稿里若还留着以前放行的留痕，
 // 这次确认时一并清掉（审核结论 viralAudit 本身不动）。
 delete next.viralOverride;
+// v6.70：审查标记是按拍位置键记的，确认生成新分镜后位置对不齐，
+// 一律清掉、按新分镜重审（页面确认成功提示里会写明这一句）。
+delete next.reviewMarks;
 const nextJson = stripRemovedFields(JSON.stringify(next));
 const db = ctx.db<typeof schema>();
 await db
@@ -11477,7 +11791,7 @@ const db = ctx.db<typeof schema>();
 // the target duration comes from the file, falling back to the value
 // stored inside the script JSON when the file predates the field.
 let importTarget = args.targetSeconds ?? 0;
-let importScriptJson = args.scriptJson? stripCharPending(stripRemovedFields(args.scriptJson)): null;
+let importScriptJson = args.scriptJson? stripReviewMarks(stripCharPending(stripRemovedFields(args.scriptJson))): null;
 if (importScriptJson) {
 try {
 const parsed = JSON.parse(importScriptJson) as Record<string, unknown>;
@@ -13739,7 +14053,13 @@ deleteMonitorAccount: defineAction({
       .delete(schema.monitorAccounts)
       .where(eq(schema.monitorAccounts.id, args.id));
     // v4.64 删除同步：名下卡片的云端文件一并删掉。
-    await syncDeleteCloudVideos(ctx, deletedVideoIds);
+    // v6.68（危-07）：失败明细记服务端日志，不抛错、不拦流程。
+    const cloudDelRes = await syncDeleteCloudVideos(ctx, deletedVideoIds);
+    if (!cloudDelRes.ok) {
+      console.error(
+        `[cloud-video] 删达人级联删云端未完全成功（卡片已删）：${cloudDelRes.failed.map((f) => `${f.id}: ${f.error}`).join("; ")}`,
+      );
+    }
     ctx.invalidateQueries();
     return { ok: true as const };
   },
@@ -14204,7 +14524,13 @@ deleteMonitorVideo: defineAction({
     // v4.64 删除同步：云端有这条视频的文件就一并删掉（文件不存
     // 在不报错，云端侧失败只打日志、不拦卡片删除）。
     if (row?.videoId) {
-      await syncDeleteCloudVideos(ctx, [row.videoId]);
+      // v6.68（危-07）：失败明细记服务端日志，不抛错、不拦流程。
+      const cloudDelRes = await syncDeleteCloudVideos(ctx, [row.videoId]);
+      if (!cloudDelRes.ok) {
+        console.error(
+          `[cloud-video] 删卡片同步删云端未完全成功（卡片已删）：${cloudDelRes.failed.map((f) => `${f.id}: ${f.error}`).join("; ")}`,
+        );
+      }
     }
     ctx.invalidateQueries();
     return { ok: true as const };
@@ -14417,10 +14743,16 @@ clearMonitorVideos: defineAction({
     }
     await db.delete(schema.monitorVideos);
     // v4.64 删除同步：被清卡片的云端文件一并删掉（云端没有的跳过）。
-    await syncDeleteCloudVideos(
+    // v6.68（危-07）：失败明细记服务端日志，不抛错、不拦流程。
+    const cloudDelRes = await syncDeleteCloudVideos(
       ctx,
       rows.map((v) => v.videoId),
     );
+    if (!cloudDelRes.ok) {
+      console.error(
+        `[cloud-video] 一键清除同步删云端未完全成功（卡片已删）：${cloudDelRes.failed.map((f) => `${f.id}: ${f.error}`).join("; ")}`,
+      );
+    }
     // v4.50：清除时刻落服务端共享下限（见 readMonitorClearFloorMs
     // 注释）——删除与记下限同动作完成，任何后到一步的旧上报（中
     // 转 / 桥接 / 其它标签页）都会在各自的过滤点被这个下限拦住。
@@ -14449,6 +14781,11 @@ getMonitorCleanupStatus: defineAction({
     autoUnjudgedCount: z.number(),
     logs: z.array(monitorCleanupLogOut),
     lastUnjudged: z.array(monitorCleanupCandidateOut),
+    // v6.68（危-07）：最近一轮清理里云端文件没删成的清单（从报
+    // 告 JSON 里只挑这个字段透出，不原样透出整份报告）。
+    cloudFailed: z.array(
+      z.object({ videoId: z.string(), error: z.string() }),
+    ),
   }),
   privileged: [privileged.cloudVideoDelete],
   async handler(
@@ -14462,6 +14799,7 @@ getMonitorCleanupStatus: defineAction({
     autoUnjudgedCount: number;
     logs: z.infer<typeof monitorCleanupLogOut>[];
     lastUnjudged: z.infer<typeof monitorCleanupCandidateOut>[];
+    cloudFailed: Array<{ videoId: string; error: string }>;
   }> {
     const db = ctx.db<typeof schema>();
     const nowMs = Date.now();
@@ -14493,6 +14831,7 @@ getMonitorCleanupStatus: defineAction({
       .orderBy(desc(schema.monitorCleanupLog.id))
       .limit(100);
     let lastUnjudged: z.infer<typeof monitorCleanupCandidateOut>[] = [];
+    let cloudFailed: Array<{ videoId: string; error: string }> = [];
     const reportRaw = await readMonitorMetaValue(
       ctx,
       MONITOR_CLEANUP_LAST_REPORT_KEY,
@@ -14501,7 +14840,18 @@ getMonitorCleanupStatus: defineAction({
       try {
         const parsed = JSON.parse(reportRaw) as {
           unjudged?: unknown;
+          cloudFailed?: unknown;
         };
+        // v6.68（危-07）：只从报告里挑 cloudFailed 一个字段透出。
+        if (Array.isArray(parsed.cloudFailed)) {
+          cloudFailed = parsed.cloudFailed.filter(
+            (f): f is { videoId: string; error: string } =>
+              !!f &&
+              typeof f === "object" &&
+              typeof (f as { videoId?: unknown }).videoId === "string" &&
+              typeof (f as { error?: unknown }).error === "string",
+          );
+        }
         if (Array.isArray(parsed.unjudged)) {
           lastUnjudged = parsed.unjudged.filter(
             (u): u is z.infer<typeof monitorCleanupCandidateOut> =>
@@ -14538,6 +14888,7 @@ getMonitorCleanupStatus: defineAction({
         deletedAtMs: r.deletedAt.getTime(),
       })),
       lastUnjudged,
+      cloudFailed,
     };
   },
 }),
@@ -16792,7 +17143,10 @@ description: "提交一个训练视频给某个模式分析，生成或更新爆
     const failOrRetry = async (errorMsg: string) => {
       if (args.retryRecordId) {
         await db.update(schema.trainingRecords)
-          .set({ status: "failed", error: errorMsg })
+          // v6.68（危-04）：失败原因同时写进 analysisSummary（截断
+          // 500 字，内容就是 errorMsg 本人），训练记录列表能直接
+          // 看到为什么失败。
+          .set({ status: "failed", error: errorMsg, analysisSummary: errorMsg.slice(0, 500) })
           .where(eq(schema.trainingRecords.id, args.retryRecordId));
         ctx.invalidateQueries();
         return { ok: false, error: errorMsg, recordId: args.retryRecordId, status: "failed" as string | null };
@@ -16807,6 +17161,8 @@ description: "提交一个训练视频给某个模式分析，生成或更新爆
         hintsJson: JSON.stringify(hints),
         status: "failed",
         error: errorMsg,
+        // v6.68（危-04）：同上，失败原因写进 analysisSummary。
+        analysisSummary: errorMsg.slice(0, 500),
         progressBefore: before.progress,
         progressAfter: before.progress,
         stabilityBefore: before.stability,
@@ -16871,12 +17227,33 @@ description: "提交一个训练视频给某个模式分析，生成或更新爆
         images: frameImages.length > 0 ? frameImages : undefined,
         timeout_secs: 240,
       });
+      validateStyleDraft(draft);
       // 若模型没给全抽帧描述，用抽帧元数据补齐，保证帧可查看
       if ((!draft.frameDescriptions || draft.frameDescriptions.length === 0) && frameMeta.length > 0) {
         draft.frameDescriptions = frameMeta.map((f) => ({ timeSec: f.timeSec, label: f.label, description: draft.pixelStyle }));
       }
-    } catch {
-      draft = fallbackDraft({ ...hints, transcript }, args.videoName, before.currentCard, frameMeta, args.rhythmHint);
+    } catch (err: unknown) {
+      // v6.68（危-04）：AI 分析失败就是失败——旧版在这里拿模板
+      // fallbackDraft 冒充成功（照常建卡、涨进度、记录标
+      // success），假基因卡会污染之后全部生成。现口径：把已落
+      // 库的「分析中」记录直接改成 failed（错误与摘要都写真实
+      // 原因、不涨进度、revocable=0），不建卡、不动当前生效卡，
+      // 返回 ok:false，用户点重试。fallbackDraft 函数保留但不
+      // 再被本动作调用。
+      const rawMsg = err instanceof Error ? err.message : String(err || "未知推理异常");
+      const errorMsg = `AI 视频分析失败（未生成基因卡，进度未增加）：${rawMsg}`;
+      await db.update(schema.trainingRecords)
+        .set({
+          status: "failed",
+          error: errorMsg,
+          analysisSummary: errorMsg.slice(0, 500),
+          progressBefore: before.progress,
+          progressAfter: before.progress,
+          revocable: 0,
+        })
+        .where(eq(schema.trainingRecords.id, recordId));
+      ctx.invalidateQueries();
+      return { ok: false, error: errorMsg, recordId, status: "failed" as string | null };
     }
 
     // 风格冲突判定：新草稿与已有卡的标签零重合，且主题文本重合度低
@@ -18719,6 +19096,83 @@ description: "人物待确认草稿深存：只改项目 scriptJson 的 charPend
     }
     if (Object.keys(map).length > 0) obj.charPending = map;
     else delete obj.charPending;
+    await db
+      .update(schema.projects)
+      .set({ scriptJson: JSON.stringify(obj), updatedAt: new Date() })
+      .where(eq(schema.projects.id, args.projectId));
+    ctx.invalidateQueries();
+    return { ok: true, error: null };
+  },
+}),
+
+// v6.70 审片台审查标记深存（轻量动作，仿 saveCharPending）：只做
+// 「读库内 scriptJson → 只改 reviewMarks[key] 一个键 → 写回」，其
+// 余字段原样不动。打勾是高频小写动作，不走整份 saveScript（整份
+// 保存会把页面草稿整个写回，页面草稿落后于库时有覆盖风险）；整
+// 份 saveScript 仍是兜底（reviewMarks 随整份稿一并落库）。mark 传
+// null = 删掉这一拍的标记；拍键对不上现存节拍时同样按删除处理，
+// 并顺手清掉其他已无对应节拍的残留标记。同一拍两处同时写以后到
+// 者为准，不做合并。
+saveReviewMark: defineAction({
+description: "审片台审查标记深存：只改项目 scriptJson 的 reviewMarks 里某一拍的标记（通过/有问题+备注+忽略的检查项），其余字段原样不动；mark 为 null 表示清掉这一拍的标记。",
+  request: z.object({
+    projectId: z.number().int().positive(),
+    key: z.string().trim().regex(/^\d+-\d+$/, "拍键必须是「组-拍」格式").max(20),
+    mark: reviewMarkIn.nullable(),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    error: z.string().nullable(),
+  }),
+  async handler(ctx, args) {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.projects)
+      .where(eq(schema.projects.id, args.projectId))
+      .limit(1);
+    const project = rows[0];
+    if (!project) {
+      return { ok: false, error: "项目不存在，这次没存上" };
+    }
+    let obj: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(project.scriptJson ?? "");
+      if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { ok: false, error: "这个项目还没有剧本稿，这次没存上" };
+      }
+      obj = parsed as Record<string, unknown>;
+    } catch {
+      return { ok: false, error: "项目剧本数据读不出来，这次没存上" };
+    }
+    const beatKeys = new Set<string>();
+    if (Array.isArray(obj.groups)) {
+      obj.groups.forEach((g, gi) => {
+        const beats =
+          g != null && typeof g === "object"
+            ? (g as Record<string, unknown>).beats
+            : null;
+        if (Array.isArray(beats)) {
+          beats.forEach((_, bi) => beatKeys.add(`${gi}-${bi}`));
+        }
+      });
+    }
+    const map: Record<string, unknown> = {};
+    if (obj.reviewMarks != null && typeof obj.reviewMarks === "object") {
+      for (const [k, v] of Object.entries(
+        obj.reviewMarks as Record<string, unknown>,
+      )) {
+        // 已删节拍的残留标记一并清掉。
+        if (beatKeys.has(k)) map[k] = v;
+      }
+    }
+    if (args.mark == null || !beatKeys.has(args.key)) {
+      delete map[args.key];
+    } else {
+      map[args.key] = args.mark;
+    }
+    if (Object.keys(map).length > 0) obj.reviewMarks = map;
+    else delete obj.reviewMarks;
     await db
       .update(schema.projects)
       .set({ scriptJson: JSON.stringify(obj), updatedAt: new Date() })
@@ -21023,7 +21477,8 @@ description: "从备份导入剧本项目。",
               : {}),
             // v5.49 导入口径：源包里的待确认草稿（charPending）清掉
             // 再落库（新项目新人物，旧待确认值无所指）。
-            scriptJson: p.scriptJson ? stripCharPending(p.scriptJson) : p.scriptJson,
+            // v6.70 同理清掉源包里的审查标记（reviewMarks）。
+            scriptJson: p.scriptJson ? stripReviewMarks(stripCharPending(p.scriptJson)) : p.scriptJson,
           })
           .returning({ id: schema.projects.id });
         const prow = inserted[0];

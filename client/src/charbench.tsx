@@ -546,6 +546,11 @@ type PresetAnalysisOutcome = {
   refillAttempted: boolean;
   hadImage: boolean;
   imageFetchFailed: boolean;
+  // v6.68（危-06）：深存维度与推理成败分开——savedPending 仅当
+  // savePresetPending 返回成功且无异常时为 true；savedError 记
+  // 没存上的原因。批量总结据此如实计数，绝不谎报「都已深存」。
+  savedPending: boolean;
+  savedError: string;
 };
 
 /** 把一次分析结果回填进卡的 pending 列：只写来源不是 manual 的
@@ -647,6 +652,8 @@ async function applyPresetAnalysisResult(
     refillAttempted: result.refillAttempted,
     hadImage,
     imageFetchFailed,
+    savedPending: savedOk,
+    savedError,
   };
 }
 
@@ -709,6 +716,8 @@ async function drivePresetJob(
           refillAttempted: false,
           hadImage,
           imageFetchFailed,
+          savedPending: false,
+          savedError: reason,
         };
       }
     }
@@ -722,6 +731,8 @@ async function drivePresetJob(
         refillAttempted: false,
         hadImage,
         imageFetchFailed,
+        savedPending: false,
+        savedError: `分析超时（任务号 ${jobId}）`,
       };
     }
     await sleep(2500);
@@ -775,6 +786,8 @@ async function runPresetAnalysisCore(
     refillAttempted: false,
     hadImage,
     imageFetchFailed,
+    savedPending: false,
+    savedError: failReason,
   });
   try {
     const storedJobId = readPresetJob(fresh.id);
@@ -2673,6 +2686,8 @@ export function CharacterBench({
     const partialNames: string[] = [];
     const noImageNames: string[] = [];
     const failedList: { name: string; reason: string }[] = [];
+    // v6.68（危-06）：没深存上的卡单独成名单，绝不算进已出结果。
+    const unsavedList: { name: string; error: string }[] = [];
     let runs = 0;
     let refills = 0;
     setPaBatch({ done: 0, total: queue.length, current: queue[0]?.name ?? "" });
@@ -2691,6 +2706,8 @@ export function CharacterBench({
         const nm = p.name || "未命名人物";
         if (oc.failed) {
           failedList.push({ name: nm, reason: oc.failReason });
+        } else if (!oc.savedPending) {
+          unsavedList.push({ name: nm, error: oc.savedError || "深存失败" });
         } else if (!oc.hadImage) {
           noImageNames.push(
             oc.missingLabels.length > 0
@@ -2729,9 +2746,24 @@ export function CharacterBench({
       );
     if (runs === 0 && failedList.length === 0)
       lines.push("这轮没有要跑的卡。");
-    lines.push(
-      "结果都已深存为待确认，刷新不丢；逐张打开详情悬浮窗核对，点「确认并同步到卡片」才写进卡片。分析不改性别。",
-    );
+    // v6.68（危-06）：总结按实际深存计数生成——没存上的逐张点名
+    // 带原因，绝不再无条件写「结果都已深存」。
+    const savedCount =
+      okNames.length + partialNames.length + noImageNames.length;
+    if (unsavedList.length > 0) {
+      lines.push(
+        `没存上（刷新会丢，请再点一次「AI 分析」）：${unsavedList.map((u) => `${u.name}（${u.error}）`).join("；")}。`,
+      );
+      lines.push(
+        savedCount > 0
+          ? `仅有 ${savedCount} 张卡已深存为待确认，刷新不丢；逐张打开详情悬浮窗核对，点「确认并同步到卡片」才写进卡片。分析不改性别。`
+          : "这轮 0 张卡已深存，刷新后结果会丢，请逐张再点一次「AI 分析」。分析不改性别。",
+      );
+    } else if (savedCount > 0) {
+      lines.push(
+        `以上 ${savedCount} 张卡结果均已深存为待确认，刷新不丢；逐张打开详情悬浮窗核对，点「确认并同步到卡片」才写进卡片。分析不改性别。`,
+      );
+    }
     setPaReceipt(lines.join("\n"));
   };
 

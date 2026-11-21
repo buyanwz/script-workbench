@@ -52,6 +52,7 @@ export {
   lensPlan,
   packStoryboard,
   rawLensIndexByFlat,
+  rawLensSegments,
   scriptContentHash,
   shotCutReason,
   storyboardSegmentsForCuts,
@@ -68,6 +69,7 @@ export type {
   DurationSummary,
   FlatBeat,
   GroupDuration,
+  LensSegment,
   OverlongBeatInfo,
   OverlongLens,
   SpeakerIssue,
@@ -506,6 +508,41 @@ export function charPendingHasMatch(rec: CharPendingRecord): boolean {
   );
 }
 
+/**
+ * v6.70 审片台的一条审查标记（见 ScriptData.reviewMarks）：state 是
+ * 这一拍的审查结论——只标了「忽略某条检查」还没给结论时 state 可
+ * 缺省（不算已审）；note 只在有问题时写哪不对；ignoredChecks 记被
+ * 用户标为误报／画外音忽略掉的检查项 id（如 "speaker-offscreen"），
+ * 被忽略的检查不再标红、也不计入确认前的「没处理的问题」。
+ */
+export interface ReviewMark {
+  state?: "pass" | "issue";
+  note?: string;
+  ignoredChecks?: string[];
+  updatedAt: string;
+}
+
+/** v6.70 检查项 id：说话人未在画面点名（lensScreenCasts inclusive 口径）。 */
+export const REVIEW_CHECK_SPEAKER_OFFSCREEN = "speaker-offscreen";
+
+/**
+ * v6.70 无台词拍二分口径：visual 文本含「花字」二字 → 花字拍，
+ * 否则 → 动作拍。overlays 是解剖稿的空数组、不能拿它判，只认
+ * visual 原文（项目 52 的 6 拍无台词亲手核过：5 花字 1 动作）。
+ */
+export function noLineBeatKind(beat: Beat): "花字" | "动作" {
+  return (beat.visual ?? "").includes("花字") ? "花字" : "动作";
+}
+
+/**
+ * v6.70 造型句（审片台色块旁的一句话）：取人物行 look 的第一分句
+ * （按 ；;。 分句），超 20 字截断加 …；look 为空回空串。
+ */
+export function lookSnippet(look: string): string {
+  const first = (look ?? "").split(/[；;。]/)[0]?.trim() ?? "";
+  return first.length > 20 ? `${first.slice(0, 20)}…` : first;
+}
+
 export interface ScriptData {
   title: string;
   pendingItems: string[];
@@ -521,6 +558,14 @@ export interface ScriptData {
    * 确认值，不报错、不自动补写。
    */
   charPending?: CharPendingMap;
+  /**
+   * v6.70 审查标记（审片台）：按拍键 `${gi}-${bi}` 记这一拍审没审、
+   * 有没有问题、一句话备注与被忽略的检查项。只写标记、不动剧本
+   * 正文；随剧本数据落库（刷新／换电脑还在、进备份），导入时清掉。
+   * 确认分镜／生成新分镜时由服务端清掉（位置键按新分镜对不齐）。
+   * 旧稿没有这个键 = 一拍都没审，不报错、不自动补写。
+   */
+  reviewMarks?: Record<string, ReviewMark>;
   groups: ScriptGroup[];
   overlays: Overlay[];
   generationNotes: string[];
@@ -777,6 +822,48 @@ export function parseScript(json: string | null): ScriptData | null {
       else delete data.charPending;
     } else {
       delete data.charPending;
+    }
+    // v6.70 审查标记归一（照 charPending 口径）：键必须是「组-拍」
+    // 位置键且拍还存在；记录形状不对整条丢弃；state 只认 pass /
+    // issue，note 只留字符串（截 500 字），ignoredChecks 只留字符串
+    // 数组；state / note / ignoredChecks 全空的记录不保留；全空删
+    // 键。没有这个键的存量稿不补写、原样通过。
+    if (data.reviewMarks != null && typeof data.reviewMarks === "object") {
+      const out: Record<string, ReviewMark> = {};
+      for (const [key, rawRec] of Object.entries(
+        data.reviewMarks as Record<string, unknown>,
+      )) {
+        const m = /^(\d+)-(\d+)$/.exec(key);
+        if (!m || !rawRec || typeof rawRec !== "object") continue;
+        const gi = Number(m[1]);
+        const bi = Number(m[2]);
+        if (!data.groups[gi]?.beats[bi]) continue;
+        const rec = rawRec as Record<string, unknown>;
+        const state =
+          rec.state === "pass" || rec.state === "issue"
+            ? rec.state
+            : undefined;
+        const note =
+          typeof rec.note === "string" && rec.note.trim()
+            ? rec.note.slice(0, 500)
+            : undefined;
+        const ignoredChecks = Array.isArray(rec.ignoredChecks)
+          ? rec.ignoredChecks.filter(
+              (x): x is string => typeof x === "string" && x.length > 0,
+            )
+          : [];
+        if (!state && !note && ignoredChecks.length === 0) continue;
+        out[key] = {
+          ...(state ? { state } : {}),
+          ...(note ? { note } : {}),
+          ...(ignoredChecks.length > 0 ? { ignoredChecks } : {}),
+          updatedAt: asStr(rec.updatedAt),
+        };
+      }
+      if (Object.keys(out).length > 0) data.reviewMarks = out;
+      else delete data.reviewMarks;
+    } else {
+      delete data.reviewMarks;
     }
     if (!Array.isArray(data.autoAddedCharacters)) {
       delete data.autoAddedCharacters;
@@ -5096,16 +5183,24 @@ function beatLinesForFastMini(
       { noteVisualFix: fix },
     );
     // v5.21：画面先过本拍修正（绰号换标签 + 集体名词展开）再切分。
+    // v6.73：切分前再过后期元素过滤（顶部标题 / 字幕 / 花字等不
+    // 进提示词，主动作分句的截取点在过滤之后）；无台词拍的台词
+    // 行摘要同源自画面原文，一并过滤（有台词拍的 dialogueText
+    // 含台词原文，台词一字不差、不过滤）。
     const d: BeatDisplay = {
       ...raw,
-      visualContent: fix(raw.visualContent),
-      finalFrame: fix(raw.finalFrame),
+      visualContent: stripPostProductionText(fix(raw.visualContent)),
+      finalFrame: stripPostProductionText(fix(raw.finalFrame)),
+      dialogueText: b.line.trim()
+        ? raw.dialogueText
+        : stripNoLineDialogueText(raw.dialogueText),
     };
     const main = mainActionClause(d);
     const visual =
       model === "seedance20mini" ? miniActionClause(main) : main;
     const block = [
-      `画面内容：${visual}。`,
+      // v6.73：过滤后画面为空时整行不写，不留「画面内容：。」。
+      ...(visual ? [`画面内容：${visual}。`] : []),
       dialogueLineForModel(script, ctx, b, d, model),
     ];
     if (b.line.trim()) {
@@ -5146,10 +5241,17 @@ function beatLinesForModel(
       { noteVisualFix: fix },
     );
     // v5.21：画面过本拍修正（绰号换标签 + 集体名词展开）。
+    // v6.73：再过后期元素过滤（顶部标题 / 字幕 / 花字等不进提示
+    // 词；过滤点在 dialogueLineForModel 的 2.0 花括号替换之前）；
+    // 无台词拍的台词行摘要同源自画面原文，一并过滤（有台词拍的
+    // dialogueText 含台词原文，台词一字不差、不过滤）。
     const d: BeatDisplay = {
       ...raw,
-      visualContent: fix(raw.visualContent),
-      finalFrame: fix(raw.finalFrame),
+      visualContent: stripPostProductionText(fix(raw.visualContent)),
+      finalFrame: stripPostProductionText(fix(raw.finalFrame)),
+      dialogueText: b.line.trim()
+        ? raw.dialogueText
+        : stripNoLineDialogueText(raw.dialogueText),
     };
     const cutReason = b.cutReason?.trim() || "剧情分析";
     let title: string;
@@ -5160,14 +5262,21 @@ function beatLinesForModel(
     } else {
       title = `镜头${bi + 1}：${d.annotation} · 切镜依据：${cutReason}`;
     }
-    const visualLine = `画面内容：${d.visualContent}；末帧：${d.finalFrame}。`;
+    // v6.73：过滤后为空的段整段丢弃、两段都空时整行不写，不留
+    // 「画面内容：；末帧：。」这类畸形空行（H3 侧画面句本就有
+    // 非空守卫、无此问题）。
+    const visualParts: string[] = [];
+    if (d.visualContent) visualParts.push(`画面内容：${d.visualContent}`);
+    if (d.finalFrame) visualParts.push(`末帧：${d.finalFrame}`);
+    const visualLine =
+      visualParts.length > 0 ? `${visualParts.join("；")}。` : "";
     // v5.21：有台词的拍在台词行后加说话人绑脸行（四档一致）。
     const binding = b.line.trim()
       ? speakerBindingLine(script, ctx, b.speaker)
       : "";
     const block = [
       title,
-      visualLine,
+      ...(visualLine ? [visualLine] : []),
       ...(blocking ? [blocking] : []),
       dialogueLineForModel(script, ctx, b, d, model),
       ...(binding ? [binding] : []),
@@ -5858,6 +5967,18 @@ const H3_SCALE_WORDS = [
 const H3_SCALE_LOCK =
   "参考图只用于锁定脸型、发型与服装，不用于决定身高与身材比例；各人相对身高与体型全片保持不变；同框站立时双脚站在同一地面上，不垫高、不错位站立，不因机位变化改变相对身高。";
 
+/** v6.69 音色锁定句（R1）：音色行原文照写、行尾恒跟这一句，把
+ * 音色从「某一类声音的描述」收成「这个人全片固定的一把声音」。
+ * 只锁身份、不压情绪：不写「不随情绪、语速改变」——情绪起伏由
+ * 台词句的发声动词（h3SpeakVerb）管，锁定句不越界。 */
+const H3_VOICE_LOCK = "全片固定用这一把声音，每一镜音色保持一致。";
+
+/** v6.69 逐拍静默句阈值（R4）：本镜头有台词时，无台词的拍时长
+ * 达到此秒数才写静默句；短于此的拍不写（bi >= 1 的短拍由「先
+ * 停顿约半秒」垫字句覆盖；bi === 0 的短静默首拍无任何声音指令，
+ * 是已接受的缺口）。1.0 秒是初值，真机听后可调。 */
+const H3_SILENCE_MIN_SECONDS = 1.0;
+
 /** v6.12 近景家族（特写 / 近景类）：这些景别的拍不加尺度锁句、
  * 不加任何身高要求句（中近景含「近景」、按近景家族处理）。 */
 const H3_CLOSE_SCALES: ReadonlySet<string> = new Set([
@@ -5990,6 +6111,141 @@ function h3ExpandCollectivesInText(
   );
 }
 
+// ---------------------------------------------------------------------------
+// v6.73 后期剪辑元素过滤（提问题 #112001）：顶部标题、字幕、花字、
+// 弹幕、水印、片头片尾大字、平台 LOGO、关注 / 点赞提示、聊天界面
+// 这类「后期加上去的东西」只属于剧本 / 后期剪辑环节，绝不能写进
+// 分镜提示词的画面描述——它们是解剖时混进 beat.visual 画面原文
+// 的，修复落在拼装层：拼词时把命中的小片段整段剔掉，不改存量
+// beat.visual、不删 overlays 数据，绝不过滤台词（beat.line）、
+// 音效、人物造型 / 音色、场景名与镜头标题。H3（h3FixVisualText
+// 出口一处接线，画面句 / 末帧句 / 组内承接句 / 跨组承接句四路
+// 同源）与 Seedance（beatLinesForModel / beatLinesForFastMini 的
+// 画面、末帧与无台词拍台词行摘要）共用本函数。
+// ---------------------------------------------------------------------------
+
+/** 实物载体白名单：片段带这些词时整段保留——黑板上写的字、招牌
+ * 上的字、手机屏幕里的剧情文字都是场景内的实物，不是后期叠加。 */
+const POST_PROD_CARRIER_RE =
+  /黑板|白板|招牌|霓虹灯|纸条|书本|报纸|试卷|作业本|手机屏幕/;
+
+/** 「标题」类片段的修饰词：带修饰或带引文形态的标题才是后期标题。 */
+const POST_PROD_TITLE_MODIFIER_RE =
+  /顶部|底部|左上|右上|左下|右下|上方|下方|居中|黄字|白字|红字|蓝字|大字|大标题|综艺|花体|描边/;
+
+const POST_PROD_QUOTE_RE = /[‘’'“”「」『』]/;
+
+/** 无条件剔除的后期元素词（白名单载体片段除外）。 */
+const POST_PROD_HARD_RE =
+  /字幕|花字|弹幕|水印|片头|片尾|消息界面|聊天框|聊天记录/;
+
+/** 互动引导类：关注 / 点赞 / 评论区只有与按钮 / 提示类词同现时
+ * 才是后期 UI；裸动作词（「对着镜头点赞」）是合法画面动作，保留。 */
+const POST_PROD_SOCIAL_RE = /关注|点赞|评论区/;
+const POST_PROD_UI_RE = /按钮|提示|点击|弹窗|引导/;
+
+/** LOGO 印在衣物 / 商品等实物上时是场景内容，带实物词保留。 */
+const POST_PROD_LOGO_PHYSICAL_RE =
+  /衣|服|衫|恤|帽|鞋|包|裤|裙|商品|产品|包装/;
+
+/** 快速预检：整段文本一个后期关键词都没有时原样返回（零回归）。 */
+const POST_PROD_ANY_RE =
+  /标题|字幕|花字|弹幕|水印|片头|片尾|LOGO|logo|关注|点赞|评论区|消息界面|聊天框|聊天记录/;
+
+/** 一个小片段是否属于后期剪辑元素（命中即整段剔除）。 */
+function postProdFragmentDropped(text: string): boolean {
+  // 互动引导（关注提示 / 点赞按钮…）优先于白名单：手机屏幕弹出
+  // 的关注提示也是后期 UI，不是剧情道具。
+  if (POST_PROD_SOCIAL_RE.test(text) && POST_PROD_UI_RE.test(text)) {
+    return true;
+  }
+  if (POST_PROD_CARRIER_RE.test(text)) return false;
+  if (/LOGO|logo/.test(text)) {
+    return !POST_PROD_LOGO_PHYSICAL_RE.test(text);
+  }
+  if (text.includes("标题")) {
+    return (
+      POST_PROD_TITLE_MODIFIER_RE.test(text) ||
+      POST_PROD_QUOTE_RE.test(text) ||
+      text.trim().startsWith("标题")
+    );
+  }
+  if (POST_PROD_HARD_RE.test(text)) return true;
+  return false;
+}
+
+/**
+ * 从画面文本里剔除后期剪辑元素片段：先按 [。；！？\n] 切大句，
+ * 大句内再按 [：:，、] 切小片段；命中小片段整段删掉后重拼，
+ * 重拼保留原分隔符（冒号 / 逗号 / 顿号原样），并清理残留标点
+ * （句首 / 句尾孤标点、连续冒号压成一个）。「顶部标题：当考场…」
+ * 式写法里标签片段本身没带引文时，冒号后的第一片段是标签的内
+ * 容（标题文字 / 字幕文字本身），一并剔除；标签自带引文（顶部
+ * 黄字标题‘…’）时内容已在片段内，不连坐后面的正常画面片段。
+ * 纯函数：不读数据、不写回。
+ */
+export function stripPostProductionText(visual: string): string {
+  const raw = visual ?? "";
+  if (!raw || !POST_PROD_ANY_RE.test(raw)) return raw;
+  const sentenceParts = raw.split(/([。；！？\n])/);
+  const outSentences: string[] = [];
+  for (let i = 0; i < sentenceParts.length; i += 2) {
+    const body = sentenceParts[i] ?? "";
+    const sep = sentenceParts[i + 1] ?? "";
+    if (!body) continue;
+    const fragParts = body.split(/([：:，、])/);
+    const frags: { sep: string; text: string }[] = [];
+    for (let j = 0; j < fragParts.length; j += 2) {
+      frags.push({
+        sep: j === 0 ? "" : (fragParts[j - 1] ?? ""),
+        text: fragParts[j] ?? "",
+      });
+    }
+    const kept: { sep: string; text: string }[] = [];
+    let cascadeNext = false;
+    for (const f of frags) {
+      if (!f.text.trim()) continue;
+      if (cascadeNext && (f.sep === "：" || f.sep === ":")) {
+        cascadeNext = false;
+        continue;
+      }
+      cascadeNext = false;
+      if (postProdFragmentDropped(f.text)) {
+        if (/标题|字幕|花字/.test(f.text) && !POST_PROD_QUOTE_RE.test(f.text)) {
+          cascadeNext = true;
+        }
+        continue;
+      }
+      kept.push(f);
+    }
+    if (kept.length === 0) continue;
+    const joined = kept
+      .map((f, idx) => (idx === 0 ? f.text : `${f.sep}${f.text}`))
+      .join("");
+    outSentences.push(joined + sep);
+  }
+  return outSentences
+    .join("")
+    .replace(/[：:]{2,}/g, "：")
+    .replace(/^[：:，、；;。！？\s]+/, "")
+    .replace(/[：:，、；;\s]+$/, "");
+}
+
+/**
+ * 无台词拍的台词行「（无台词，{画面首分句摘要}）」：摘要同源自
+ * 画面原文，后期元素会从这条路漏进提示词（beatDisplay 把画面首
+ * 分句截前 24 字拼进 dialogueText）。只剥摘要部分、括号结构不
+ * 动；摘要被剥空时回落 beatDisplay 自身的兜底词「动作过渡」。
+ * 有台词拍的 dialogueText 含台词原文，台词一字不差、绝不过滤，
+ * 调用方只对无台词拍用本函数。
+ */
+function stripNoLineDialogueText(dialogueText: string): string {
+  const m = /^（无台词，([\s\S]*)）$/.exec(dialogueText ?? "");
+  if (!m) return dialogueText;
+  const inner = stripPostProductionText(m[1] ?? "");
+  return inner ? `（无台词，${inner}）` : "（无台词，动作过渡）";
+}
+
 /**
  * H3 版画面文本修正：与 lensVisualFixers 同一套提炼（集体名词先
  * 占位保护、再换描述词、最后兜底展开），人物标签一律换成
@@ -6057,7 +6313,9 @@ function h3FixVisualText(
     const re = new RegExp(`(^|[^A-Za-z])${d.code}(?=$|[^A-Za-z])`, "g");
     out = out.replace(re, (_m: string, pre: string) => `${pre}${tag}`);
   }
-  return out;
+  // v6.73：出口统一过后期元素过滤——画面句、末帧句、组内承接句、
+  // 跨组承接句四路都经本函数返回，一处接线全覆盖。
+  return stripPostProductionText(out);
 }
 
 /**
@@ -6157,15 +6415,17 @@ export function buildH3TextForGroup(
   });
 
   // ---- detailed_description -------------------------------------------
-  const styleChinese = filmStyleLockLines(script).filter((l) =>
-    /[一-鿿]/.test(l),
-  );
-  const styleCore = (styleChinese[0] ?? "")
-    .replace(/^全片统一风格：/, "")
-    .replace(/[。.\s]+$/, "");
+  // v6.73（提问题 #112001）：开场与 Seedance 同源同序——全片风格
+  // 锁定句逐行原样（filmStyleLockLines：默认中英两行，项目改过
+  // 风格有几行写几行）紧跟【郑重声明】一行，都写在
+  // detailed_description 内、[Shot 1] 之前；其后接原有场景句与
+  // （10–15 秒版的）切镜规则句。此前 H3 只写风格句第一行的中文
+  // 缩写、没有声明，两套提示词约束不一致，本版推翻 v6.19 的
+  // 「H3 两版不动」旧口径，但不新增段、不动六段顺序与段名。
   const sceneName = (g.sceneName ?? "").trim();
   const openingParts: string[] = [];
-  if (styleCore) openingParts.push(`${styleCore}。`);
+  openingParts.push(...filmStyleLockLines(script));
+  openingParts.push(...videoDeclarationLines());
   if (sceneName) {
     openingParts.push(`本镜头场景是${sceneName}，同一场光线方向保持一致。`);
   }
@@ -6177,7 +6437,65 @@ export function buildH3TextForGroup(
     );
   }
 
+  // v6.69（R4）：本镜头是否有台词必须在拍循环前先算——拍循环内
+  // 的逐拍静默句要用它判定，而 overall_soundscape 段的同名计算在
+  // 循环之后才有，循环内引用会报 TDZ 编译错；此处算好后循环与
+  // soundscape 共用同一个量。
+  const hasAnyLine = g.beats.some((b) => b.line.trim() !== "");
+  // v6.69 跨组承接句（R5）素材：上一组末拍的末帧文本（经本组
+  // tagOf 换标签，只取末拍末帧）。三守卫缺一即留空串、组首拍整
+  // 句不写：①同场景——复用 lensScreenCasts 的判定口径（两组
+  // sceneName 按 / 切分取交集，不用字符串相等）；②上一组末拍
+  // 末帧经 h3FixVisualText 后非空；③上一组末场景段结尾在场人物
+  // （segmentFinalCast）全员在本组 tagOf 内（否则承接句会凭空
+  // 点名不在本组的人）。
+  let prevGroupLead = "";
+  if (groupIndex >= 1) {
+    const prevGroup = tl.groups[groupIndex - 1];
+    if (prevGroup && prevGroup.beats.length > 0) {
+      const prevScenes = new Set(
+        prevGroup.sceneName
+          .split("/")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      );
+      const sharesScene = g.sceneName
+        .split("/")
+        .map((s) => s.trim())
+        .some((s) => s !== "" && prevScenes.has(s));
+      if (sharesScene) {
+        const prevLastBeat = prevGroup.beats[prevGroup.beats.length - 1];
+        const prevFinalRaw = prevLastBeat
+          ? splitVisualFinal(prevLastBeat.visual ?? "").finalFrame
+          : "";
+        const prevCasts = lensScreenCasts(script, groupIndex - 1, ctx);
+        const prevLastCast = prevCasts[prevCasts.length - 1] ?? {
+          confirmed: [],
+          inclusive: [],
+        };
+        const prevFinalFixed = prevFinalRaw
+          ? h3FixVisualText(
+              prevFinalRaw,
+              prevLastCast,
+              descriptors,
+              tagOf,
+            ).replace(/[。；;\s]+$/, "")
+          : "";
+        const finalCastAllInGroup = segmentFinalCast(
+          prevGroup.beats,
+          descriptors,
+        ).every((code) => tagOf.has(code));
+        if (prevFinalFixed && finalCastAllInGroup) {
+          prevGroupLead = prevFinalFixed;
+        }
+      }
+    }
+  }
+
   const shotTexts: string[] = [];
+  // v6.66 尺度锁去重（H3）：每个段（本次调用）内第一个合格拍写全
+  // 文，后续同类拍只写短句，避免 69 字套话逐拍重复稀释身份权重。
+  let scaleLockFullWritten = false;
   g.beats.forEach((beat, bi) => {
     const beatCast = screenCasts[bi] ?? { confirmed: [], inclusive: [] };
     const sentences: string[] = [];
@@ -6188,6 +6506,11 @@ export function buildH3TextForGroup(
     const scale =
       H3_SCALE_WORDS.find((s) => visualText.includes(s)) ?? "中景";
     const multiPerson = beatCast.inclusive.length >= 2;
+    // v6.69（R3）：本拍位置表（tag → 位置词），由站位块按
+    // presentTags 顺序算出、站位句与台词句共用同一张表（一个来
+    // 源，不许两处各算一次）；站位句没写出时保持 null，台词句
+    // 不加位置指代。
+    let positionOf: Map<string, string> | null = null;
     // 承接句（第 2 拍起）：只复述上一拍的末帧状态（splitVisual-
     // Final 的末帧文本经同一套标签提炼——站位 / 站坐 / 朝向 /
     // 道具 / 动作落点都在这段原文里），上一拍没有可用文本就整
@@ -6216,10 +6539,25 @@ export function buildH3TextForGroup(
       // 末帧文本时才写；停顿句是节奏指令、不含编造的画面内容。
       sentences.push("先停顿约半秒，再开始本镜的主要动作。");
     }
+    // v6.69 跨组承接句（R5）：组首拍先复述上一组末拍的末帧状态
+    // （素材与三守卫在拍循环前算好，见 prevGroupLead），让跨镜头
+    // 有文字衔接；写出时停顿句跟上（组边界即一次切镜，与组内
+    // 「承接句＋停顿句」同一配对逻辑）。守卫没过时整句不写、
+    // 也不补停顿句（保持现状）。
+    if (bi === 0 && prevGroupLead) {
+      sentences.push(`承接上一镜头结尾：${prevGroupLead}。`);
+      sentences.push("先停顿约半秒，再开始本镜的主要动作。");
+    }
     sentences.push(h3CameraSentence(beat));
-    // 尺度锁句：多人同框且非特写 / 近景的拍才带，固定全文复用。
+    // 尺度锁句：多人同框且非特写 / 近景的拍才带。v6.66 去重：段内
+    // 首个合格拍写固定全文，后续同类拍只写短句提醒。
     if (multiPerson && !H3_CLOSE_SCALES.has(scale)) {
-      sentences.push(H3_SCALE_LOCK);
+      if (!scaleLockFullWritten) {
+        sentences.push(H3_SCALE_LOCK);
+        scaleLockFullWritten = true;
+      } else {
+        sentences.push("各人相对身高与同地面站位保持不变。");
+      }
     }
     // 平视机位：多人全身 / 中景类拍（全景 / 中全景 / 中景）且原
     // 文未指定仰拍 / 俯拍时才加一句；已指定的机位句一字不动。
@@ -6229,6 +6567,53 @@ export function buildH3TextForGroup(
       !/仰拍|俯拍|仰视|俯视|仰角|俯角/.test(visualText)
     ) {
       sentences.push("镜头为平视机位。");
+    }
+    // v6.66 站位兜底（H7）：H3 此前不写任何站位句，多人拍按
+    // <Subject N> 编号顺序恒写一句左右站位，防止模型随意交换两
+    // 人位置。位置固定在平视机位句之后、画面句之前；不读
+    // group.blocking、不设特写排除；在场标签不足 2 个不写。
+    if (multiPerson) {
+      const presentTags = cast
+        .filter((e) => beatCast.inclusive.includes(e.code))
+        .map((e) => tagOf.get(e.code))
+        .filter((t): t is string => Boolean(t));
+      if (presentTags.length >= 2) {
+        // v6.69（R3）：先算位置表再拼站位句——分支与位置词和旧写
+        // 法逐一对应，站位句输出逐字不变；台词句读同一张表在发
+        // 声动词前再指一次位置（见台词句单人分支）。
+        const half = Math.ceil(presentTags.length / 2);
+        const positionWords = presentTags.map((_tag, idx) => {
+          if (presentTags.length === 2)
+            return idx === 0 ? "画面左侧" : "画面右侧";
+          if (presentTags.length === 3)
+            return idx === 0
+              ? "画面左侧"
+              : idx === 1
+                ? "画面中央"
+                : "画面右侧";
+          return idx < half ? "画面左半侧" : "画面右半侧";
+        });
+        const table = new Map<string, string>();
+        presentTags.forEach((tag, idx) => {
+          table.set(tag, positionWords[idx] ?? "");
+        });
+        positionOf = table;
+        if (presentTags.length === 2) {
+          sentences.push(
+            `${presentTags[0]} 位于${positionWords[0]}，${presentTags[1]} 位于${positionWords[1]}，两人左右相对站位固定，不互换位置。`,
+          );
+        } else if (presentTags.length === 3) {
+          sentences.push(
+            `${presentTags[0]} 位于${positionWords[0]}，${presentTags[1]} 位于${positionWords[1]}，${presentTags[2]} 位于${positionWords[2]}，三人左右相对站位固定。`,
+          );
+        } else {
+          const leftGroup = presentTags.slice(0, half).join(" 与 ");
+          const rightGroup = presentTags.slice(half).join(" 与 ");
+          sentences.push(
+            `${leftGroup} 位于${positionWords[0]}，${rightGroup} 位于${positionWords[half]}，各人左右相对站位保持不变。`,
+          );
+        }
+      }
     }
     const { content, finalFrame } = splitVisualFinal(beat.visual ?? "");
     const fixedContent = h3FixVisualText(
@@ -6284,14 +6669,52 @@ export function buildH3TextForGroup(
           sentences.push(
             `${tags.join(" 和 ")} (${perNums.map((n) => `S${n}`).join(",")}) 齐声说出，<d>[Chinese] ${line}</d>`,
           );
+          // v6.69 他人闭嘴句（R2）：齐声全体之外还有人在场才写；
+          // 措辞按说话人是否在场分流（见单人分支注释）。
+          const chorusOthers = beatCast.inclusive.filter(
+            (c) => !r.codes.includes(c),
+          );
+          if (chorusOthers.length >= 1) {
+            sentences.push(
+              r.codes.every((c) => beatCast.inclusive.includes(c))
+                ? "。其余在场人物保持闭嘴、不出声。"
+                : "。画面内人物保持闭嘴、不出声。",
+            );
+          }
         }
       } else if (r) {
         const tag = tagOf.get(r.codes[0] ?? "");
         const sNo = speakerNo.get(`C:${r.codes[0] ?? ""}`);
         if (tag && sNo != null) {
+          // v6.69 台词位置指代（R3，Muse3 改措辞口径）：位置放进
+          // 发声动词短语、标签仍打头——「<Subject N> (Sx) 在画
+          // 面左侧低声说出，<d>…</d>」，动词仍是 h3SpeakVerb 的
+          // 返回值随情绪走；位置表里没有说话人（不在画面内 /
+          // 单人拍 / 站位句没写出）时不加，与改前一字相同。
+          const pos = positionOf?.get(tag);
           sentences.push(
-            `${tag} (S${sNo}) ${verb}，<d>[Chinese] ${line}</d>`,
+            pos
+              ? `${tag} (S${sNo}) 在${pos}${verb}，<d>[Chinese] ${line}</d>`
+              : `${tag} (S${sNo}) ${verb}，<d>[Chinese] ${line}</d>`,
           );
+          // v6.69 他人闭嘴句（R2）：台词句之后、本拍最后一句补
+          // 一句，写明没在说话的人保持闭嘴，收窄多人同框串声。
+          // 他人 = 在场集合减去本拍说话人；措辞按说话人是否在
+          // inclusive 内分流——在场用「其余在场人物」，已识别
+          // 但未入画（画外音）用「画面内人物」（此时画面内的人
+          // 全都不是说话人，「其余」无所指）。单人镜头他人为空
+          // 不写；台词 <d> 内外一字不改。
+          const speakerCode = r.codes[0] ?? "";
+          const others = beatCast.inclusive.filter(
+            (c) => c !== speakerCode,
+          );
+          if (others.length >= 1) {
+            sentences.push(
+              beatCast.inclusive.includes(speakerCode)
+                ? "。其余在场人物保持闭嘴、不出声。"
+                : "。画面内人物保持闭嘴、不出声。",
+            );
+          }
         }
       } else {
         // 说话人不在本镜头已定义主体里：按剧本原名引用，不断台词。
@@ -6300,8 +6723,31 @@ export function buildH3TextForGroup(
           sentences.push(
             `${beat.speaker.trim()} (S${sNo}) ${verb}，<d>[Chinese] ${line}</d>`,
           );
+          // v6.69 他人闭嘴句（R2）：说话人不在画面内主体里，画
+          // 面内的人全都不是说话人——有人在场才写「画面内人
+          // 物」版。
+          if (beatCast.inclusive.length >= 1) {
+            sentences.push("。画面内人物保持闭嘴、不出声。");
+          }
         }
       }
+    }
+    // v6.69 逐拍静默句（R4）：本镜头有台词、但本拍无台词且时长
+    // ≥ H3_SILENCE_MIN_SECONDS 时，把这段留白写成肯定式静默句，
+    // 不给模型在留白处自己补人声的空子（禁否定式措辞）。整镜无
+    // 台词时不写（overall_soundscape 已写「本镜头无人说话」）；
+    // 有台词的拍不写。时间戳相对本镜头起点，与 At 切点同口径。
+    // 位置在本拍最后一句（台词块之后）。
+    if (
+      !line &&
+      hasAnyLine &&
+      beat.duration >= H3_SILENCE_MIN_SECONDS &&
+      Number.isFinite(beat.start) &&
+      Number.isFinite(beat.end)
+    ) {
+      sentences.push(
+        `本镜 ${h3Timecode(beat.start - g.start)}–${h3Timecode(beat.end - g.start)} 完全安静，只有环境底噪持续。`,
+      );
     }
     const timePrefix =
       bi === 0 ? "" : ` At ${h3Timecode(beat.start - g.start)},`;
@@ -6334,11 +6780,18 @@ export function buildH3TextForGroup(
   }
   cast.forEach((e, i) => {
     const info = infos.get(e.code);
-    const lookText = (info?.look ?? "")
-      .split(/[；;]+/)
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .join("，");
+    const pic = pictureOf.get(e.code);
+    // v6.66 以图为准（H1）：有参考图的人物，定义句不再带任何外貌
+    // 文字（拆解出来的造型文字未与资产图核对过、会与图打架），只
+    // 留身份首段；无图人物照旧带 canonical 造型。
+    const lookText =
+      pic != null
+        ? ""
+        : (info?.look ?? "")
+            .split(/[；;]+/)
+            .map((x) => x.trim())
+            .filter(Boolean)
+            .join("，");
     const row = script.characterRows.find((r) => r.name.trim() === e.code);
     const identityFirst =
       (row?.identity ?? info?.role ?? "")
@@ -6351,7 +6804,6 @@ export function buildH3TextForGroup(
     }
     if (lookText) descParts.push(lookText);
     const desc = descParts.join("，") || e.label;
-    const pic = pictureOf.get(e.code);
     let lineText =
       pic != null
         ? `<Subject ${i + 1}> 是 <Picture ${pic}> 中的${desc}。`
@@ -6367,7 +6819,9 @@ export function buildH3TextForGroup(
     // 原文整行照写（见本节头部 v6.45 说明与张力点）。
     const voice = (info?.voice ?? "").trim();
     if (voice) {
-      defLines.push(`<Subject ${i + 1}> 的音色：${voice}。`);
+      // v6.69（R1）：音色原文一字不动，行尾恒跟锁定句（常量逐字
+      // 复用）；音色为空时整行不出、锁定句也不出，绝不编造。
+      defLines.push(`<Subject ${i + 1}> 的音色：${voice}。${H3_VOICE_LOCK}`);
     }
   });
 
@@ -6402,9 +6856,18 @@ export function buildH3TextForGroup(
     const heightClause = `${lookHead}保持不变`.includes("相对身高与体型")
       ? ""
       : "，相对身高与体型保持不变";
-    retLines.push(
-      `<Subject ${i + 1}>${appearsText}: fully_preserved - ${lookHead}保持不变${heightClause}，只有表情、动作与朝向随剧情改变。`,
-    );
+    // v6.66 以图为准（H1）：有参考图的人物，保留行直接锚定
+    // <Picture K>，不再写未核对的 lookHead 外貌文字。
+    const pic = pictureOf.get(e.code);
+    if (pic != null) {
+      retLines.push(
+        `<Subject ${i + 1}>${appearsText}: fully_preserved - 与 <Picture ${pic}> 锁定的面部五官、发型与服装完全一致，相对身高与体型保持不变，只有表情、动作与朝向随剧情改变。`,
+      );
+    } else {
+      retLines.push(
+        `<Subject ${i + 1}>${appearsText}: fully_preserved - ${lookHead}保持不变${heightClause}，只有表情、动作与朝向随剧情改变。`,
+      );
+    }
   });
   cast.forEach((e, i) => {
     const pic = pictureOf.get(e.code);
@@ -6439,8 +6902,8 @@ export function buildH3TextForGroup(
   }
   // v6.45 技能对齐：底噪换镜头不断；本镜头没有任何台词时不
   // 假称有对白，改把沉默写出来（技能：沉默是一种选择，要写
-  // 出来，不要留空）。
-  const hasAnyLine = g.beats.some((b) => b.line.trim() !== "");
+  // 出来，不要留空）。hasAnyLine 已在拍循环前算好（v6.69 R4
+  // 需要它在循环内可用），此处直接用同一个量。
   const soundscape = `${sceneName ? `${sceneName}的环境底噪` : "环境底噪"}贯穿本镜头，换镜头时底噪不断。${
     allSfx.length > 0 ? `跟画面动作同步的现场声有${allSfx.join("、")}。` : ""
   }${
@@ -6453,7 +6916,11 @@ export function buildH3TextForGroup(
     `subject_definitions:\n${defLines.join("\n")}`,
     `summary:\n${summary}`,
     `retention_analysis:\n${retLines.join("\n")}`,
-    `detailed_description:\n${[...openingParts, ...shotTexts].filter(Boolean).join("\n")}`,
+    // v6.73：detailed_description 末尾（最后一个 [Shot] 之后、仍
+    // 在本段之内）同步 Seedance 的资产图优先规则一行；其后还有
+    // overall_soundscape 与 non_diegetic_music 两段，位置与
+    // Seedance 的「整镜文本最后一行」不同，不写「同口径」。
+    `detailed_description:\n${[...openingParts, ...shotTexts, ASSET_PRIORITY_RULE].filter(Boolean).join("\n")}`,
     `overall_soundscape:\n${soundscape}`,
     `non_diegetic_music:\nN/A`,
   ];
@@ -6525,6 +6992,9 @@ export interface H3ShotBinding {
   assetId: number | null;
   /** 人物代号（如「A」）。 */
   code: string;
+  /** v6.66：发送端附上的图片地址（可选；buildH3ShotBundles 构造
+   * 时还没有 url，由发送端后附，validate 内的 url 查重只作防御）。 */
+  url?: string | null;
 }
 
 export interface H3ShotBundleItem {
@@ -6555,10 +7025,64 @@ export interface H3ShotBundleItem {
  * 义行逐条核对 <Subject N> ↔ <Picture K> 与 bindings 一致。
  * 通过返回 null，不通过返回原因（中文，给用户看）。
  */
+/** v6.66 组合/变体代号识别（H8）：「B+C」「B/C」「A&B」「A、B」
+ * 这类把两个人拼成一个代号的行不是单人，绝不能当单人参考图绑定
+ * （变装/组合只在镜头提示词里描述，不进人物表——2026-11-18 定）。 */
+const COMBO_CHARACTER_CODE_RE = /[+\/／&＆]|(?:^[A-Za-z]\s*[,，、和与及]\s*[A-Za-z]$)/;
+
+export function isComboCharacterCode(nameOrCode: string): boolean {
+  const s = (nameOrCode ?? "").trim();
+  if (!s) return false;
+  return COMBO_CHARACTER_CODE_RE.test(s);
+}
+
 export function validateH3PictureMapping(
   prompt: string,
   bindings: H3ShotBinding[],
 ): string | null {
+  // v6.66 防御检查（现有调用点 buildH3ShotBundles 已预先排除空绑
+  // 定与 >9 张，这两条在该调用点不可达，只作 validate 自身契约）。
+  if (!bindings || bindings.length === 0) {
+    return "该镜头没有绑定任何参考图";
+  }
+  if (bindings.length > 9) {
+    return `参考图数量超限（当前 ${bindings.length} 张，上限 9 张）`;
+  }
+  // v6.66 新增四项绑定检查（H8/H2）：组合代号、重复 assetId、重复
+  // url、picNum 连续 + apiField 对齐。url 在现有调用点尚未附上
+  // （发送端后附），此处的 url 查重只作防御，真正的查重在发送端。
+  const seenAssetIds = new Map<number, H3ShotBinding>();
+  const seenUrls = new Map<string, H3ShotBinding>();
+  for (let idx = 0; idx < bindings.length; idx++) {
+    const b = bindings[idx];
+    if (!b) continue;
+    const expectedPicNum = idx + 1;
+    if (b.picNum !== expectedPicNum) {
+      return `参考图编号顺序异常：第 ${idx + 1} 项的 picNum 为 ${b.picNum}（应为 ${expectedPicNum}）`;
+    }
+    const expectedApiField = `ref_image_${b.picNum - 1}`;
+    if (b.apiField !== expectedApiField) {
+      return `参考图接口字段不匹配：<Picture ${b.picNum}> 的 apiField 为 ${b.apiField}（应为 ${expectedApiField}）`;
+    }
+    if (isComboCharacterCode(b.code)) {
+      return `检测到组合/群演代号「${b.code}」（${b.roleName}）被当成单人参考图绑定，请先在「剧本审查」删除或拆回独立人物`;
+    }
+    if (b.assetId != null) {
+      const prev = seenAssetIds.get(b.assetId);
+      if (prev) {
+        return `参考图串卡冲突：<Picture ${prev.picNum}>（${prev.roleName}）与 <Picture ${b.picNum}>（${b.roleName}）指向了同一张人物卡（ID: ${b.assetId}），会导致两人共用一张脸`;
+      }
+      seenAssetIds.set(b.assetId, b);
+    }
+    const cleanUrl = (b.url ?? "").trim();
+    if (cleanUrl !== "") {
+      const prevUrlBinding = seenUrls.get(cleanUrl);
+      if (prevUrlBinding) {
+        return `参考图图片重复：<Picture ${prevUrlBinding.picNum}>（${prevUrlBinding.roleName}）与 <Picture ${b.picNum}>（${b.roleName}）使用了完全相同的图片地址，已拦截以防换脸`;
+      }
+      seenUrls.set(cleanUrl, b);
+    }
+  }
   const pics = new Set<number>();
   const re = /<Picture\s+(\d+)>/g;
   let m: RegExpExecArray | null;

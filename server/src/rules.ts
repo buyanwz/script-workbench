@@ -285,6 +285,10 @@ export function collectSpeakerIssues(
 //     extra-with-dialogue，重新拦截、重新提示；
 //   - deleted / mapped：台词与画面提及已清除后不再出现；若日后又有
 //     他的台词（dialogueCount > 0），重新按 pending 检出。
+//   - deleted 是删除墓碑（v6.65 契约）：服务端 autoDesignNewCharacters
+//     的四条候选路径都认墓碑、永不自动加回；本函数的检出口径不变——
+//     deleted 的人日后又有新台词时仍按 pending 检出，交审查页待确认
+//     清单由用户人工定夺（确认后才可能重新入表），不算自动复活。
 // ---------------------------------------------------------------------------
 
 export interface TempCharacterState {
@@ -691,7 +695,7 @@ export function flattenStoryboardBeats(script: RulesScript): FlatBeat[] {
   return out;
 }
 
-interface LensSegment {
+export interface LensSegment {
   /** 段内节拍的 flatIndex 列表（连续）。 */
   flatIndices: number[];
   title: string;
@@ -729,8 +733,10 @@ function segmentTitle(flat: FlatBeat[], seg: LensSegment): string {
   return last && last !== first ? `${first} → ${last}` : first;
 }
 
-/** 按每镜头秒数的时间窗把摊平节拍切成镜头段（原始分配，不做任何超限处理）。 */
-function rawLensSegments(
+/** 按每镜头秒数的时间窗把摊平节拍切成镜头段（原始分配，不做任何超限处理）。
+ * v6.70 起导出：审查页审片台按镜头分组展示时复用同一份切分，镜头序号
+ * 与 detectOverlongLenses 的 lensIndex 同口径（段序号 + 1）。 */
+export function rawLensSegments(
   flat: FlatBeat[],
   lensSeconds: number,
 ): LensSegment[] {
