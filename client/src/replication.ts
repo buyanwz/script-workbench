@@ -31,7 +31,7 @@
 // 真实实现写，不是示意值。凭证与 Geeknow 的 Key 永远不进包——那是
 // 账号连接、不是工作台内容，新账号重连一次即可。
 
-export const REPLICATION_BASELINE = "v6.73";
+export const REPLICATION_BASELINE = "v6.74";
 export const REPLICATION_PACKAGE_VERSION = 2;
 
 export type ReplicationSpec = typeof REPLICATION_SPEC;

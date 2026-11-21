@@ -16,7 +16,7 @@ InferenceSchemaError,
 type ActionsModule,
 type Ctx,
 } from "./local-sdk";
-import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or } from "drizzle-orm";
 import { privileged } from "@space/privileged";
 import * as schema from "./schema";
 import {
@@ -6663,6 +6663,286 @@ const downloadTaskActionResponse = z.object({
   message: z.string(),
   task: downloadTaskOut.nullable(),
 });
+
+// ---------------------------------------------------------------------------
+// v6.74 复刻任务（监控页「点复刻就复刻」一键化，方案 C）共用形状与
+// 辅助函数。复刻链路只以 replicate_jobs 为唯一真相，不双写旧「待解
+// 剖队列」；下载仍只走既有 download_tasks 状态机（防重 + cloudVideoStat
+// 校验与 enqueueDownloadTask 同口径），本节不改那条动作的原有逻辑。
+// ---------------------------------------------------------------------------
+
+const REPLICATE_STATUSES = [
+  "downloading",
+  "ready_for_dissect",
+  "dissecting",
+  "completed",
+  "download_failed",
+  "dissect_failed",
+] as const;
+// 解剖无进展超时：4 小时（以 updatedAtMs 为计时起点，心跳刷新它）。
+// 解剖是小时级的活，绝不用分钟级阈值误杀。
+const DISSECT_STALE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+// 下载侧惰性超时（listReplicateJobs 查询时检查）：底层任务排队或
+// 下载中超过 10 分钟没动静，判下载失败让用户点重试，不静默卡死。
+const REPLICATE_DOWNLOAD_QUEUE_TIMEOUT_MS = 10 * 60 * 1000;
+const REPLICATE_DOWNLOAD_RUN_TIMEOUT_MS = 10 * 60 * 1000;
+// 原片已就绪却 30 分钟没被 Muse 认领，判解剖失败（等接单超时）。
+const REPLICATE_READY_CLAIM_TIMEOUT_MS = 30 * 60 * 1000;
+
+const replicateJobOut = z.object({
+  id: z.number(),
+  monitorVideoId: z.number(),
+  videoId: z.string(),
+  presetId: z.number(),
+  instructionText: z.string(),
+  status: z.enum(REPLICATE_STATUSES),
+  downloadTaskId: z.number().nullable(),
+  cloudPath: z.string(),
+  progressNote: z.string(),
+  errorCode: z.string(),
+  errorMessage: z.string(),
+  createdAtMs: z.number(),
+  updatedAtMs: z.number(),
+  downloadFinishedAtMs: z.number().nullable(),
+  dissectStartedAtMs: z.number().nullable(),
+  finishedAtMs: z.number().nullable(),
+  // 左联 download_tasks 带出的底层下载状态：卡片据此区分「排队
+  // 下载」（queued）与「下载中…」（downloading）；无关联任务时 null。
+  downloadStatus: z
+    .enum(["queued", "downloading", "done", "failed"])
+    .nullable(),
+  downloadError: z.string().nullable(),
+});
+
+type ReplicateJobRow = typeof schema.replicateJobs.$inferSelect;
+type ReplicateJobOut = z.infer<typeof replicateJobOut>;
+
+function replicateJobToOut(
+  r: ReplicateJobRow,
+  downloadTask?: { status: string; errorMessage: string } | null,
+): ReplicateJobOut {
+  const ds =
+    downloadTask &&
+    (downloadTask.status === "queued" ||
+      downloadTask.status === "downloading" ||
+      downloadTask.status === "done" ||
+      downloadTask.status === "failed")
+      ? (downloadTask.status as "queued" | "downloading" | "done" | "failed")
+      : null;
+  return {
+    id: r.id,
+    monitorVideoId: r.monitorVideoId,
+    videoId: r.videoId,
+    presetId: r.presetId,
+    instructionText: r.instructionText,
+    status: r.status,
+    downloadTaskId: r.downloadTaskId ?? null,
+    cloudPath: r.cloudPath,
+    progressNote: r.progressNote,
+    errorCode: r.errorCode,
+    errorMessage: r.errorMessage,
+    createdAtMs: r.createdAtMs,
+    updatedAtMs: r.updatedAtMs,
+    downloadFinishedAtMs: r.downloadFinishedAtMs ?? null,
+    dissectStartedAtMs: r.dissectStartedAtMs ?? null,
+    finishedAtMs: r.finishedAtMs ?? null,
+    downloadStatus: ds,
+    downloadError: downloadTask ? downloadTask.errorMessage || null : null,
+  };
+}
+
+function replicateCloudPathFor(videoId: string): string {
+  return `/home/hatch/workspace/video-cloud/videos/${videoId}.mp4`;
+}
+
+// 与 enqueueDownloadTask 完全同口径的建单逻辑（防重 + done 任务经
+// cloudVideoStat 复核文件仍在才算已存好），供 createReplicateJob /
+// retryReplicateJob 复用；enqueueDownloadTask 本体一字不动，单独点
+// 「下载原片」零副作用。
+type EnqueueForReplicateResult =
+  | {
+      outcome: "already_saved" | "already_active" | "created";
+      task: DownloadTaskRow;
+    }
+  | { outcome: "not_found"; task: null };
+
+async function enqueueDownloadForReplicate(
+  ctx: Ctx,
+  videoId: string,
+): Promise<EnqueueForReplicateResult> {
+  const db = ctx.db<typeof schema>();
+  const active = await db
+    .select()
+    .from(schema.downloadTasks)
+    .where(
+      and(
+        eq(schema.downloadTasks.videoId, videoId),
+        or(
+          eq(schema.downloadTasks.status, "queued"),
+          eq(schema.downloadTasks.status, "downloading"),
+        ),
+      ),
+    )
+    .orderBy(asc(schema.downloadTasks.createdAtMs), asc(schema.downloadTasks.id))
+    .limit(1);
+  const activeRow = active[0];
+  if (activeRow) return { outcome: "already_active", task: activeRow };
+  const doneRows = await db
+    .select()
+    .from(schema.downloadTasks)
+    .where(
+      and(
+        eq(schema.downloadTasks.videoId, videoId),
+        eq(schema.downloadTasks.status, "done"),
+      ),
+    )
+    .orderBy(desc(schema.downloadTasks.createdAtMs), desc(schema.downloadTasks.id))
+    .limit(1);
+  const doneRow = doneRows[0];
+  if (doneRow) {
+    let fileStillThere = true;
+    if (CLOUD_VIDEO_ID_RE.test(videoId)) {
+      try {
+        const stat = await ctx.executePrivileged(privileged.cloudVideoStat, {
+          videoId,
+        });
+        fileStillThere = stat.exists;
+      } catch {
+        fileStillThere = true;
+      }
+    }
+    if (fileStillThere) return { outcome: "already_saved", task: doneRow };
+  }
+  const cardRows = await db
+    .select({
+      video: schema.monitorVideos,
+      account: schema.monitorAccounts,
+    })
+    .from(schema.monitorVideos)
+    .innerJoin(
+      schema.monitorAccounts,
+      eq(schema.monitorVideos.accountId, schema.monitorAccounts.id),
+    )
+    .where(eq(schema.monitorVideos.videoId, videoId))
+    .orderBy(asc(schema.monitorVideos.id))
+    .limit(1);
+  const card = cardRows[0];
+  if (!card) return { outcome: "not_found", task: null };
+  const now = Date.now();
+  const inserted = await db
+    .insert(schema.downloadTasks)
+    .values({
+      videoId,
+      title: monitorCardTitle(card.video.description, videoId),
+      pageUrl: card.video.videoUrl,
+      platform: card.account.platform,
+      creatorName: card.account.name,
+      presetId: 1,
+      status: "queued",
+      errorMessage: "",
+      sha256: "",
+      cloudPath: "",
+      createdAtMs: now,
+      updatedAtMs: now,
+    })
+    .returning();
+  const row = inserted[0];
+  if (!row) return { outcome: "not_found", task: null };
+  return { outcome: "created", task: row };
+}
+
+// listReplicateJobs 的惰性超时检查：把卡死的活跃任务推进到失败态
+// 并落库（失败必显、不静默卡死）。返回是否发生过推进。
+async function applyReplicateLazyTimeouts(ctx: Ctx): Promise<boolean> {
+  const db = ctx.db<typeof schema>();
+  const now = Date.now();
+  const rows = await db
+    .select()
+    .from(schema.replicateJobs)
+    .where(
+      or(
+        eq(schema.replicateJobs.status, "downloading"),
+        eq(schema.replicateJobs.status, "ready_for_dissect"),
+        eq(schema.replicateJobs.status, "dissecting"),
+      ),
+    );
+  let changed = false;
+  for (const job of rows) {
+    let patch: Partial<ReplicateJobRow> | null = null;
+    if (job.status === "downloading") {
+      let task: DownloadTaskRow | undefined;
+      if (job.downloadTaskId != null) {
+        const trows = await db
+          .select()
+          .from(schema.downloadTasks)
+          .where(eq(schema.downloadTasks.id, job.downloadTaskId))
+          .limit(1);
+        task = trows[0];
+      }
+      if (task?.status === "queued") {
+        if (now - task.createdAtMs > REPLICATE_DOWNLOAD_QUEUE_TIMEOUT_MS) {
+          patch = {
+            status: "download_failed",
+            errorCode: "download_queue_timeout",
+            errorMessage:
+              "排队等下载等太久了还没开始，请点重试再试一次。",
+            updatedAtMs: now,
+          };
+        }
+      } else if (task?.status === "downloading") {
+        const since = task.claimedAtMs ?? task.updatedAtMs;
+        if (now - since > REPLICATE_DOWNLOAD_RUN_TIMEOUT_MS) {
+          patch = {
+            status: "download_failed",
+            errorCode: "download_timeout",
+            errorMessage: "下载等太久了还没下完，请点重试再试一次。",
+            updatedAtMs: now,
+          };
+        }
+      } else if (!task) {
+        // 没有底层任务可查时以任务自身计时兜底，避免永远挂着。
+        if (now - job.updatedAtMs > REPLICATE_DOWNLOAD_QUEUE_TIMEOUT_MS) {
+          patch = {
+            status: "download_failed",
+            errorCode: "download_queue_timeout",
+            errorMessage:
+              "排队等下载等太久了还没开始，请点重试再试一次。",
+            updatedAtMs: now,
+          };
+        }
+      }
+    } else if (job.status === "ready_for_dissect") {
+      if (now - job.updatedAtMs > REPLICATE_READY_CLAIM_TIMEOUT_MS) {
+        patch = {
+          status: "dissect_failed",
+          errorCode: "dissect_claim_timeout",
+          errorMessage:
+            "原片已经备好了，但等了半小时还没开始解剖，请点重试再排一次。",
+          updatedAtMs: now,
+        };
+      }
+    } else if (job.status === "dissecting") {
+      if (now - job.updatedAtMs > DISSECT_STALE_TIMEOUT_MS) {
+        patch = {
+          status: "dissect_failed",
+          errorCode: "dissect_stale",
+          errorMessage:
+            "解剖进行了很久一直没有新进展，请点重试再试一次。",
+          updatedAtMs: now,
+        };
+      }
+    }
+    if (patch) {
+      await db
+        .update(schema.replicateJobs)
+        .set(patch)
+        .where(eq(schema.replicateJobs.id, job.id));
+      changed = true;
+    }
+  }
+  if (changed) ctx.invalidateQueries();
+  return changed;
+}
 
 // ---------------------------------------------------------------------------
 // v6.43 融合分析实现抽取：原 fuseCharacterFeatures 的整份实现（入参
@@ -15544,6 +15824,646 @@ removeDissectQueueItem: defineAction({
       await writeDissectQueueStored(ctx, next);
     }
     return { ok: true, items: await loadDissectQueueItems(ctx) };
+  },
+}),
+
+// ---------------------------------------------------------------------------
+// v6.74 复刻任务动作组（方案 C）：监控页点「复刻」建任务后全程自动
+// 推进。createReplicateJob / retryReplicateJob 建完下载任务后不触发
+// 任何立即取件，靠既有 2 分钟取件 cron 兜底（服务端没有任何通道能
+// 唤醒 Muse 侧定时任务）；取件成功/失败收尾后调
+// syncReplicateJobFromDownloadTask 同步状态；Muse 侧到件监听用
+// claim / heartbeat / complete / fail 推进解剖阶段。新链路只以
+// replicate_jobs 为唯一真相，不写旧待解剖队列。
+// ---------------------------------------------------------------------------
+
+createReplicateJob: defineAction({
+  description: "建一条复刻任务（监控页点「复刻」选好预设后调用）：已有活跃复刻任务直接回带不重复建；原片已在云端库直接进「已就绪」，否则经既有下载队列排队下载（只下这一条），下载完由取件收尾同步自动开拆。",
+  request: z.object({
+    monitorVideoId: z.number().int().nonnegative(),
+    videoId: z.string().trim().min(1).max(120),
+    presetId: z.number().int().positive(),
+    instructionText: z.string().max(20000),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    message: z.string(),
+    job: replicateJobOut.nullable(),
+  }),
+  privileged: [privileged.cloudVideoStat],
+  async handler(
+    ctx,
+    args,
+  ): Promise<{
+    ok: boolean;
+    message: string;
+    job: ReplicateJobOut | null;
+  }> {
+    const db = ctx.db<typeof schema>();
+    // 1) 幂等：同 videoId 已有活跃任务直接回带。
+    const activeRows = await db
+      .select()
+      .from(schema.replicateJobs)
+      .where(
+        and(
+          eq(schema.replicateJobs.videoId, args.videoId),
+          or(
+            eq(schema.replicateJobs.status, "downloading"),
+            eq(schema.replicateJobs.status, "ready_for_dissect"),
+            eq(schema.replicateJobs.status, "dissecting"),
+          ),
+        ),
+      )
+      .orderBy(desc(schema.replicateJobs.createdAtMs), desc(schema.replicateJobs.id))
+      .limit(1);
+    const activeJob = activeRows[0];
+    if (activeJob) {
+      let dt: DownloadTaskRow | undefined;
+      if (activeJob.downloadTaskId != null) {
+        const trows = await db
+          .select()
+          .from(schema.downloadTasks)
+          .where(eq(schema.downloadTasks.id, activeJob.downloadTaskId))
+          .limit(1);
+        dt = trows[0];
+      }
+      return {
+        ok: true,
+        message: "这条已经在复刻流程里了，不用重复点。",
+        job: replicateJobToOut(activeJob, dt ?? null),
+      };
+    }
+    // 2) 按 enqueueDownloadTask 的真实四种 outcome 分支。
+    const enq = await enqueueDownloadForReplicate(ctx, args.videoId);
+    if (enq.outcome === "not_found") {
+      return {
+        ok: false,
+        message:
+          "没找到这条视频的卡片，可能已经被删掉了，刷新一下页面再试。",
+        job: null,
+      };
+    }
+    const now = Date.now();
+    if (enq.outcome === "already_saved") {
+      const inserted = await db
+        .insert(schema.replicateJobs)
+        .values({
+          monitorVideoId: args.monitorVideoId,
+          videoId: args.videoId,
+          presetId: args.presetId,
+          instructionText: args.instructionText,
+          status: "ready_for_dissect",
+          downloadTaskId: enq.task.id,
+          cloudPath:
+            enq.task.cloudPath || replicateCloudPathFor(args.videoId),
+          progressNote: "",
+          errorCode: "",
+          errorMessage: "",
+          createdAtMs: now,
+          updatedAtMs: now,
+          downloadFinishedAtMs: enq.task.doneAtMs ?? now,
+        })
+        .returning();
+      const row = inserted[0];
+      if (!row)
+        return { ok: false, message: "复刻任务没建成，请再点一次试试。", job: null };
+      ctx.invalidateQueries();
+      return {
+        ok: true,
+        message: "原片已在库里，已自动排入解剖。",
+        job: replicateJobToOut(row, enq.task),
+      };
+    }
+    // already_active / created → downloading 并绑定 downloadTaskId。
+    const inserted = await db
+      .insert(schema.replicateJobs)
+      .values({
+        monitorVideoId: args.monitorVideoId,
+        videoId: args.videoId,
+        presetId: args.presetId,
+        instructionText: args.instructionText,
+        status: "downloading",
+        downloadTaskId: enq.task.id,
+        cloudPath: "",
+        progressNote: "",
+        errorCode: "",
+        errorMessage: "",
+        createdAtMs: now,
+        updatedAtMs: now,
+      })
+      .returning();
+    const row = inserted[0];
+    if (!row)
+      return { ok: false, message: "复刻任务没建成，请再点一次试试。", job: null };
+    ctx.invalidateQueries();
+    return {
+      ok: true,
+      message: "已开始下载原片，完成后自动开始解剖。",
+      job: replicateJobToOut(row, enq.task),
+    };
+  },
+}),
+
+listReplicateJobs: defineAction({
+  description: "批量查复刻任务最新状态（监控页卡片显示用）：可按 videoIds / monitorVideoIds / statuses 过滤，不传过滤返回全部；每条带底层下载状态区分排队与下载中；查询时顺带把超时的活跃任务推进到失败态。",
+  request: z.object({
+    videoIds: z.array(z.string().trim().min(1).max(120)).max(500).optional(),
+    monitorVideoIds: z.array(z.number().int().nonnegative()).max(500).optional(),
+    statuses: z.array(z.enum(REPLICATE_STATUSES)).max(6).optional(),
+  }),
+  response: z.object({ jobs: z.array(replicateJobOut) }),
+  async handler(ctx, args): Promise<{ jobs: ReplicateJobOut[] }> {
+    await applyReplicateLazyTimeouts(ctx);
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.replicateJobs)
+      .orderBy(desc(schema.replicateJobs.createdAtMs), desc(schema.replicateJobs.id));
+    const filtered = rows.filter((r) => {
+      if (args.videoIds && args.videoIds.length > 0 && !args.videoIds.includes(r.videoId))
+        return false;
+      if (
+        args.monitorVideoIds &&
+        args.monitorVideoIds.length > 0 &&
+        !args.monitorVideoIds.includes(r.monitorVideoId)
+      )
+        return false;
+      if (args.statuses && args.statuses.length > 0 && !args.statuses.includes(r.status))
+        return false;
+      return true;
+    });
+    const taskIds = [
+      ...new Set(
+        filtered
+          .map((r) => r.downloadTaskId)
+          .filter((v): v is number => v != null),
+      ),
+    ];
+    const taskById = new Map<number, DownloadTaskRow>();
+    if (taskIds.length > 0) {
+      const trows = await db
+        .select()
+        .from(schema.downloadTasks)
+        .where(inArray(schema.downloadTasks.id, taskIds));
+      for (const t of trows) taskById.set(t.id, t);
+    }
+    return {
+      jobs: filtered.map((r) =>
+        replicateJobToOut(
+          r,
+          r.downloadTaskId != null ? (taskById.get(r.downloadTaskId) ?? null) : null,
+        ),
+      ),
+    };
+  },
+}),
+
+syncReplicateJobFromDownloadTask: defineAction({
+  description: "取件收尾同步（取件员在 completeDownloadTask / failDownloadTask 后调用）：按 downloadTaskId 找关联且正等下载的复刻任务，下载完成且本地文件复核在位才推进到「已就绪」，下载失败同步成下载失败并带大白话原因；没有关联复刻任务时静默返回 updated=0。",
+  request: z.object({ downloadTaskId: z.number().int().positive() }),
+  response: z.object({
+    ok: z.boolean(),
+    updated: z.number(),
+    message: z.string(),
+  }),
+  privileged: [privileged.cloudVideoStat],
+  async handler(
+    ctx,
+    args,
+  ): Promise<{ ok: boolean; updated: number; message: string }> {
+    const db = ctx.db<typeof schema>();
+    const trows = await db
+      .select()
+      .from(schema.downloadTasks)
+      .where(eq(schema.downloadTasks.id, args.downloadTaskId))
+      .limit(1);
+    const task = trows[0];
+    if (!task) return { ok: true, updated: 0, message: "下载任务不存在，无需同步。" };
+    const jobs = await db
+      .select()
+      .from(schema.replicateJobs)
+      .where(
+        and(
+          eq(schema.replicateJobs.downloadTaskId, args.downloadTaskId),
+          eq(schema.replicateJobs.status, "downloading"),
+        ),
+      );
+    if (jobs.length === 0)
+      return { ok: true, updated: 0, message: "没有关联的复刻任务。" };
+    const now = Date.now();
+    let updated = 0;
+    for (const job of jobs) {
+      if (task.status === "done") {
+        // 硬闸门：只认本地文件，绝不拿直链凑合。复核文件仍在且
+        // 大小 > 0 才算就绪；文件异常阻断并标下载失败。
+        let okFile = false;
+        if (CLOUD_VIDEO_ID_RE.test(job.videoId)) {
+          try {
+            const stat = await ctx.executePrivileged(
+              privileged.cloudVideoStat,
+              { videoId: job.videoId },
+            );
+            okFile = stat.exists && stat.sizeBytes > 0;
+          } catch {
+            okFile = false;
+          }
+        }
+        if (okFile) {
+          await db
+            .update(schema.replicateJobs)
+            .set({
+              status: "ready_for_dissect",
+              cloudPath: task.cloudPath || replicateCloudPathFor(job.videoId),
+              errorCode: "",
+              errorMessage: "",
+              downloadFinishedAtMs: now,
+              updatedAtMs: now,
+            })
+            .where(eq(schema.replicateJobs.id, job.id));
+        } else {
+          await db
+            .update(schema.replicateJobs)
+            .set({
+              status: "download_failed",
+              errorCode: "verify_failed",
+              errorMessage:
+                "下载说完成了，但本地没找到完整的原片文件，请点重试再试一次。",
+              updatedAtMs: now,
+            })
+            .where(eq(schema.replicateJobs.id, job.id));
+        }
+        updated += 1;
+      } else if (task.status === "failed") {
+        await db
+          .update(schema.replicateJobs)
+          .set({
+            status: "download_failed",
+            errorCode: "download_failed",
+            errorMessage:
+              task.errorMessage || "下载没成功，请点重试再试一次。",
+            updatedAtMs: now,
+          })
+          .where(eq(schema.replicateJobs.id, job.id));
+        updated += 1;
+      }
+    }
+    if (updated > 0) ctx.invalidateQueries();
+    return { ok: true, updated, message: `已同步 ${updated} 条复刻任务。` };
+  },
+}),
+
+claimReplicateJobForDissect: defineAction({
+  description: "Muse 到件监听认领一条已就绪的复刻任务开始解剖：先硬闸门复核本地原片仍在，再条件更新 ready_for_dissect → dissecting（防并发重复开拆）；文件不在或已被认领时回 ok=false 并说明。",
+  request: z.object({ id: z.number().int().positive() }),
+  response: z.object({
+    ok: z.boolean(),
+    message: z.string(),
+    job: replicateJobOut.nullable(),
+  }),
+  privileged: [privileged.cloudVideoStat],
+  async handler(
+    ctx,
+    args,
+  ): Promise<{ ok: boolean; message: string; job: ReplicateJobOut | null }> {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.replicateJobs)
+      .where(eq(schema.replicateJobs.id, args.id))
+      .limit(1);
+    const job = rows[0];
+    if (!job) return { ok: false, message: "这条复刻任务不存在了。", job: null };
+    if (job.status !== "ready_for_dissect") {
+      return {
+        ok: false,
+        message: "这条任务现在不是待解剖状态，不能认领。",
+        job: replicateJobToOut(job),
+      };
+    }
+    // 硬闸门：解剖前只认本地文件 ~/workspace/video-cloud/videos/{videoId}.mp4。
+    let okFile = false;
+    if (CLOUD_VIDEO_ID_RE.test(job.videoId)) {
+      try {
+        const stat = await ctx.executePrivileged(privileged.cloudVideoStat, {
+          videoId: job.videoId,
+        });
+        okFile = stat.exists && stat.sizeBytes > 0;
+      } catch {
+        okFile = false;
+      }
+    }
+    if (!okFile) {
+      const now = Date.now();
+      await db
+        .update(schema.replicateJobs)
+        .set({
+          status: "download_failed",
+          errorCode: "local_file_missing",
+          errorMessage:
+            "本地原片文件不见了，没法开始解剖，请点重试重新下载。",
+          updatedAtMs: now,
+        })
+        .where(eq(schema.replicateJobs.id, job.id));
+      ctx.invalidateQueries();
+      return {
+        ok: false,
+        message: "本地原片文件不见了，已标为下载失败，等用户点重试。",
+        job: null,
+      };
+    }
+    const now = Date.now();
+    const updated = await db
+      .update(schema.replicateJobs)
+      .set({
+        status: "dissecting",
+        dissectStartedAtMs: now,
+        updatedAtMs: now,
+        errorCode: "",
+        errorMessage: "",
+      })
+      .where(
+        and(
+          eq(schema.replicateJobs.id, args.id),
+          eq(schema.replicateJobs.status, "ready_for_dissect"),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (!row) {
+      return {
+        ok: false,
+        message: "这条任务刚被别人认领走了。",
+        job: replicateJobToOut(job),
+      };
+    }
+    ctx.invalidateQueries();
+    return { ok: true, message: "已认领，开始解剖。", job: replicateJobToOut(row) };
+  },
+}),
+
+heartbeatReplicateJob: defineAction({
+  description: "Muse 解剖进行中心跳：刷新 updatedAtMs 并可更新进展说明（progressNote），防止长时间正常精修被误判无进展超时。",
+  request: z.object({
+    id: z.number().int().positive(),
+    progressNote: z.string().trim().max(500).optional(),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    message: z.string(),
+    job: replicateJobOut.nullable(),
+  }),
+  async handler(
+    ctx,
+    args,
+  ): Promise<{ ok: boolean; message: string; job: ReplicateJobOut | null }> {
+    const db = ctx.db<typeof schema>();
+    const now = Date.now();
+    const patch: Partial<ReplicateJobRow> = { updatedAtMs: now };
+    if (args.progressNote !== undefined) patch.progressNote = args.progressNote;
+    const updated = await db
+      .update(schema.replicateJobs)
+      .set(patch)
+      .where(
+        and(
+          eq(schema.replicateJobs.id, args.id),
+          eq(schema.replicateJobs.status, "dissecting"),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (!row) {
+      const existing = await db
+        .select()
+        .from(schema.replicateJobs)
+        .where(eq(schema.replicateJobs.id, args.id))
+        .limit(1);
+      const cur = existing[0];
+      if (!cur) return { ok: false, message: "这条复刻任务不存在了。", job: null };
+      return {
+        ok: false,
+        message: "这条任务现在不是解剖中状态，心跳没记上。",
+        job: replicateJobToOut(cur),
+      };
+    }
+    ctx.invalidateQueries();
+    return { ok: true, message: "心跳已记。", job: replicateJobToOut(row) };
+  },
+}),
+
+completeReplicateJob: defineAction({
+  description: "Muse 解剖收尾：把 dissecting 的复刻任务标为已完成（写 finishedAtMs）。",
+  request: z.object({ id: z.number().int().positive() }),
+  response: z.object({
+    ok: z.boolean(),
+    message: z.string(),
+    job: replicateJobOut.nullable(),
+  }),
+  async handler(
+    ctx,
+    args,
+  ): Promise<{ ok: boolean; message: string; job: ReplicateJobOut | null }> {
+    const db = ctx.db<typeof schema>();
+    const now = Date.now();
+    const updated = await db
+      .update(schema.replicateJobs)
+      .set({ status: "completed", finishedAtMs: now, updatedAtMs: now })
+      .where(
+        and(
+          eq(schema.replicateJobs.id, args.id),
+          eq(schema.replicateJobs.status, "dissecting"),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (!row) {
+      const existing = await db
+        .select()
+        .from(schema.replicateJobs)
+        .where(eq(schema.replicateJobs.id, args.id))
+        .limit(1);
+      const cur = existing[0];
+      if (!cur) return { ok: false, message: "这条复刻任务不存在了。", job: null };
+      return {
+        ok: false,
+        message: "这条任务现在不是解剖中状态，没法标完成。",
+        job: replicateJobToOut(cur),
+      };
+    }
+    ctx.invalidateQueries();
+    return { ok: true, message: "已标为复刻完成。", job: replicateJobToOut(row) };
+  },
+}),
+
+failReplicateJob: defineAction({
+  description: "Muse 解剖收尾（失败）：把 dissecting 的复刻任务标为解剖失败，errorMessage 写大白话原因，卡片上可一键重试。",
+  request: z.object({
+    id: z.number().int().positive(),
+    errorMessage: z.string().trim().min(1).max(500),
+    errorCode: z.string().trim().max(60).optional(),
+  }),
+  response: z.object({
+    ok: z.boolean(),
+    message: z.string(),
+    job: replicateJobOut.nullable(),
+  }),
+  async handler(
+    ctx,
+    args,
+  ): Promise<{ ok: boolean; message: string; job: ReplicateJobOut | null }> {
+    const db = ctx.db<typeof schema>();
+    const now = Date.now();
+    const updated = await db
+      .update(schema.replicateJobs)
+      .set({
+        status: "dissect_failed",
+        errorCode: args.errorCode ?? "dissect_failed",
+        errorMessage: args.errorMessage,
+        finishedAtMs: now,
+        updatedAtMs: now,
+      })
+      .where(
+        and(
+          eq(schema.replicateJobs.id, args.id),
+          eq(schema.replicateJobs.status, "dissecting"),
+        ),
+      )
+      .returning();
+    const row = updated[0];
+    if (!row) {
+      const existing = await db
+        .select()
+        .from(schema.replicateJobs)
+        .where(eq(schema.replicateJobs.id, args.id))
+        .limit(1);
+      const cur = existing[0];
+      if (!cur) return { ok: false, message: "这条复刻任务不存在了。", job: null };
+      return {
+        ok: false,
+        message: "这条任务现在不是解剖中状态，没法标失败。",
+        job: replicateJobToOut(cur),
+      };
+    }
+    ctx.invalidateQueries();
+    return { ok: true, message: "已标为解剖失败。", job: replicateJobToOut(row) };
+  },
+}),
+
+retryReplicateJob: defineAction({
+  description: "卡片失败一键重试：下载失败重新排队下载这一条；解剖失败先复核本地原片，文件还在直接回「已就绪」不重复下载，只有文件丢了才重新下载。",
+  request: z.object({ id: z.number().int().positive() }),
+  response: z.object({
+    ok: z.boolean(),
+    message: z.string(),
+    job: replicateJobOut.nullable(),
+  }),
+  privileged: [privileged.cloudVideoStat],
+  async handler(
+    ctx,
+    args,
+  ): Promise<{ ok: boolean; message: string; job: ReplicateJobOut | null }> {
+    const db = ctx.db<typeof schema>();
+    const rows = await db
+      .select()
+      .from(schema.replicateJobs)
+      .where(eq(schema.replicateJobs.id, args.id))
+      .limit(1);
+    const job = rows[0];
+    if (!job) return { ok: false, message: "这条复刻任务不存在了。", job: null };
+    if (job.status !== "download_failed" && job.status !== "dissect_failed") {
+      return {
+        ok: false,
+        message: "这条任务现在不是失败状态，不用重试。",
+        job: replicateJobToOut(job),
+      };
+    }
+    const now = Date.now();
+    // 解剖失败：先复核原片，文件还在直接回已就绪，绝不重复下载。
+    if (job.status === "dissect_failed") {
+      let okFile = false;
+      if (CLOUD_VIDEO_ID_RE.test(job.videoId)) {
+        try {
+          const stat = await ctx.executePrivileged(privileged.cloudVideoStat, {
+            videoId: job.videoId,
+          });
+          okFile = stat.exists && stat.sizeBytes > 0;
+        } catch {
+          okFile = false;
+        }
+      }
+      if (okFile) {
+        const updated = await db
+          .update(schema.replicateJobs)
+          .set({
+            status: "ready_for_dissect",
+            cloudPath: job.cloudPath || replicateCloudPathFor(job.videoId),
+            errorCode: "",
+            errorMessage: "",
+            finishedAtMs: null,
+            updatedAtMs: now,
+          })
+          .where(eq(schema.replicateJobs.id, job.id))
+          .returning();
+        const row = updated[0];
+        ctx.invalidateQueries();
+        return {
+          ok: true,
+          message: "原片还在，已重新排入解剖，不用再下载。",
+          job: row ? replicateJobToOut(row) : null,
+        };
+      }
+    }
+    // 下载失败（或解剖失败但原片已丢）：重新排队下载这一条。
+    const enq = await enqueueDownloadForReplicate(ctx, job.videoId);
+    if (enq.outcome === "not_found") {
+      return {
+        ok: false,
+        message:
+          "没找到这条视频的卡片，可能已经被删掉了，刷新一下页面再试。",
+        job: replicateJobToOut(job),
+      };
+    }
+    if (enq.outcome === "already_saved") {
+      const updated = await db
+        .update(schema.replicateJobs)
+        .set({
+          status: "ready_for_dissect",
+          downloadTaskId: enq.task.id,
+          cloudPath: enq.task.cloudPath || replicateCloudPathFor(job.videoId),
+          errorCode: "",
+          errorMessage: "",
+          finishedAtMs: null,
+          downloadFinishedAtMs: enq.task.doneAtMs ?? now,
+          updatedAtMs: now,
+        })
+        .where(eq(schema.replicateJobs.id, job.id))
+        .returning();
+      const row = updated[0];
+      ctx.invalidateQueries();
+      return {
+        ok: true,
+        message: "原片其实已经存好了，已直接排入解剖。",
+        job: row ? replicateJobToOut(row, enq.task) : null,
+      };
+    }
+    const updated = await db
+      .update(schema.replicateJobs)
+      .set({
+        status: "downloading",
+        downloadTaskId: enq.task.id,
+        errorCode: "",
+        errorMessage: "",
+        finishedAtMs: null,
+        updatedAtMs: now,
+      })
+      .where(eq(schema.replicateJobs.id, job.id))
+      .returning();
+    const row = updated[0];
+    ctx.invalidateQueries();
+    return {
+      ok: true,
+      message: "已重新开始下载原片，完成后自动开始解剖。",
+      job: row ? replicateJobToOut(row, enq.task) : null,
+    };
   },
 }),
 

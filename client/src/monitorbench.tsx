@@ -108,6 +108,9 @@ type FeedVideo = FeedAccount["videos"][number];
 // 回执形状，直接取服务端动作出参，保证前后端一字不差。
 type DownloadTaskInfo = ApiResponse<typeof api, "listDownloadTasks">["tasks"][number];
 type EnqueueDownloadResult = ApiResponse<typeof api, "enqueueDownloadTask">;
+// v6.74 复刻任务（方案 C）：卡片「复刻」按钮的六态状态直接取服务端
+// listReplicateJobs 出参，前后端一字不差。
+type ReplicateJobInfo = ApiResponse<typeof api, "listReplicateJobs">["jobs"][number];
 
 // 用户 2026-11-03 提供的参考视频（快手「幻熊」）的封面已下载存进
 // 本站资源（assets/monitor-huanxiong-cover.jpg）：这条视频的卡片
@@ -2387,6 +2390,88 @@ function useDownloadOriginal(
 }
 
 // ---------------------------------------------------------------------------
+// v6.74 复刻任务状态（方案 C）：挂载时调 listReplicateJobs 一次读回
+// 当前页卡片的复刻状态；仅当存在 downloading / ready_for_dissect /
+// dissecting 活跃任务时以 4 秒间隔轮询（refetchInterval 按数据动态
+// 决定，活跃任务归零即停），页面隐藏时暂停、切回前台补查一次。某
+// 条 videoId 从 downloading 进入 ready_for_dissect 时，顺带刷新下载
+// 任务列表，让同一张卡的「下载原片」按钮同步显示「已存好」。
+// ---------------------------------------------------------------------------
+
+function useReplicateJobs(videoIds: string[]) {
+  const queryClient = useQueryClient();
+  const key = [...new Set(videoIds.filter(Boolean))].sort().join(",");
+  const prevStatusRef = useRef<Map<string, ReplicateJobInfo["status"]>>(
+    new Map(),
+  );
+  const query = useQuery({
+    queryKey: ["replicate-jobs", key],
+    queryFn: () =>
+      withReadTimeout(() =>
+        api.listReplicateJobs({ videoIds: key ? key.split(",") : [] }),
+      ),
+    enabled: key.length > 0,
+    retry: retryReadQuery,
+    refetchInterval: (q) => {
+      if (typeof document !== "undefined" && document.hidden) return false;
+      const jobs = q.state.data?.jobs ?? [];
+      return jobs.some(
+        (j) =>
+          j.status === "downloading" ||
+          j.status === "ready_for_dissect" ||
+          j.status === "dissecting",
+      )
+        ? 4000
+        : false;
+    },
+  });
+  const refetchRef = useRef(query.refetch);
+  refetchRef.current = query.refetch;
+  useEffect(() => {
+    const onVis = () => {
+      if (!document.hidden) void refetchRef.current();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+  const jobs = query.data?.jobs ?? [];
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    let becameReady = false;
+    for (const j of jobs) {
+      if (
+        prev.get(j.videoId) === "downloading" &&
+        j.status === "ready_for_dissect"
+      ) {
+        becameReady = true;
+      }
+      prev.set(j.videoId, j.status);
+    }
+    if (becameReady) {
+      void queryClient.invalidateQueries({ queryKey: ["download-tasks"] });
+    }
+  }, [jobs, queryClient]);
+  // 服务端按创建时间倒序返回，先写者即每条视频的最新一条。
+  const byVideoId = new Map<string, ReplicateJobInfo>();
+  for (const j of jobs) {
+    if (!byVideoId.has(j.videoId)) byVideoId.set(j.videoId, j);
+  }
+  return { jobs, byVideoId, refetch: query.refetch };
+}
+
+// 解剖中已进行时长（给「解剖中…」按钮的 hover 说明用）。
+function replicateElapsedText(job: ReplicateJobInfo): string {
+  const start = job.dissectStartedAtMs ?? job.updatedAtMs;
+  if (!start) return "";
+  const mins = Math.max(0, Math.floor((Date.now() - start) / 60000));
+  if (mins < 1) return "刚开始不到 1 分钟";
+  if (mins < 60) return `已进行约 ${mins} 分钟`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `已进行约 ${h} 小时 ${m} 分钟` : `已进行约 ${h} 小时`;
+}
+
+// ---------------------------------------------------------------------------
 // 卡片底部按钮行：播放 / 详情 / 删除。
 // v6.37 起同一排加「复刻」按钮（在「下载原片」之后、「删除」之
 // 前）：旧「发送到聊天解剖」入口改名加回——点开先选拆解提示词
@@ -2412,6 +2497,8 @@ function MonitorCardButtons({
   downloadTask,
   onEnqueueDownload,
   onReplicate,
+  replicateJob,
+  onRetryReplicate,
   s,
   marginTop,
 }: {
@@ -2420,6 +2507,12 @@ function MonitorCardButtons({
   onPlay: (v: FeedVideo) => void;
   onDetail: (v: FeedVideo) => void;
   onDelete?: (v: FeedVideo) => void;
+  // v6.74：「复刻」按钮六态（方案 C）——replicateJob 是这条视频最新
+  // 一条复刻任务（没有任务时为 null，按钮显示默认「复刻」）；失败
+  // 态点击走 onRetryReplicate 一键重试。不传 replicateJob 时按无任
+  // 务处理（版式预览示例卡走这条，行为与旧版一致）。
+  replicateJob?: ReplicateJobInfo | null;
+  onRetryReplicate?: (job: ReplicateJobInfo) => void;
   // v6.36：「下载原片」按钮与状态（见 useDownloadOriginal）。上层
   // 不传 onEnqueueDownload 时整颗按钮与状态行都不渲染（版式预览
   // 示例卡走这条）；downloadTask 是这条视频最新一条下载任务，
@@ -2529,17 +2622,103 @@ function MonitorCardButtons({
             {downloadButtonLabel(dl.status)}
           </button>
         )}
-        {onReplicate && (
-          <button
-            type="button"
-            className="btn btn-sm flex-auto whitespace-nowrap"
-            style={btnStyle}
-            aria-label={`复刻这条视频（先选拆解提示词预设）：${title}`}
-            onClick={() => onReplicate(video)}
-          >
-            复刻
-          </button>
-        )}
+        {onReplicate &&
+          (() => {
+            // v6.74 复刻按钮六态（方案 C）：状态全部来自服务端
+            // replicate_jobs，按钮顺序与位置不变。
+            const job = replicateJob ?? null;
+            if (!job) {
+              return (
+                <button
+                  type="button"
+                  className="btn btn-sm flex-auto whitespace-nowrap"
+                  style={btnStyle}
+                  aria-label={`复刻这条视频（先选拆解提示词预设）：${title}`}
+                  onClick={() => onReplicate(video)}
+                >
+                  复刻
+                </button>
+              );
+            }
+            if (job.status === "downloading") {
+              const label =
+                job.downloadStatus === "downloading" ? "下载中…" : "排队下载";
+              return (
+                <button
+                  type="button"
+                  className="btn btn-sm flex-auto whitespace-nowrap animate-pulse"
+                  style={btnStyle}
+                  disabled
+                  aria-label={`这条视频正在下载原片，下载完自动开始解剖：${title}`}
+                  title="正在下载原片，下载完会自动开始解剖，不用再点。"
+                >
+                  {label}
+                </button>
+              );
+            }
+            if (job.status === "ready_for_dissect") {
+              return (
+                <button
+                  type="button"
+                  className="btn btn-sm flex-auto whitespace-nowrap"
+                  style={{ ...btnStyle, color: "var(--olive)", borderColor: "var(--olive)" }}
+                  disabled
+                  aria-label={`这条视频原片已就绪，等待开始解剖：${title}`}
+                  title="原片已验盘，等待 Muse 开始解剖"
+                >
+                  已就绪
+                </button>
+              );
+            }
+            if (job.status === "dissecting") {
+              const tip = [
+                job.progressNote || "正在解剖这条视频。",
+                replicateElapsedText(job),
+              ]
+                .filter(Boolean)
+                .join(" ");
+              return (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm flex-auto whitespace-nowrap animate-pulse"
+                  style={btnStyle}
+                  disabled
+                  aria-label={`这条视频正在解剖中：${title}`}
+                  title={tip}
+                >
+                  解剖中…
+                </button>
+              );
+            }
+            if (job.status === "completed") {
+              return (
+                <button
+                  type="button"
+                  className="btn btn-sm flex-auto whitespace-nowrap"
+                  style={{ ...btnStyle, color: "var(--olive)", borderColor: "var(--olive)" }}
+                  aria-label={`这条视频已复刻完成，再点一次重新复刻（原片已在库，不用再下载）：${title}`}
+                  title="已复刻完成。再点一次可以重新复刻，原片已在库里，不用再下载。"
+                  onClick={() => onReplicate(video)}
+                >
+                  已完成 ✓
+                </button>
+              );
+            }
+            // download_failed / dissect_failed：红色警示，点一下重试。
+            const isDownload = job.status === "download_failed";
+            return (
+              <button
+                type="button"
+                className="btn btn-sm flex-auto whitespace-nowrap"
+                style={{ ...btnStyle, color: "var(--bad)", borderColor: "var(--bad)" }}
+                aria-label={`${isDownload ? "下载" : "解剖"}失败，点一下重试：${title}`}
+                title={job.errorMessage || (isDownload ? "下载没成功，点一下重试。" : "解剖没成功，点一下重试。")}
+                onClick={() => onRetryReplicate?.(job)}
+              >
+                {isDownload ? "下载失败 · 重试" : "解剖失败 · 重试"}
+              </button>
+            );
+          })()}
         {onDelete && (
           <button
             type="button"
@@ -2569,6 +2748,22 @@ function MonitorCardButtons({
       {showDownload && dl.note && (
         <p role="status" style={{ ...dlNoteStyle, color: "var(--olive)" }}>
           {dl.note}
+        </p>
+      )}
+      {/* v6.74：复刻失败原因小字（按钮行下方）：失败必显，原因用服
+          务端落库的大白话，点按钮即可重试。 */}
+      {replicateJob &&
+        (replicateJob.status === "download_failed" ||
+          replicateJob.status === "dissect_failed") &&
+        replicateJob.errorMessage && (
+          <p role="alert" style={{ ...dlNoteStyle, color: "var(--bad)" }}>
+            {replicateJob.status === "download_failed" ? "下载失败" : "解剖失败"}：
+            {replicateJob.errorMessage}
+          </p>
+        )}
+      {replicateJob && replicateJob.status === "dissecting" && replicateJob.progressNote && (
+        <p role="status" style={{ ...dlNoteStyle, color: "var(--dim)" }}>
+          解剖进度：{replicateJob.progressNote}
         </p>
       )}
       {/* v6.30（#111610）：第二排「⬇ 下载视频」「⬆ 传文件」两个按钮
@@ -2799,6 +2994,8 @@ function MonitorCardCore({
   pinnedUnknown = false,
   downloadTask,
   onEnqueueDownload,
+  replicateJob,
+  onRetryReplicate,
 }: {
   video: FeedVideo;
   creatorName: string;
@@ -2842,6 +3039,9 @@ function MonitorCardCore({
   // 不传 onEnqueueDownload 时按钮不渲染（版式预览示例卡）。
   downloadTask?: DownloadTaskInfo | null;
   onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
+  // v6.74：复刻任务六态，透传给按钮行。
+  replicateJob?: ReplicateJobInfo | null;
+  onRetryReplicate?: (job: ReplicateJobInfo) => void;
 }) {
   const [coverFailed, setCoverFailed] = useState(false);
   const coverSrc =
@@ -3048,6 +3248,8 @@ function MonitorCardCore({
           refreshFailed={refreshFailed}
           downloadTask={downloadTask}
           onEnqueueDownload={onEnqueueDownload}
+          replicateJob={replicateJob}
+          onRetryReplicate={onRetryReplicate}
           onReplicate={onReplicate}
           s={s}
           marginTop={sz(6, s)}
@@ -3129,6 +3331,8 @@ function MonitorCardCore({
           refreshFailed={refreshFailed}
           downloadTask={downloadTask}
           onEnqueueDownload={onEnqueueDownload}
+          replicateJob={replicateJob}
+          onRetryReplicate={onRetryReplicate}
           onReplicate={onReplicate}
           s={s}
           marginTop={sz(10, s)}
@@ -3227,6 +3431,8 @@ function MonitorCardCore({
         refreshFailed={refreshFailed}
         downloadTask={downloadTask}
         onEnqueueDownload={onEnqueueDownload}
+        replicateJob={replicateJob}
+        onRetryReplicate={onRetryReplicate}
         onReplicate={onReplicate}
         s={s}
         marginTop={sz(8, s)}
@@ -3253,6 +3459,8 @@ function VideoCard({
   cardScale = 1,
   downloadTask,
   onEnqueueDownload,
+  replicateJob,
+  onRetryReplicate,
 }: {
   video: FeedVideo;
   creatorName: string;
@@ -3261,6 +3469,9 @@ function VideoCard({
   // v6.36：「下载原片」任务状态与建任务回调，透传给渲染核。
   downloadTask?: DownloadTaskInfo | null;
   onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
+  // v6.74：复刻任务六态，透传给渲染核。
+  replicateJob?: ReplicateJobInfo | null;
+  onRetryReplicate?: (job: ReplicateJobInfo) => void;
   onDelete: (v: FeedVideo) => void;
   onPlay: (v: FeedVideo) => void;
   onDetail: (v: FeedVideo) => void;
@@ -3299,6 +3510,8 @@ function VideoCard({
       cloudBadge={cloudBadge}
       downloadTask={downloadTask}
       onEnqueueDownload={onEnqueueDownload}
+      replicateJob={replicateJob}
+      onRetryReplicate={onRetryReplicate}
     />
   );
 }
@@ -3682,6 +3895,8 @@ function CompactVideoCard({
   cardScale = 1,
   downloadTask,
   onEnqueueDownload,
+  replicateJob,
+  onRetryReplicate,
 }: {
   video: FeedVideo;
   creatorName: string;
@@ -3707,6 +3922,9 @@ function CompactVideoCard({
   // 版式预览示例卡不传，按钮不渲染。
   downloadTask?: DownloadTaskInfo | null;
   onEnqueueDownload?: (v: FeedVideo) => Promise<EnqueueDownloadResult>;
+  // v6.74：复刻任务六态，透传给渲染核。
+  replicateJob?: ReplicateJobInfo | null;
+  onRetryReplicate?: (job: ReplicateJobInfo) => void;
   // 「最新采集」视图专用：数据行下面再加一行采集时间，让用户
   // 一眼看出这条是什么时候采回来的（没填采集时间时回退入库
   // 时间并标注）。其他视图不传，保持原样。
@@ -3735,6 +3953,8 @@ function CompactVideoCard({
       pinnedUnknown={pinnedUnknown}
       downloadTask={downloadTask}
       onEnqueueDownload={onEnqueueDownload}
+      replicateJob={replicateJob}
+      onRetryReplicate={onRetryReplicate}
     />
   );
 }
@@ -4421,6 +4641,37 @@ export function MonitorBench({
     return res;
   };
 
+  // ------------------------------------------------------------------
+  // v6.74 复刻任务状态（方案 C）：读回当前页全部卡片的复刻状态给
+  // 按钮六态显示；活跃任务存在时 hook 内部 4 秒轮询，归零即停。
+  // 失败态点「重试」调 retryReplicateJob，回来刷新状态与下载任务。
+  // ------------------------------------------------------------------
+  const replicateVideoIds: string[] = [];
+  for (const a of feedQuery.data?.accounts ?? []) {
+    for (const v of a.videos) {
+      if (v.videoId) replicateVideoIds.push(v.videoId);
+    }
+  }
+  const { byVideoId: replicateByVideoId, refetch: refetchReplicateJobs } =
+    useReplicateJobs(replicateVideoIds);
+  const handleRetryReplicate = (job: ReplicateJobInfo) => {
+    void (async () => {
+      try {
+        const res = await api.retryReplicateJob({ id: job.id });
+        setIntakeToast(
+          res.ok
+            ? res.message
+            : `重试没成：${res.message || "请再点一次试试。"}`,
+        );
+      } catch (e) {
+        setIntakeToast(`重试没成：${describeThrownError(e)}`);
+      } finally {
+        await refetchReplicateJobs();
+        await queryClient.invalidateQueries({ queryKey: ["download-tasks"] });
+      }
+    })();
+  };
+
   // v4.88 解剖指令全文窗（自动复制失败时用，指令原文）。
   // v6.22 起：原「没存云端」提示窗已按用户定案删除（点按钮不再
   // 查云端、不再弹窗，点一下就复制 + 入队）。
@@ -4431,16 +4682,15 @@ export function MonitorBench({
   // ------------------------------------------------------------------
   // 卡片 / 详情窗 / 播放窗「复刻」（v4.88 立为「发送到聊天解剖」，
   // v6.22 改点一下直接复制，v6.26 封面入口删除，v6.37 改名「复
-  // 刻」加回并改走预设选择）：
+  // 刻」加回并改走预设选择；v6.74 改一键化方案 C）：
   //   点「复刻」先开 DissectPresetPicker 选择窗（列全部拆解提示
   //   词预设），选中一条后关窗，按现行指令格式拼「视频信息头
-  //   （一字不变）＋选中预设正文全文」复制到剪贴板，toast 明示
-  //   去聊天框粘贴；复制失败弹全文窗让用户手动复制，不静默失
-  //   败。同时入「待解剖队列」（服务端持久化；重复点同视频服
-  //   务端去重、只重新复制指令）。入队失败不拦复制，只在 toast
-  //   里如实带一句。预设列表为空时选择窗只显示提示文案、不复
-  //   制、不入队。选系统默认预设时正文与 DISSECT_CHAT_RULES 常
-  //   量逐字一致，复制结果与旧版「发送到聊天解剖」完全相同。
+  //   （一字不变）＋选中预设正文全文」作为 instructionText 调
+  //   createReplicateJob 建复刻任务，之后全程自动推进（见
+  //   handleReplicatePick 的 v6.74 注释）；不再复制到剪贴板当主
+  //   流程、不再写旧待解剖队列。预设列表为空时选择窗只显示提
+  //   示文案、不建任务。选系统默认预设时正文与
+  //   DISSECT_CHAT_RULES 常量逐字一致，指令内容与旧版相同。
   // ------------------------------------------------------------------
   const [replicateTarget, setReplicateTarget] = useState<{
     video: FeedVideo;
@@ -4450,36 +4700,52 @@ export function MonitorBench({
     setReplicateTarget({ video, creatorName });
   };
   const dissectBusyRef = useRef<Set<string>>(new Set());
+  // v6.74（方案 C）：选好预设后不再走「复制指令去聊天框粘贴」的旧
+  // 主流程，改为调 createReplicateJob 建复刻任务：原片已在库直接
+  // 排入解剖，缺原片自动排队下载、下载完自动开拆，进度全在卡片
+  // 「复刻」按钮六态上看。新链路只以 replicate_jobs 为唯一真相，
+  // 不再写旧待解剖队列（addDissectQueueItem 调用已按方案删除，旧
+  // 队列服务端动作与数据原样不动）。建任务失败时才弹指令全文窗
+  // 作兜底手动复制（copyTextToClipboard 保留作卡片辅助用途）。
   const handleReplicatePick = async (preset: DissectPreset) => {
     const target = replicateTarget;
     setReplicateTarget(null);
     if (!target) return;
     const { video, creatorName } = target;
     const videoId = video.videoId;
-    const { title } = splitDescription(video.description);
-    const displayTitle = title || videoId || "未命名视频";
     if (dissectBusyRef.current.has(videoId)) return;
     dissectBusyRef.current.add(videoId);
     try {
       const text = buildDissectInstruction(video, creatorName, preset.body);
-      let queueNote = "";
       try {
-        const res = await api.addDissectQueueItem({
+        const res = await api.createReplicateJob({
+          monitorVideoId: video.id,
           videoId,
-          title: displayTitle,
-          creatorName,
+          presetId: preset.id,
+          instructionText: text,
         });
-        queryClient.invalidateQueries({ queryKey: ["dissect-queue"] });
-        queueNote = res.added ? "，已加入待解剖队列" : "";
-      } catch {
-        queueNote = "（待解剖队列没加成，不影响这次解剖）";
-      }
-      const ok = await copyTextToClipboard(text);
-      if (ok) {
-        setIntakeToast(`已复制解剖指令，去聊天框粘贴发送${queueNote}`);
-      } else {
+        if (!res.ok || !res.job) {
+          setDissectCopyFallback(text);
+          setIntakeToast(
+            `复刻没启动成：${res.message || "请再点一次试试。"}（解剖指令已备好，需要时可手动复制）`,
+          );
+          return;
+        }
+        if (res.job.status === "ready_for_dissect") {
+          setIntakeToast("原片已在库里，已自动排入解剖");
+        } else if (res.job.status === "downloading") {
+          setIntakeToast("已开始下载原片，完成后自动开始解剖");
+        } else {
+          setIntakeToast(res.message);
+        }
+      } catch (e) {
         setDissectCopyFallback(text);
-        if (queueNote) setIntakeToast(`解剖指令已生成${queueNote}`);
+        setIntakeToast(
+          `复刻没启动成：${describeThrownError(e)}（解剖指令已备好，需要时可手动复制）`,
+        );
+      } finally {
+        await refetchReplicateJobs();
+        await queryClient.invalidateQueries({ queryKey: ["download-tasks"] });
       }
     } finally {
       dissectBusyRef.current.delete(videoId);
@@ -6207,6 +6473,8 @@ export function MonitorBench({
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
                       downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      replicateJob={replicateByVideoId.get(v.videoId) ?? null}
+                      onRetryReplicate={handleRetryReplicate}
                       onEnqueueDownload={handleEnqueueDownload}
                     />
                   ))}
@@ -6246,6 +6514,8 @@ export function MonitorBench({
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
                       downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      replicateJob={replicateByVideoId.get(v.videoId) ?? null}
+                      onRetryReplicate={handleRetryReplicate}
                       onEnqueueDownload={handleEnqueueDownload}
                     />
                   ))}
@@ -6295,6 +6565,8 @@ export function MonitorBench({
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
                       downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      replicateJob={replicateByVideoId.get(v.videoId) ?? null}
+                      onRetryReplicate={handleRetryReplicate}
                       onEnqueueDownload={handleEnqueueDownload}
                     />
                   ))}
@@ -6380,6 +6652,8 @@ export function MonitorBench({
                             refreshing={pendingRefresh.has(v.id)}
                             refreshFailed={refreshFailedIds.has(v.id)}
                             downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                            replicateJob={replicateByVideoId.get(v.videoId) ?? null}
+                            onRetryReplicate={handleRetryReplicate}
                             onEnqueueDownload={handleEnqueueDownload}
                           />
                         ))}
@@ -6484,6 +6758,8 @@ export function MonitorBench({
                       refreshing={pendingRefresh.has(v.id)}
                       refreshFailed={refreshFailedIds.has(v.id)}
                       downloadTask={downloadTaskByVideoId.get(v.videoId) ?? null}
+                      replicateJob={replicateByVideoId.get(v.videoId) ?? null}
+                      onRetryReplicate={handleRetryReplicate}
                       onEnqueueDownload={handleEnqueueDownload}
                       onDelete={(vid) => {
                         setDeleteError(null);

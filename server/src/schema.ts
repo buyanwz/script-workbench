@@ -1072,3 +1072,47 @@ export const downloadTasks = sqliteTable("download_tasks", {
   claimedAtMs: integer("claimed_at_ms"),
   doneAtMs: integer("done_at_ms"),
 });
+
+// ---------------------------------------------------------------------------
+// v6.74 复刻任务（监控页「点复刻就复刻」一键化，方案 C）：用户在监控
+// 页点一张卡的「复刻」并选好预设后建一条本表记录，之后全程自动推
+// 进——缺原片时经 download_tasks 排队下载（只下用户点过的这一条），
+// 原片验盘落盘后进入 ready_for_dissect 等 Muse 侧到件监听认领开
+// 拆，解剖完/失败都落到本表，卡片直接读本表显示进度。本表是新链路
+// 的唯一真相；旧「待解剖队列」（monitor_meta）原样不动、不双写。
+// status: downloading 等原片下载 / ready_for_dissect 原片已验盘待
+// 认领 / dissecting 解剖中 / completed 已完成 / download_failed 下
+// 载失败（可重试）/ dissect_failed 解剖失败（可重试）。
+// cloudPath 只存落盘验证后的本地路径，绝不存直链。
+// 时间一律存毫秒整数，与 download_tasks 同口径。
+// ---------------------------------------------------------------------------
+
+export const replicateJobs = sqliteTable("replicate_jobs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  monitorVideoId: integer("monitor_video_id").notNull().default(0),
+  videoId: text("video_id").notNull().default(""),
+  presetId: integer("preset_id").notNull().default(1),
+  instructionText: text("instruction_text").notNull().default(""),
+  status: text("status", {
+    enum: [
+      "downloading",
+      "ready_for_dissect",
+      "dissecting",
+      "completed",
+      "download_failed",
+      "dissect_failed",
+    ],
+  })
+    .notNull()
+    .default("downloading"),
+  downloadTaskId: integer("download_task_id"),
+  cloudPath: text("cloud_path").notNull().default(""),
+  progressNote: text("progress_note").notNull().default(""),
+  errorCode: text("error_code").notNull().default(""),
+  errorMessage: text("error_message").notNull().default(""),
+  createdAtMs: integer("created_at_ms").notNull().default(0),
+  updatedAtMs: integer("updated_at_ms").notNull().default(0),
+  downloadFinishedAtMs: integer("download_finished_at_ms"),
+  dissectStartedAtMs: integer("dissect_started_at_ms"),
+  finishedAtMs: integer("finished_at_ms"),
+});

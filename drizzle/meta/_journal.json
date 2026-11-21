@@ -344,6 +344,13 @@
       "when": 1794855046582,
       "tag": "0049_add_fusion_jobs_table",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1795259070917,
+      "tag": "0050_add_replicate_jobs_table",
+      "breakpoints": true
     }
   ]
 }
