@@ -1,5 +1,6 @@
 import {
 Component,
+Fragment,
 useEffect,
 useLayoutEffect,
 useMemo,
@@ -24,9 +25,10 @@ import { ScriptImportDialog } from "./scriptimport";
 import { GenProgress } from "./genprogress";
 import { ImageGenPanelHost, openImageGenPanel } from "./imagegen";
 import {
-  VideoGenPanelHost,
-  openVideoGenPanel,
-  openVideoGenPanelWithBatch,
+VideoGenPanelHost,
+openVideoGenPanel,
+openVideoGenPanelWithBatch,
+setStoryboardProjects,
 } from "./videogen";
 import { SettingsDock } from "./settingsfloat";
 import { CoverBench } from "./coverbench";
@@ -101,9 +103,15 @@ inferCharacterGenderDetail,
 inferCharacterAgeGroupDetail,
 isDefaultFilmStyle,
 isGroupTempName,
+isComboCharacterCode,
 lensCastEntries,
 lensMappingDiff,
 lensPlan,
+lensScreenCasts,
+lookSnippet,
+noLineBeatKind,
+rawLensSegments,
+REVIEW_CHECK_SPEAKER_OFFSCREEN,
 mappingImageFilterEnabled,
 parseScript,
 rawLensIndexByFlat,
@@ -119,9 +127,7 @@ suggestStoryboardCuts,
 urlToSubmitReference,
 urlToThumbnail,
 VIDEO_MODELS,
-videoModelById,
-VIRAL_CATEGORY_LABELS,
-visibleMappingCharacters,
+videoModelById, visibleMappingCharacters,
 visibleSceneMappings,
 type AutoAddedCharacter,
 type Beat,
@@ -135,15 +141,14 @@ type H3LensPrompt,
 type LensMappingContext,
 type LensMappingDiffRow,
 type OverlongLens,
+type ReviewMark,
 type ScriptData,
 type SeedanceLensPrompt,
 type SpeakerIssue,
 type StoryboardConfig,
 type StrictIssue,
 type TempCharacter,
-type VideoModelId,
-type ViralAuditRecord,
-type ViralIssue
+type VideoModelId
 } from "./scriptlib";
 
 /**
@@ -334,9 +339,9 @@ const WHATS_NEW_STEPS: HighlightStepDef[] = [
   },
   {
     title: "高权限确认（v3.23 新增）",
-    body: "点这个「确认台词 · 生成分镜」时，如果有镜头超 30 秒，会先让你三选一：缩减、重新进行分镜分配，或警告色的「高权限确认」——明知超长仍生成，点了还要二次确认，确认后超长镜头标红留痕、随时能改回来，不再被直接锁死。",
+    body: "点「通过传分镜」，新对白就直接传进分镜；有镜头超 30 秒也不会再弹框，会按原样确认并在分镜页标红留痕，随时能回去改。",
     target: '[data-tour="confirm-storyboard"]',
-    location: "剧本审查页顶部的「确认台词 · 生成分镜」按钮（有剧本稿时出现）",
+    location: "审片台下方的「通过传分镜」按钮（有剧本稿时出现）",
     prepare: "review",
   },
 ];
@@ -816,6 +821,14 @@ export function App() {
   // 掉已存入储存箱的项目；储存箱页签自己读全量列表按 archived 取。
   const projects = allProjects.filter((p) => !p.archived);
   const archivedCount = allProjects.length - projects.length;
+  // v6.63：把这份未归档项目列表（与分镜页同一份数据、同一口径）
+  // 推给生成视频平台，批量窗顶栏的项目切换下拉用它换看其他项
+  // 目的批量队列。只推 id + name 两个字段，不带任何项目内容。
+  useEffect(() => {
+    setStoryboardProjects(
+      projects.map((p) => ({ id: p.id, name: p.name })),
+    );
+  }, [projects]);
 
   const [selectedId, setSelectedId] = useState<number | null>(() => {
     try {
@@ -2227,10 +2240,22 @@ function ProjectBar({
   });
   const deleteMut = useMutation({
     mutationFn: () => api.deleteProject({ id: activeId ?? 0 }),
-    onSuccess: () => {
+    // v6.68（危-08）：服务端删前先存 v2 完整快照，响应带回快照号；
+    // 项目不存在等失败走 ok:false 分支明说，不再无声成功。
+    onSuccess: (res) => {
       setDeleteStep(0);
-      queryClient.invalidateQueries({ queryKey: ["projects"] });
+      if (res.ok) {
+        setIoMessage(
+          `已删除（删除前已存快照${res.snapshotId != null ? ` #${res.snapshotId}` : ""}，误删可在项目列表下方「删除快照」里恢复）。`,
+        );
+        queryClient.invalidateQueries({ queryKey: ["projects"] });
+        queryClient.invalidateQueries({ queryKey: ["deleteSnapshots"] });
+      } else {
+        setIoMessage(`删除失败：${res.error ?? "没有返回原因"}。项目没有删。`);
+      }
     },
+    onError: (e) =>
+      setIoMessage(`删除失败：${describeThrownError(e)}。项目没有删。`),
   });
   // 生成发布文案：走既有 AI 通道（服务端 generatePublishCopy），
   // 生成结果服务端直接存进项目；成功后把结果放进面板草稿供预览 /
@@ -2359,11 +2384,22 @@ function ProjectBar({
   const batchDeleteMut = useMutation({
     mutationFn: (ids: number[]) => api.batchDeleteProjects({ ids }),
     onSuccess: (res) => {
+      // v6.68（危-08）：ok:false 时不关窗、不清勾选，明说没删；
+      // skipped（已不存在的项目号）单独列出，不混进已删数。
+      if (!res.ok) {
+        setBatchMsg(
+          `批量删除失败：${res.error ?? "没有返回原因"}，项目没有删。`,
+        );
+        return;
+      }
       setBatchDeleteOpen(false);
       setDeleteCheckedIds([]);
       setSelectedIds([]);
       setBatchMsg(
-        `已删除 ${res.deleted} 个项目（删除前已自动存快照，误删可在下方「删除快照」里恢复）`,
+        `已删除 ${res.deleted} 个项目（删除前已自动存快照，误删可在下方「删除快照」里恢复）` +
+          (res.skipped.length > 0
+            ? `；另有 ${res.skipped.length} 个项目没找到（项目号 ${res.skipped.join("、")}），已跳过。`
+            : ""),
       );
       queryClient.invalidateQueries({ queryKey: ["projects"] });
       queryClient.invalidateQueries({ queryKey: ["deleteSnapshots"] });
@@ -2418,13 +2454,25 @@ function ProjectBar({
   const [confirmCleanup, setConfirmCleanup] = useState(false);
   const [cleanupMsg, setCleanupMsg] = useState<string | null>(null);
   const cleanupMut = useMutation({
+    // v6.68（危-08）：deleteProject 改为失败返回 ok:false（不再抛
+    // 错），逐个检查结果、把没删成的项目号收集起来如实报。
     mutationFn: async (ids: number[]) => {
-      for (const id of ids) await api.deleteProject({ id });
+      const failed: number[] = [];
+      for (const id of ids) {
+        const res = await api.deleteProject({ id });
+        if (!res.ok) failed.push(id);
+      }
+      return failed;
     },
-    onSuccess: (_res, ids) => {
+    onSuccess: (failed, ids) => {
       setConfirmCleanup(false);
-      setCleanupMsg(`已清理 ${ids.length} 个空项目`);
+      setCleanupMsg(
+        failed.length > 0
+          ? `已清理 ${ids.length - failed.length} 个空项目；${failed.length} 个没删成（项目号 ${failed.join("、")}），请重试`
+          : `已清理 ${ids.length} 个空项目`,
+      );
       queryClient.invalidateQueries({ queryKey: ["projects"] });
+      queryClient.invalidateQueries({ queryKey: ["deleteSnapshots"] });
     },
     onError: () =>
       setCleanupMsg("清理时出错了，请重试（已经删掉的空项目不会恢复）"),
@@ -3593,8 +3641,41 @@ function ProjectWorkspace({
   // the draft is still empty/not-dirty, and clearing the stash then
   // would destroy the very unsaved work it exists to protect.
   const stashArmedRef = useRef(false);
+  // v6.68（危-05）：保存序号守卫的跨组件共享状态——草稿与本机
+  // 暂存归本组件（ProjectWorkspace）管，保存动作在 StepThree 子
+  // 组件里，两边靠这只共享对象对齐：每次本地编辑 bump draftRev，
+  // 保存成功只把 lastAckedRev 推进到那一份稿的序号，脏标由
+  // 「最新序号 > 已确认序号」决定（旧版 saveMut.onSuccess 无条
+  // 件清脏标是丢稿主链之一）；本机草稿写失败单独记
+  // localDraftSavedOk，绝不与脏标混用；lastSaveFailed 供保存失
+  // 败文案按真实状态分支。StepThree 经 props 拿到同一只对象。
+  const saveGuardRef = useRef({
+    draftRev: 0,
+    lastAckedRev: 0,
+    savingInFlight: false,
+    queued: null as null | {
+      json: string;
+      rev: number;
+      resolve: () => void;
+      reject: (e: Error) => void;
+    },
+    localDraftSavedOk: true,
+    lastSaveFailed: false,
+  });
+  const prevProjectIdRef = useRef<number | null>(null);
   useEffect(() => {
     if (!project) return;
+    // v6.68（危-05）：切到另一个项目时重置保存序号与队列，防上
+    // 一个项目的在途/排队保存把新项目的脏标与序号弄乱（同项目
+    // 保存后回读刷新不重置，避免误伤排队中的新编辑）。
+    if (prevProjectIdRef.current !== project.id) {
+      prevProjectIdRef.current = project.id;
+      saveGuardRef.current.draftRev = 0;
+      saveGuardRef.current.lastAckedRev = 0;
+      saveGuardRef.current.queued = null;
+      saveGuardRef.current.savingInFlight = false;
+      saveGuardRef.current.lastSaveFailed = false;
+    }
     const sj = project.scriptJson ?? null;
     if (lastScriptJson.current !== sj) {
       lastScriptJson.current = sj;
@@ -3626,19 +3707,29 @@ function ProjectWorkspace({
     }
   }, [project]);
 
-  // Keep the local stash in sync with the dirty state: dirty → stash
-  // the current draft; saved/clean → clear the stash.
+  // Keep the local stash in sync: 未保存编辑（dirty）或最近一次保
+  // 存失败（lastSaveFailed）时写本机草稿；保存成功且无未保存编
+  // 辑时才删。v6.68（危-05）：旧版只看 scriptDirty——保存中途的
+  // onSuccess 一清脏标就把本机草稿删掉，而那份草稿可能比服务器
+  // 新，下一拍写回的又是中间态，稿就这么丢了。写失败单独记
+  // localDraftSavedOkRef，绝不清 scriptDirty（那是另一路状态）。
   useEffect(() => {
     if (!stashArmedRef.current) return;
-    try {
-      const key = `scriptbench.draft.${projectId}`;
-      if (scriptDirty && scriptDraft) {
+    const key = `scriptbench.draft.${projectId}`;
+    if ((scriptDirty || saveGuardRef.current.lastSaveFailed) && scriptDraft) {
+      try {
         window.localStorage.setItem(key, JSON.stringify(scriptDraft));
-      } else {
-        window.localStorage.removeItem(key);
+        saveGuardRef.current.localDraftSavedOk = true;
+      } catch {
+        saveGuardRef.current.localDraftSavedOk = false;
       }
-    } catch {
-      /* private mode */
+    } else {
+      try {
+        window.localStorage.removeItem(key);
+        saveGuardRef.current.localDraftSavedOk = true;
+      } catch {
+        saveGuardRef.current.localDraftSavedOk = false;
+      }
     }
   }, [scriptDirty, scriptDraft, projectId]);
 
@@ -3657,6 +3748,7 @@ function ProjectWorkspace({
     setScriptDraft(parseScript(project?.scriptJson ?? null));
     setScriptDirty(false);
     setRestoredDraft(false);
+    saveGuardRef.current.lastSaveFailed = false;
   };
 
   // Stage switches （审查 → 分镜 / 分镜 → 返回修改台词） also
@@ -3856,6 +3948,7 @@ function ProjectWorkspace({
           syncScriptJson={(json) => {
             lastScriptJson.current = json;
           }}
+          saveGuard={saveGuardRef.current}
           onPrev={() => goStep(1)}
           goStep={goStep}
           view={scriptWindow === "storyboard" ? "storyboard" : "review"}
@@ -3874,7 +3967,7 @@ function ProjectWorkspace({
             style={{ borderColor: "var(--border)", background: "var(--surface)" }}
             role="note"
           >
-            还没有分镜：先到「剧本审查」点「确认台词 · 生成分镜」。
+            还没有分镜：先到「剧本审查」点「通过传分镜」。
           </p>
         )}
       {scriptWindow === "review" &&
@@ -3884,7 +3977,7 @@ function ProjectWorkspace({
             style={{ borderColor: "var(--border)", background: "var(--surface)" }}
             role="note"
           >
-            已分镜。改台词后点「按当前台词重新生成分镜」更新；时长与导出在「分镜」窗口。
+            已分镜。改台词后点下方「通过传分镜」更新；时长与导出在「分镜」窗口。
           </p>
         )}
 
@@ -5960,7 +6053,7 @@ function StepTwo({
       </div>
 
       <FoldHelp label="分镜怎么切（说明）">
-        确认台词后才进入分镜：按台词字数 ÷ 语速换算每句时长，再按每镜头秒数切分（单镜头上限 30 秒，超了不自动拆分，先让你选缩减、重新分配或高权限确认）。
+        确认台词后才进入分镜：按台词字数 ÷ 语速换算每句时长，再按每镜头秒数切分（单镜头上限 30 秒，超了不自动拆分；点「通过传分镜」会按原样确认并在分镜页标红留痕，想改短就回审查页缩减，或在分镜页重新分配）。
       </FoldHelp>
 
       <div className="mt-5 flex items-center justify-between">
@@ -6117,346 +6210,6 @@ function StrictAuditPanel({
 // ---------------------------------------------------------------------------
 
 /** 合并清单里的一条问题：严格现算 / 爆款盖章 / 严格 AI 深审三路统一成这一种形态。 */
-interface UnifiedIssue {
-  source: "硬规则" | "AI审核";
-  severity: "blocker" | "warning";
-  /** 检查项名（严格 = 分类名；爆款 = 分类 · 检查项）。 */
-  title: string;
-  message: string;
-  evidence: string;
-  suggestion: string;
-  groupIndex: number;
-  beatIndex: number;
-  /** 原始爆款问题（来自盖章时保留，AI修改直接回喂）。 */
-  viral?: ViralIssue;
-  /** 原始严格问题（严格现算或严格 AI 深审，AI修改时映射成 ViralIssue）。 */
-  strict?: StrictIssue;
-}
-
-/** AI修改对照里的一拍：原稿文本 vs 改稿文本。 */
-function beatDiffText(b: Beat | undefined): string {
-  if (!b) return "";
-  const parts: string[] = [];
-  if (b.visual.trim()) parts.push(`画面：${b.visual.trim()}`);
-  if (b.line.trim() || b.speaker.trim())
-    parts.push(
-      `台词：${b.speaker.trim() || "（无说话人）"}${b.emotion.trim() ? `（${b.emotion.trim()}）` : ""}：${b.line.trim() || "（无台词）"}`,
-    );
-  if (b.sfx.trim()) parts.push(`音效：${b.sfx.trim()}`);
-  return parts.length > 0 ? parts.join("｜") : "（空节拍）";
-}
-
-interface AiFixDiffGroup {
-  groupIndex: number;
-  title: string;
-  rows: {
-    beatIndex: number;
-    before: string;
-    after: string;
-    kind: "changed" | "added" | "removed";
-  }[];
-}
-
-function UnifiedAuditPanel({
-  audit,
-  stale,
-  issues,
-  viralSummary,
-  strictSummary,
-  passed,
-  busy,
-  busyText,
-  error,
-  roundsUsed,
-  aiFixBusy,
-  aiFixError,
-  aiFixDiff,
-  aiFixRound,
-  aiFixStale,
-  onRun,
-  onAiFix,
-  onAdoptAiFix,
-  onDiscardAiFix,
-  onDirectStoryboard,
-  directDisabled,
-}: {
-  audit: ViralAuditRecord | null;
-  stale: boolean;
-  issues: UnifiedIssue[];
-  viralSummary: string;
-  strictSummary: string;
-  passed: boolean;
-  busy: boolean;
-  busyText: string;
-  error: string;
-  roundsUsed: number;
-  aiFixBusy: boolean;
-  aiFixError: string;
-  aiFixDiff: AiFixDiffGroup[] | null;
-  aiFixRound: number;
-  aiFixStale: boolean;
-  onRun: () => void;
-  onAiFix: () => void;
-  onAdoptAiFix: () => void;
-  onDiscardAiFix: () => void;
-  /** v4.18：用户自己看过稿子、不用 AI 审查，直接确认跑分镜。 */
-  onDirectStoryboard: () => void;
-  /** 还有其他硬拦截（未保存 / 台词没写说话人 / 超目标等）时禁用直达。 */
-  directDisabled: boolean;
-}) {
-  const blockers = issues.filter((i) => i.severity === "blocker");
-  const warnings = issues.filter((i) => i.severity === "warning");
-  const detBlockers = blockers.filter((i) => i.source === "硬规则").length;
-  const aiBlockers = blockers.length - detBlockers;
-  const failed = !stale && !passed && (!!audit || blockers.length > 0);
-  const aiFixUsedUp = roundsUsed >= 2;
-  const aiFixDisabled =
-    busy ||
-    aiFixBusy ||
-    passed ||
-    stale ||
-    !audit ||
-    blockers.length === 0 ||
-    aiFixUsedUp;
-  const loc = (i: UnifiedIssue) =>
-    i.groupIndex < 0
-      ? "全片"
-      : i.beatIndex < 0
-        ? `第 ${i.groupIndex + 1} 段（整段）`
-        : `第 ${i.groupIndex + 1} 段 · 第 ${i.beatIndex + 1} 句（节拍 ${i.beatIndex + 1}）`;
-  const renderIssue = (i: UnifiedIssue, key: string) => (
-    <li key={key} className="leading-6">
-      <span
-        className="mr-1 inline-block rounded px-1.5 py-0 text-xs font-bold"
-        style={{
-          background: i.severity === "blocker" ? "var(--bad-soft)" : "var(--surface-alt)",
-          color: i.severity === "blocker" ? "var(--bad)" : "var(--dim)",
-        }}
-      >
-        {i.severity === "blocker" ? "硬问题" : "提醒"}
-      </span>
-      <span
-        className="mr-1 inline-block rounded px-1.5 py-0 text-xs font-bold"
-        style={{
-          background: i.source === "硬规则" ? "var(--surface-alt)" : "var(--accent-soft)",
-          color: i.source === "硬规则" ? "var(--dim)" : "var(--accent)",
-        }}
-      >
-        {i.source}
-      </span>
-      <span className="font-bold">{i.title}</span>
-      <span className="text-[var(--dim)]">（{loc(i)}）</span>
-      <span className="block pl-1">不通过原因：{i.message}</span>
-      {i.evidence ? (
-        <span className="block pl-1 text-[var(--dim)]">原文：「{i.evidence}」</span>
-      ) : null}
-      <span className="block pl-1 text-[var(--dim)]">修改建议：{i.suggestion}</span>
-    </li>
-  );
-  return (
-    <div
-      className="mt-3 rounded-[var(--radius)] border p-3.5"
-      style={{
-        borderColor: passed ? "var(--ok)" : "var(--border)",
-        background: "var(--surface)",
-      }}
-      aria-label="剧本审核"
-    >
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="text-sm leading-6">
-          <strong>剧本审核（可选）</strong>——
-          {stale ? (
-            <span className="text-[var(--dim)]">
-              稿子在审核后又改过，之前的结论已过期（仅供参考）：想让 AI 复查就点「开始审核」，不想审可以直接跑分镜
-            </span>
-          ) : passed ? (
-            <span style={{ color: "var(--ok)" }}>
-              已通过（{audit?.modeName || "未选模式"}）：可以确认分镜
-            </span>
-          ) : failed ? (
-            <span>
-              未通过：{blockers.length} 项硬问题（硬规则 {detBlockers} 项 / AI审核 {aiBlockers}{" "}
-              项），逐条列在下方——改不改由你定，不改也能直接跑分镜
-            </span>
-          ) : (
-            <span className="text-[var(--dim)]">
-              还没审：不用先审——你自己看过觉得可以就直接跑分镜；想让 AI 先查一遍，点「开始审核」
-            </span>
-          )}
-          {warnings.length > 0 && !stale
-            ? `；另有 ${warnings.length} 条提醒（不拦截）`
-            : ""}
-        </p>
-        <span style={{ marginLeft: "auto" }} className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            className="btn btn-sm btn-primary"
-            aria-label="我已看过剧本，直接跑分镜（不用 AI 审查，基于已保存的稿子确认分镜）"
-            disabled={directDisabled || busy || aiFixBusy}
-            onClick={onDirectStoryboard}
-          >
-            我已看过剧本，直接跑分镜
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="AI审查：开始剧本审核（严格与爆款合并审核：先跑硬规则，再由 AI 审核官与严格深审通读全稿）"
-            disabled={busy || aiFixBusy}
-            onClick={onRun}
-          >
-            {busy ? "审核中…" : audit ? "重新审核" : "开始审核"}
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            aria-label="AI修改：按问题清单只重写有问题的段落，先看修改前后对照再决定是否采用"
-            disabled={aiFixDisabled}
-            onClick={onAiFix}
-          >
-            {aiFixBusy ? "AI 修改中…" : "AI修改"}
-          </button>
-        </span>
-      </div>
-      {roundsUsed > 0 && !passed && (
-        <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-          {aiFixUsedUp
-            ? "AI修改已用满 2 轮：接下来照下方清单自己改，或者不用审、直接点「我已看过剧本，直接跑分镜」。"
-            : `AI修改已用 ${roundsUsed}/2 轮。`}
-        </p>
-      )}
-      <FoldHelp label="规则说明">
-        剧本审核 = 严格审核（文字质量）+ 爆款审核（内容爆款度）合并：先跑确定性硬规则——
-        严格口径（错别字词表 / 标点形态 / 结巴填充 / 问答衔接 / 自称他人 / 画面为空 /
-        神态证据）与爆款铁律（合规脏话与暴力细节特写词表、角色名与人物表一致、书面长句
-        提醒、黄金三秒与结尾钩子形态检查；项目选了带基因卡的模式时再加模式铁律：模式1
-        双层结构完整、跨层对话直接不通过、单拍超 3 秒不通过、反转落在以前层；模式2 合集
-        段数）；再由 AI 审核官按 L1 rubric（合规 / 黄金三秒 / 冲突升级 / 结尾钩子 / 质量
-        + 基因卡铁律）与严格 AI 深审（流畅 / 错别字 / 人物口吻 / 神态与镜头）通读全稿做
-        语义判定。问题逐条带来源、原因、定位、原文与改法。
-        {audit ? ` ${audit.modeNote}。` : ""}
-        审核本身只读不改稿，而且完全可选（v4.18 起不再是确认分镜的门禁）：不通过可以
-        照清单自己改后重新审核，或点「AI修改」让 AI 只重写有问题的段（先看对照、确认
-        采用才写入，最多 2 轮）；不想审也没关系——自己看过稿子觉得
-        可以，点「我已看过剧本，直接跑分镜」即可。跟审核无关的其他拦截（台词没写说话
-        人、超目标时长等）照旧。
-      </FoldHelp>
-      {busy && busyText && (
-        <p className="mt-2 text-sm leading-6" style={{ color: "var(--accent)" }} role="status">
-          {busyText}
-        </p>
-      )}
-      {error && (
-        <p className="mt-2 text-sm leading-6" style={{ color: "var(--bad)" }} role="alert">
-          {error}
-        </p>
-      )}
-      {audit && viralSummary && !stale && (
-        <p className="mt-2 text-sm leading-6">
-          <strong>AI 审核官结论</strong>：{viralSummary}
-        </p>
-      )}
-      {strictSummary && !stale && (
-        <p className="mt-1 text-sm leading-6">
-          <strong>严格 AI 深审结论</strong>：{strictSummary}
-        </p>
-      )}
-      {blockers.length > 0 && !stale && (
-        <ul className="mt-2 list-none space-y-1.5 text-sm">
-          {blockers.map((i, k) => renderIssue(i, `ub-${k}`))}
-        </ul>
-      )}
-      {warnings.length > 0 && !stale && (
-        <div className="mt-3 border-t pt-2" style={{ borderColor: "var(--border)" }}>
-          <p className="text-sm font-bold leading-6">提醒（不拦截，{warnings.length} 条）</p>
-          <ul className="mt-1.5 list-none space-y-1.5 text-sm">
-            {warnings.map((i, k) => renderIssue(i, `uw-${k}`))}
-          </ul>
-        </div>
-      )}
-      {aiFixError && (
-        <p className="mt-2 text-sm leading-6" style={{ color: "var(--bad)" }} role="alert">
-          {aiFixError}
-        </p>
-      )}
-      {aiFixDiff && (
-        <div
-          className="mt-3 border-t pt-3"
-          style={{ borderColor: "var(--border)" }}
-          aria-label="AI修改前后对照"
-        >
-          <p className="text-sm font-bold leading-6">
-            AI 修改候选稿（第 {aiFixRound} 轮）——修改前后对照
-          </p>
-          {aiFixStale ? (
-            <p className="mt-1 text-sm leading-6" style={{ color: "var(--bad)" }} role="alert">
-              原稿在候选稿生成后又被修改过，这份候选已作废：请重新点「AI修改」生成新候选。
-            </p>
-          ) : (
-            <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
-              只重写了有问题的段落，没问题的段原样保留。点「确认采用」才会写入剧本，
-              采用后自动重新审核一遍。
-            </p>
-          )}
-          {aiFixDiff.length === 0 ? (
-            <p className="mt-2 text-sm leading-6 text-[var(--dim)]">
-              候选稿与原稿逐拍比对没有差异。
-            </p>
-          ) : (
-            aiFixDiff.map((g) => (
-              <div key={g.groupIndex} className="mt-2.5">
-                <p className="text-sm font-bold leading-6">
-                  第 {g.groupIndex + 1} 段《{g.title}》
-                </p>
-                <ul className="mt-1 list-none space-y-1.5 text-sm leading-6">
-                  {g.rows.map((r) => (
-                    <li key={r.beatIndex}>
-                      <span className="font-bold">节拍 {r.beatIndex + 1}</span>
-                      {r.kind === "added" ? (
-                        <span className="text-[var(--dim)]">（新增节拍）</span>
-                      ) : r.kind === "removed" ? (
-                        <span className="text-[var(--dim)]">（删除节拍）</span>
-                      ) : null}
-                      {r.before ? (
-                        <span className="block pl-1">
-                          原：<span className="text-[var(--dim)]">{r.before}</span>
-                        </span>
-                      ) : null}
-                      {r.after ? (
-                        <span className="block pl-1">
-                          改：<span style={{ color: "var(--ok)" }}>{r.after}</span>
-                        </span>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))
-          )}
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="btn btn-sm btn-primary"
-              aria-label="确认采用AI修改候选稿并重新审核"
-              disabled={aiFixStale || busy || aiFixBusy}
-              onClick={onAdoptAiFix}
-            >
-              确认采用并重新审核
-            </button>
-            <button
-              type="button"
-              className="btn btn-sm"
-              aria-label="放弃AI修改候选稿"
-              disabled={busy || aiFixBusy}
-              onClick={onDiscardAiFix}
-            >
-              放弃候选稿
-            </button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ---------------------------------------------------------------------------
 // 本模式优化建议（v4.21）：分镜页最下方。用户看完按本模式生成并拍成
@@ -6615,6 +6368,655 @@ function ModeSuggestionsPanel({ modeId }: { modeId: number }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// v6.70 审片台（一行一拍通表）：审查页新版式——按镜头分组（镜头切分
+// 与超长判定都用服务端同一份共享规则：rawLensSegments 切分、超长用
+// StepThree 传入的 serverCheck 优先的 overlongLenses，客户端不重算
+// 判定），每拍一行五列（时间码／画面／对白／时长／状态）。状态列的
+// 打勾、备注与「忽略检查」经 onSaveMark 走轻量动作 saveReviewMark
+// 只改一键落库；台词与情绪仍走既有 onEditBeat + onBlurSave（同一套
+// 数据、只换摆法），本表不新增第二条台词保存通道。检查项第一期只
+// 做一条：「说话人未在画面点名」（lensScreenCasts inclusive 口径，
+// 不含 retention 的 ∪说话人兜底，否则永远报不出来）；误报可一键
+// 忽略、忽略状态随标记落库。
+// ---------------------------------------------------------------------------
+
+type ReviewFilter =
+  | "all"
+  | "issue"
+  | "noline"
+  | "overlong"
+  | "speaker"
+  | "prop";
+
+/** 说话人／在场人物色块：按代号哈希取固定色板，同代号全站同色。 */
+const REVIEW_CODE_COLORS = [
+  "#4d7cfe",
+  "#3cb179",
+  "#e0a63c",
+  "#c65df0",
+  "#38b6c9",
+  "#f0665e",
+  "#7d9b3a",
+  "#e2739e",
+];
+function reviewCodeColor(code: string): string {
+  let h = 0;
+  for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) >>> 0;
+  return REVIEW_CODE_COLORS[h % REVIEW_CODE_COLORS.length] ?? "#4d7cfe";
+}
+
+function ReviewCodeChip({ code, look }: { code: string; look?: string }) {
+  const color = reviewCodeColor(code);
+  return (
+    <span
+      className="inline-flex items-center gap-1.5"
+      title={look ? `${code}：${look}` : code}
+    >
+      <span
+        aria-hidden="true"
+        className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+        style={{ background: color }}
+      />
+      <span className="font-bold" style={{ color }}>
+        {code}
+      </span>
+      {look ? (
+        <span className="text-xs font-normal text-[var(--dim)]">{look}</span>
+      ) : null}
+    </span>
+  );
+}
+
+function ReviewTable({
+  script,
+  projectId,
+  mappingCtx,
+  groupSeconds,
+  cutMode,
+  overlongLenses,
+  speakerIssueBeatKeys,
+  speakerIssueCount,
+  totalSeconds,
+  onEditBeat,
+  onBlurSave,
+  onApplyMark,
+  onJumpLens,
+}: {
+  script: ScriptData;
+  projectId: number;
+  mappingCtx: LensMappingContext;
+  /** 当前每镜头秒数（与 StepThree 的 sbConfig 同值，切分口径一致）。 */
+  groupSeconds: number;
+  cutMode: "duration" | "segment";
+  /** 超长镜头（StepThree 的 serverCheck 优先口径），只用于标红与筛选。 */
+  overlongLenses: OverlongLens[];
+  /** 说话人待确认的拍键集合（与校验段 speakerIssues 同一份检出）。 */
+  speakerIssueBeatKeys: ReadonlySet<string>;
+  /** 待确认人物项数（与校验段同数，表头徽标用）。 */
+  speakerIssueCount: number;
+  /** 全片总秒数（StepThree 的 reviewDuration.totalSeconds），表头进度同一行右侧小字；时长试算卡删后审查页看总时长的唯一位置。 */
+  totalSeconds: number | null;
+  onEditBeat: (gi: number, bi: number, patch: Partial<Beat>) => void;
+  onBlurSave: () => void;
+  /** 把一拍的标记写进页面草稿（不置脏标：标记有自己的落库通道）。 */
+  onApplyMark: (key: string, mark: ReviewMark | null) => void;
+  /** 时间码点击：跳分镜页对应镜头（无分镜时回落到正文对应拍）。 */
+  onJumpLens: (lensIndex: number, gi: number, bi: number) => void;
+}) {
+  const [filter, setFilter] = useState<ReviewFilter>("all");
+  const [markError, setMarkError] = useState<string | null>(null);
+  const [noteDrafts, setNoteDrafts] = useState<Record<string, string>>({});
+  const marks = script.reviewMarks ?? {};
+  const timeline = useMemo(() => computeTimeline(script), [script]);
+  const flat = useMemo(() => flattenStoryboardBeats(script), [script]);
+  const lenses = useMemo(() => {
+    if (cutMode === "segment") {
+      return script.groups.map((g, gi) => ({
+        lensIndex: gi + 1,
+        title: g.title,
+        sceneName: g.sceneName,
+        duration: timeline.groups[gi]?.duration ?? 0,
+        beatKeys: g.beats.map((_, bi) => ({ gi, bi })),
+      }));
+    }
+    return rawLensSegments(flat, groupSeconds).map((seg, si) => ({
+      lensIndex: si + 1,
+      title: seg.title,
+      sceneName: seg.sceneName,
+      duration: seg.duration,
+      beatKeys: seg.flatIndices.map((fi) => {
+        const fb = flat[fi]!;
+        return { gi: fb.groupIndex, bi: fb.beatIndex };
+      }),
+    }));
+  }, [script, flat, groupSeconds, cutMode, timeline]);
+  const overlongIdx = useMemo(
+    () => new Set(overlongLenses.map((l) => l.lensIndex)),
+    [overlongLenses],
+  );
+  // 在场人物：逐段现算（lensScreenCasts 按组返回每拍 inclusive）。
+  const castsByGroup = useMemo(
+    () =>
+      script.groups.map((_, gi) => lensScreenCasts(script, gi, mappingCtx)),
+    [script, mappingCtx],
+  );
+  const lookByCode = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const r of script.characterRows) {
+      const s = lookSnippet(r.look);
+      if (r.name.trim() && s) m.set(r.name.trim(), s);
+    }
+    return m;
+  }, [script.characterRows]);
+  const rowCodes = useMemo(
+    () =>
+      new Set(
+        script.characterRows.map((r) => r.name.trim()).filter(Boolean),
+      ),
+    [script.characterRows],
+  );
+  const totalBeats = flat.length;
+  const reviewedCount = Object.values(marks).filter((m) => m.state).length;
+  const issueCount = Object.values(marks).filter(
+    (m) => m.state === "issue",
+  ).length;
+  const propNames = useMemo(
+    () => (script.propAssets ?? []).map((p) => p.name).filter(Boolean),
+    [script.propAssets],
+  );
+  const [propFilter, setPropFilter] = useState<string | null>(null);
+
+  const saveMark = (key: string, mark: ReviewMark | null) => {
+    onApplyMark(key, mark);
+    void (async () => {
+      try {
+        const res = await api.saveReviewMark({
+          projectId,
+          key,
+          mark,
+        });
+        if (!res.ok) {
+          setMarkError(
+            res.error ?? "审查标记没存上，刷新页面可能看不到这次标记。",
+          );
+        } else {
+          setMarkError(null);
+        }
+      } catch (e) {
+        setMarkError(
+          `审查标记没存上：${describeThrownError(e)}。页面上先留着，网络恢复后再点一次就会存上。`,
+        );
+      }
+    })();
+  };
+  const setBeatState = (key: string, state: "pass" | "issue") => {
+    const prev = marks[key];
+    if (prev?.state === state && state === "pass") return;
+    saveMark(key, {
+      state,
+      ...(prev?.note ? { note: prev.note } : {}),
+      ...(prev?.ignoredChecks?.length
+        ? { ignoredChecks: prev.ignoredChecks }
+        : {}),
+      updatedAt: new Date().toISOString(),
+    });
+  };
+  const commitNote = (key: string) => {
+    const prev = marks[key];
+    const note = (noteDrafts[key] ?? prev?.note ?? "").trim();
+    if (!prev || prev.state !== "issue") return;
+    if ((prev.note ?? "") === note) return;
+    saveMark(key, {
+      state: "issue",
+      ...(note ? { note } : {}),
+      ...(prev.ignoredChecks?.length
+        ? { ignoredChecks: prev.ignoredChecks }
+        : {}),
+      updatedAt: new Date().toISOString(),
+    });
+  };
+  const ignoreCheck = (key: string) => {
+    const prev = marks[key];
+    const ignored = new Set(prev?.ignoredChecks ?? []);
+    ignored.add(REVIEW_CHECK_SPEAKER_OFFSCREEN);
+    saveMark(key, {
+      ...(prev?.state ? { state: prev.state } : {}),
+      ...(prev?.note ? { note: prev.note } : {}),
+      ignoredChecks: [...ignored],
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const beatMatches = (
+    key: string,
+    beat: Beat,
+    lensOverlong: boolean,
+  ): boolean => {
+    if (propFilter && !(beat.visual ?? "").includes(propFilter)) return false;
+    switch (filter) {
+      case "all":
+        return true;
+      case "issue":
+        return marks[key]?.state === "issue";
+      case "noline":
+        return !beat.line.trim();
+      case "overlong":
+        return lensOverlong;
+      case "speaker":
+        return speakerIssueBeatKeys.has(key);
+      default:
+        return true;
+    }
+  };
+
+  const filterBtn = (
+    id: ReviewFilter,
+    label: string,
+    ariaLabel?: string,
+  ) => (
+    <button
+      type="button"
+      className="btn btn-sm"
+      aria-pressed={filter === id && !propFilter}
+      aria-label={ariaLabel ?? label}
+      style={
+        filter === id && !propFilter
+          ? {
+              background: "var(--accent)",
+              borderColor: "var(--accent)",
+              color: "var(--on-primary)",
+            }
+          : undefined
+      }
+      onClick={() => {
+        setFilter(id);
+        setPropFilter(null);
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div>
+      <div
+        className="flex flex-wrap items-center gap-2"
+        role="group"
+        aria-label="审片台筛选"
+      >
+        {filterBtn("all", "全部")}
+        {filterBtn("issue", "只看有问题")}
+        {filterBtn("noline", "只看无台词")}
+        {filterBtn("overlong", "只看超长")}
+        <button
+          type="button"
+          className="btn btn-sm"
+          aria-pressed={filter === "speaker" && !propFilter}
+          aria-label={`只看说话人待确认的拍（待确认人物 ${speakerIssueCount} 项）`}
+          style={
+            filter === "speaker" && !propFilter
+              ? {
+                  background: "var(--accent)",
+                  borderColor: "var(--accent)",
+                  color: "var(--on-primary)",
+                }
+              : undefined
+          }
+          onClick={() => {
+            setFilter("speaker");
+            setPropFilter(null);
+          }}
+        >
+          只看说话人待确认
+          <span className="chip-check" data-state={speakerIssueCount > 0 ? "bad" : "ok"}>
+            待确认人物 {speakerIssueCount} 项
+          </span>
+        </button>
+        <span className="text-sm text-[var(--dim)]" role="status">
+          已审 {reviewedCount}／{totalBeats}，有问题 {issueCount} 处
+        </span>
+        {totalSeconds != null && (
+          <span className="ml-auto text-sm text-[var(--dim)]">
+            全片 {totalSeconds.toFixed(1)} 秒
+          </span>
+        )}
+      </div>
+      {propNames.length > 0 && (
+        <div
+          className="mt-2 flex flex-wrap items-center gap-2"
+          role="group"
+          aria-label="道具清单筛选"
+        >
+          <span className="text-xs text-[var(--dim)]">道具（点名字只看画面里有它的拍）：</span>
+          {propNames.map((name) => (
+            <button
+              key={name}
+              type="button"
+              className="btn btn-sm"
+              aria-pressed={propFilter === name}
+              aria-label={`只看画面里有道具「${name}」的拍`}
+              style={
+                propFilter === name
+                  ? {
+                      background: "var(--accent)",
+                      borderColor: "var(--accent)",
+                      color: "var(--on-primary)",
+                    }
+                  : undefined
+              }
+              onClick={() => setPropFilter(propFilter === name ? null : name)}
+            >
+              {name}
+            </button>
+          ))}
+          {propFilter && (
+            <span className="text-xs text-[var(--dim)]">
+              正在只看画面里有「{propFilter}」的拍，点一次它的名字取消。
+            </span>
+          )}
+        </div>
+      )}
+      {markError && (
+        <p className="mt-2 text-sm" style={{ color: "var(--bad)" }} role="alert">
+          {markError}
+        </p>
+      )}
+      <div className="sb-doc-scroll mt-3">
+        <table className="script-table" aria-label="审片台：一行一拍">
+          <thead>
+            <tr>
+              <th>时间码</th>
+              <th>画面</th>
+              <th>对白</th>
+              <th>时长</th>
+              <th>状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lenses.map((lens) => {
+              const lensOverlong = overlongIdx.has(lens.lensIndex);
+              const rows = lens.beatKeys
+                .map(({ gi, bi }) => ({
+                  gi,
+                  bi,
+                  beat: script.groups[gi]!.beats[bi]!,
+                  key: `${gi}-${bi}`,
+                }))
+                .filter((r) => beatMatches(r.key, r.beat, lensOverlong));
+              if (filter === "overlong" ? !lensOverlong : rows.length === 0)
+                return null;
+              const firstTb =
+                timeline.groups[lens.beatKeys[0]?.gi ?? 0]?.beats[
+                  lens.beatKeys[0]?.bi ?? 0
+                ];
+              const lastRef = lens.beatKeys[lens.beatKeys.length - 1];
+              const lastTb = lastRef
+                ? timeline.groups[lastRef.gi]?.beats[lastRef.bi]
+                : undefined;
+              return (
+                <Fragment key={`lens-${lens.lensIndex}`}>
+                  <tr
+                    style={
+                      lensOverlong
+                        ? { background: "var(--bad-soft)" }
+                        : { background: "var(--surface-alt)" }
+                    }
+                  >
+                    <td colSpan={5}>
+                      <span className="font-bold">
+                        镜头{lens.lensIndex}｜{lens.title}
+                      </span>
+                      <span className="ml-2 text-xs text-[var(--dim)]">
+                        {firstTb && lastTb
+                          ? `${fmtTc(firstTb.start)}–${fmtTc(lastTb.end)} · `
+                          : ""}
+                        {lens.duration.toFixed(1)} 秒 · 场景：{lens.sceneName || "（未填）"} ·{" "}
+                        {lens.beatKeys.length} 拍
+                      </span>
+                      {lensOverlong && (
+                        <span className="chip-check ml-2" data-state="bad">
+                          超长镜头 · 超 30 秒
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                  {rows.map(({ gi, bi, beat, key }) => {
+                    const tb = timeline.groups[gi]?.beats[bi];
+                    const mark = marks[key];
+                    const cast = castsByGroup[gi]?.[bi];
+                    const inclusive = cast?.inclusive ?? [];
+                    const speaker = beat.speaker.trim();
+                    const offscreen =
+                      !!beat.line.trim() &&
+                      !!speaker &&
+                      rowCodes.has(speaker) &&
+                      !inclusive.includes(speaker) &&
+                      !(mark?.ignoredChecks ?? []).includes(
+                        REVIEW_CHECK_SPEAKER_OFFSCREEN,
+                      );
+                    const singleOver =
+                      (tb?.duration ?? 0) > 30.05;
+                    return (
+                      <tr
+                        key={key}
+                        style={
+                          lensOverlong
+                            ? { boxShadow: "inset 3px 0 0 var(--bad)" }
+                            : singleOver
+                              ? { boxShadow: "inset 3px 0 0 var(--bad)" }
+                              : undefined
+                        }
+                      >
+                        <td className="whitespace-nowrap">
+                          <button
+                            type="button"
+                            className="underline"
+                            aria-label={`跳到镜头${lens.lensIndex}（第${gi + 1}段节拍${bi + 1}）`}
+                            onClick={() => onJumpLens(lens.lensIndex, gi, bi)}
+                          >
+                            {tb ? fmtTc(tb.start) : "—"}
+                          </button>
+                          <span className="block text-xs text-[var(--dim)]">
+                            第{gi + 1}段·拍{bi + 1}
+                          </span>
+                        </td>
+                        <td>
+                          <p className="whitespace-pre-wrap">
+                            {beat.visual.trim() || "（未填写）"}
+                          </p>
+                          <p className="mt-1 text-xs text-[var(--dim)]">
+                            场景：{script.groups[gi]?.sceneName || "（未填）"}
+                          </p>
+                          {inclusive.length > 0 && (
+                            <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                              {inclusive.map((code) => (
+                                <ReviewCodeChip
+                                  key={code}
+                                  code={code}
+                                  look={lookByCode.get(code)}
+                                />
+                              ))}
+                            </p>
+                          )}
+                        </td>
+                        <td>
+                          {beat.line.trim() ? (
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-start gap-x-1.5 gap-y-1">
+                                {speaker ? (
+                                  <ReviewCodeChip code={speaker} />
+                                ) : (
+                                  <span className="font-bold text-[var(--bad)]">
+                                    （未填说话人）
+                                  </span>
+                                )}
+                                <span className="shrink-0">
+                                  （
+                                  <input
+                                    className="line-input text-center"
+                                    style={{
+                                      width: textChWidth(beat.emotion),
+                                      borderBottomColor: "transparent",
+                                      background: "transparent",
+                                    }}
+                                    aria-label={`第${gi + 1}段节拍${bi + 1}语气情绪（审片台）`}
+                                    placeholder="语气/情绪"
+                                    value={beat.emotion}
+                                    onChange={(e) =>
+                                      onEditBeat(gi, bi, {
+                                        emotion: e.target.value,
+                                      })
+                                    }
+                                    onBlur={onBlurSave}
+                                  />
+                                  ）
+                                </span>
+                                <span aria-hidden="true" className="shrink-0 font-semibold">：“</span>
+                                <AutoGrowTextarea
+                                  className="line-input fit-textarea min-w-0 text-base font-medium"
+                                  minRows={1}
+                                  style={{
+                                    overflowWrap: "anywhere",
+                                    flex: "1 1 200px",
+                                  }}
+                                  aria-label={`第${gi + 1}段节拍${bi + 1}台词（审片台）`}
+                                  placeholder="台词内容"
+                                  value={beat.line}
+                                  onChange={(e) =>
+                                    onEditBeat(gi, bi, {
+                                      line: e.target.value,
+                                    })
+                                  }
+                                  onBlur={onBlurSave}
+                                />
+                                <span aria-hidden="true" className="shrink-0 font-semibold">”</span>
+                              </div>
+                              {offscreen && (
+                                <p
+                                  className="mt-1 text-xs leading-5"
+                                  style={{ color: "var(--bad)" }}
+                                  role="note"
+                                >
+                                  检查：说话人 {speaker} 没在这一拍的画面描述里点名（可能是画外音，也可能画面漏写了他）。
+                                  <button
+                                    type="button"
+                                    className="btn btn-sm ml-2"
+                                    aria-label={`忽略第${gi + 1}段节拍${bi + 1}的说话人未点名检查（画外音或误报）`}
+                                    onClick={() => ignoreCheck(key)}
+                                  >
+                                    画外音／误报，忽略这条
+                                  </button>
+                                </p>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-[var(--dim)]">
+                              无台词·{noLineBeatKind(beat)}
+                            </span>
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap">
+                          {(tb?.duration ?? 0).toFixed(1)} 秒
+                          {singleOver && (
+                            <span className="chip-check ml-1" data-state="bad">
+                              单拍超 30 秒
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <div className="flex flex-wrap gap-1.5">
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              aria-pressed={mark?.state === "pass"}
+                              aria-label={`把第${gi + 1}段节拍${bi + 1}标为通过`}
+                              style={
+                                mark?.state === "pass"
+                                  ? {
+                                      background: "var(--olive)",
+                                      borderColor: "var(--olive)",
+                                      color: "var(--on-primary)",
+                                    }
+                                  : undefined
+                              }
+                              onClick={() => setBeatState(key, "pass")}
+                            >
+                              ✓ 通过
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-sm"
+                              aria-pressed={mark?.state === "issue"}
+                              aria-label={`把第${gi + 1}段节拍${bi + 1}标为有问题`}
+                              style={
+                                mark?.state === "issue"
+                                  ? {
+                                      background: "var(--bad)",
+                                      borderColor: "var(--bad)",
+                                      color: "var(--on-primary)",
+                                    }
+                                  : undefined
+                              }
+                              onClick={() => setBeatState(key, "issue")}
+                            >
+                              有问题
+                            </button>
+                            {mark && (
+                              <button
+                                type="button"
+                                className="btn btn-sm"
+                                aria-label={`清掉第${gi + 1}段节拍${bi + 1}的审查标记`}
+                                onClick={() => saveMark(key, null)}
+                              >
+                                清除标记
+                              </button>
+                            )}
+                          </div>
+                          {mark?.state === "issue" && (
+                            <input
+                              className="field field-sm mt-1.5"
+                              aria-label={`第${gi + 1}段节拍${bi + 1}的问题备注`}
+                              placeholder="哪不对，一句话写清"
+                              value={noteDrafts[key] ?? mark.note ?? ""}
+                              onChange={(e) =>
+                                setNoteDrafts((prev) => ({
+                                  ...prev,
+                                  [key]: e.target.value,
+                                }))
+                              }
+                              onBlur={() => commitNote(key)}
+                            />
+                          )}
+                          {mark?.state === "pass" && (
+                            <span className="mt-1 block text-xs" style={{ color: "var(--olive)" }}>
+                              已审 · 通过
+                            </span>
+                          )}
+                          {mark?.state === "issue" && (
+                            <span className="mt-1 block text-xs" style={{ color: "var(--bad)" }}>
+                              已审 · 有问题
+                            </span>
+                          )}
+                          {!mark?.state && mark?.ignoredChecks?.length ? (
+                            <span className="mt-1 block text-xs text-[var(--dim)]">
+                              已忽略 {mark.ignoredChecks.length} 条检查（未给结论）
+                            </span>
+                          ) : null}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </Fragment>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // 未来主题分镜胶片时间轴（只在未来主题的分镜页出现）：每个镜头是一格
 // 带厚度与阴影的胶片格（镜头号 / 时长 / 节拍范围）。点一格跳到上方
 // 正文区对应镜头；拖动格子（或用格子里的前移 / 后移按钮，键盘可达）
@@ -6628,6 +7030,7 @@ function StepThree({
   scriptDirty,
   setScriptDirty,
   syncScriptJson,
+  saveGuard,
   onPrev,
   goStep,
   view,
@@ -6640,6 +7043,21 @@ function StepThree({
   scriptDirty: boolean;
   setScriptDirty: (d: boolean) => void;
   syncScriptJson: (json: string | null) => void;
+  /** v6.68（危-05）：与父组件共享的保存守卫状态（序号/在途/排队/
+   * 本机草稿与保存失败记账），父组件 ProjectWorkspace 持有。 */
+  saveGuard: {
+    draftRev: number;
+    lastAckedRev: number;
+    savingInFlight: boolean;
+    queued: null | {
+      json: string;
+      rev: number;
+      resolve: () => void;
+      reject: (e: Error) => void;
+    };
+    localDraftSavedOk: boolean;
+    lastSaveFailed: boolean;
+  };
   onPrev: () => void;
   goStep: (s: number) => void;
   /** Which window is showing: the review window renders the PURE script
@@ -6648,6 +7066,14 @@ function StepThree({
   goWindow: (w: ScriptWindow) => void;
 }) {
   const queryClient = useQueryClient();
+  // v6.68（危-05）：本地编辑统一入口——改稿 + bump 序号 + 置脏
+  // 标，返回新序号；保存走下方 queueScriptSave 串行确认。
+  const commitLocalDraftEdit = (next: ScriptData): number => {
+    saveGuard.draftRev += 1;
+    setScriptDraft(next);
+    setScriptDirty(true);
+    return saveGuard.draftRev;
+  };
   const [genError, setGenError] = useState<string | null>(null);
   const [exportMsg, setExportMsg] = useState<string | null>(null);
   const resultRef = useRef<HTMLDivElement>(null);
@@ -6716,9 +7142,11 @@ function StepThree({
     };
     const json = JSON.stringify(next);
     syncScriptJson(json);
-    setScriptDraft(next);
-    setScriptDirty(false);
-    void withWriteRetry(() => saveMut.mutateAsync(json))
+    // v6.68（危-05）：旧版这里先 setScriptDirty(false) 再发保存——
+    // 保存还没成功就把未保存标记清了，失败也看不出来。改走串行
+    // 保存器：序号确认后才清脏标。
+    const rev = commitLocalDraftEdit(next);
+    void withWriteRetry(() => queueScriptSave(json, rev))
       .then(() => {
         setGapDrafts((prev) => {
           const n = { ...prev };
@@ -6876,7 +7304,7 @@ function StepThree({
   // v5.29: the old one-shot snapshot trigger （保存剧本前 / 重新生成前 /
   // 导入剧本覆盖前） is gone — saveScript no longer snapshots before
   // overwriting (automatic version snapshots were removed entirely).
-  // 导入剧本：入口在剧本审查页顶部（v4.07 起项目区不再放入口），用
+  // 导入剧本：入口在剧本审查页纸面正文卡右上角（有稿时；无稿时在页面顶部操作区），用
   // ScriptImportDialog 走同一套流程（解析 → 预览 → 确认覆盖）。
   // 确认时置位，保存成功后在保存反馈里补上导入专属说明（回到审查
   // 阶段 / 分镜作废）。
@@ -6991,7 +7419,8 @@ function StepThree({
         scriptJson: json,
       }),
     onSuccess: (res) => {
-      setScriptDirty(false);
+      // v6.68（危-05）：不再无条件 setScriptDirty(false)——脏标由
+      // queueScriptSave 按序号确认（新编辑的脏标不被旧响应清掉）。
       const wasImport = importPendingRef.current;
       importPendingRef.current = false;
       if (res.validation) {
@@ -7032,10 +7461,60 @@ function StepThree({
         ok: false,
         text: friendly
           ? raw
-          : `保存失败：${describeThrownError(e)}。你填的内容没有丢失，还在本页里、也暂存到了本机草稿，检查网络后再点一次保存即可。`,
+          : saveGuard.localDraftSavedOk
+            ? `保存失败：${describeThrownError(e)}。你填的内容没有丢失，还在本页里、也暂存到了本机草稿，检查网络后再点一次保存即可。`
+            : `保存失败：${describeThrownError(e)}，而且本机草稿也没存上（浏览器存储不可用或空间不足）。你填的内容还只在本页里——先别关页面、别刷新，检查网络后马上再点一次保存。`,
       });
     },
   });
+
+  // v6.68（危-05）：串行保存器——同一时刻只发一份保存请求，后到
+  // 的只替换队列里的待发稿（永远取最新），绝不并发发两份整份稿
+  // （旧版多入口并发 mutateAsync，慢响应后到会把新稿盖回旧稿）。
+  // 每份稿发出时带它的编辑序号：成功只把 lastAckedRevRef 推进
+  // 到该序号，脏标在「已确认序号 >= 最新序号」时才清；失败置
+  // lastSaveFailedRef（草稿同步 effect 据此保住本机草稿）并把错
+  // 误抛给调用方的 withWriteRetry 重试（整份重发、幂等）。
+  const queueScriptSave = (json: string, rev: number): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      if (saveGuard.savingInFlight) {
+        const prev = saveGuard.queued;
+        saveGuard.queued = { json, rev, resolve, reject };
+        prev?.resolve();
+        return;
+      }
+      saveGuard.savingInFlight = true;
+      const finish = (err: unknown) => {
+        saveGuard.savingInFlight = false;
+        const nextSave = saveGuard.queued;
+        saveGuard.queued = null;
+        if (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        } else {
+          resolve();
+        }
+        if (nextSave) {
+          void queueScriptSave(nextSave.json, nextSave.rev).then(
+            nextSave.resolve,
+            nextSave.reject,
+          );
+        }
+      };
+      saveMut.mutateAsync(json).then(
+        () => {
+          if (rev > saveGuard.lastAckedRev) saveGuard.lastAckedRev = rev;
+          saveGuard.lastSaveFailed = false;
+          if (saveGuard.lastAckedRev >= saveGuard.draftRev) {
+            setScriptDirty(false);
+          }
+          finish(null);
+        },
+        (err: unknown) => {
+          saveGuard.lastSaveFailed = true;
+          finish(err);
+        },
+      );
+    });
 
   type SaveIssueTarget = "groups" | "beats" | "title" | "versionNote";
   // Client-side pre-check mirroring the server's friendly messages, so
@@ -7116,8 +7595,9 @@ function StepThree({
     // 未保存，本机草稿暂存随即留住整份稿（含刚写完还没存上的
     // 这一段），刷新 / 切项目后恢复出来点「继续生成」会先补存
     // 这一段再接着写，不重跑、不重写。
+    const rev = commitLocalDraftEdit(draft);
     try {
-      await withWriteRetry(() => saveMut.mutateAsync(json), {
+      await withWriteRetry(() => queueScriptSave(json, rev), {
         onRetry: (nextAttempt) =>
           setGenPhase((p) =>
             p
@@ -7128,7 +7608,7 @@ function StepThree({
               : p,
           ),
       });
-      setScriptDirty(false);
+      // 脏标由 queueScriptSave 按序号确认后清（不在这里抢清）。
     } catch (e) {
       setScriptDirty(true);
       throw new Error(
@@ -7528,6 +8008,60 @@ function StepThree({
     return collectSpeakerIssues(scriptDraft, speakerRegistry);
   }, [scriptDraft, speakerRegistry, genIncomplete]);
 
+  // v6.70 审片台：说话人待确认的拍键集合（与上方 speakerIssues 同一
+  // 份检出），表头「待确认人物」徽标点一下就筛出这些拍；徽标数字与
+  // 校验段同数（服务端校验在手时以服务端那份为准）。
+  const speakerIssueBeatKeys = useMemo(() => {
+    const s = new Set<string>();
+    for (const iss of speakerIssues)
+      for (const b of iss.beats) s.add(`${b.groupIndex}-${b.beatIndex}`);
+    return s;
+  }, [speakerIssues]);
+  const speakerIssueCount =
+    serverCheck?.validation?.speakerIssues.length ?? speakerIssues.length;
+
+  // v6.70 审查标记写进页面草稿：不置脏标——标记有自己的轻量落库
+  // 通道（saveReviewMark 只改一键），不该把「保存台词修改」按钮顶
+  // 亮；整份保存时标记随草稿一并落库，是兜底通道。
+  const applyReviewMark = (key: string, mark: ReviewMark | null) => {
+    if (!scriptDraft) return;
+    const next = { ...(scriptDraft.reviewMarks ?? {}) };
+    if (mark) next[key] = mark;
+    else delete next[key];
+    const draft: ScriptData = { ...scriptDraft };
+    if (Object.keys(next).length > 0) draft.reviewMarks = next;
+    else delete draft.reviewMarks;
+    setScriptDraft(draft);
+    syncScriptJson(JSON.stringify(draft));
+  };
+
+  // v6.70 审片台时间码跳转：已确认分镜时去分镜页对应镜头（镜头容
+  // 器 id lens-<序号>，与缩减回流滚动同法）；还没分镜时回落到下方
+  // 正文里对应那一拍（paper-beat-<组>-<拍>）。
+  const jumpToReviewLens = (lensIndex: number, gi: number, bi: number) => {
+    if (stageStoryboard) {
+      goWindow("storyboard");
+      window.setTimeout(() => {
+        const el = document.getElementById(`lens-${lensIndex}`);
+        if (el) el.scrollIntoView({ block: "start", behavior: "smooth" });
+        else scrollToPageTop();
+      }, 350);
+    } else {
+      document
+        .getElementById(`paper-beat-${gi}-${bi}`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  };
+
+  // v6.70 确认前提醒：reviewMarks 里状态「有问题」的拍数 > 0 时，
+  // 点确认先弹这个框（只提醒不拦路）；被忽略的检查不产生「有问
+  // 题」状态、天然不计入；未审的拍只在审片台进度里计数、不拦。
+  const [reviewIssuePrompt, setReviewIssuePrompt] = useState<{
+    count: number;
+    cuts?: number[];
+    allowOverlong?: boolean;
+  } | null>(null);
+
   // 新人物检出：与待确认清单共用同一份检出（collectTempCharacters 内部
   // 说话人类直接取 collectSpeakerIssues 的结果，另补画面 / 梗概 / 大纲 /
   // 待确认事项里点名的人）。群演状态存在 scriptDraft.tempCharacterStates
@@ -7787,10 +8321,17 @@ function StepThree({
     );
   };
 
-  // 删除：正式人物清掉 TA 的台词与画面提及、移出人物表并删卡；群演
-  // 只清画面提及。别人的台词原意不动。确认弹层在清单组件里。
-  const deleteAutoAdded = async (entry: AutoAddedCharacter) => {
-    if (!scriptDraft) return;
+  // 删除（纯算）：正式人物清掉 TA 的台词与画面提及、移出人物表；
+  // 群演只清画面提及。别人的台词原意不动。v6.65 起 extra 与
+  // formal 一律写 disposition:"deleted" 墓碑（formal 不再直接
+  // delete states[name]）——服务端 autoDesignNewCharacters 四条
+  // 候选路径都认墓碑，删过的人永不被自动加回；用户日后亲手给
+  // TA 写了新台词，只会进待确认清单由人工定夺，不会静默复活。
+  const applyDeleteAutoAddedToScript = (
+    draft: ScriptData,
+    entry: AutoAddedCharacter,
+    currentAutoAdded: AutoAddedCharacter[],
+  ): ScriptData => {
     const stripInGroups = (groups: ScriptData["groups"]) =>
       groups.map((g) => ({
         ...g,
@@ -7808,35 +8349,66 @@ function StepThree({
             : { ...b, visual };
         }),
       }));
-    const states = { ...(scriptDraft.tempCharacterStates ?? {}) };
-    if (entry.kind === "extra") {
-      states[entry.name] = {
-        disposition: "deleted",
-        look: entry.look,
-        voice: "",
-        tone: "",
-        kind: isGroupTempName(entry.name) ? "group" : "single",
-      };
-    } else {
-      delete states[entry.name];
-    }
-    setScriptDraft({
-      ...scriptDraft,
-      characterRows: scriptDraft.characterRows.filter(
+    const states = { ...(draft.tempCharacterStates ?? {}) };
+    states[entry.name] = {
+      disposition: "deleted",
+      look: entry.look,
+      voice: "",
+      tone: "",
+      kind: isGroupTempName(entry.name) ? "group" : "single",
+    };
+    return {
+      ...draft,
+      characterRows: draft.characterRows.filter(
         (r) => r.name.trim() !== entry.name,
       ),
-      groups: stripInGroups(scriptDraft.groups),
-      storyboardGroups: scriptDraft.storyboardGroups
-        ? stripInGroups(scriptDraft.storyboardGroups)
-        : scriptDraft.storyboardGroups,
+      groups: stripInGroups(draft.groups),
+      storyboardGroups: draft.storyboardGroups
+        ? stripInGroups(draft.storyboardGroups)
+        : draft.storyboardGroups,
       tempCharacterStates: states,
-      autoAddedCharacters: autoAddedList.filter((e) => e.name !== entry.name),
-    });
-    setScriptDirty(true);
-    if (entry.kind === "formal") await deleteCardIfExists(entry.name);
-    setExportMsg(
-      `已删除「${entry.name}」：${entry.kind === "formal" ? "TA 的台词与画面提及已清掉、已移出正式人物表，人物卡也一并删了" : "画面里的提及已清掉"}，别人的台词没动。记得点「保存台词修改」。`,
+      autoAddedCharacters: currentAutoAdded.filter(
+        (e) => e.name !== entry.name,
+      ),
+    };
+  };
+
+  // 删除并立即落库（v6.65）：确认后把含删除结果的当前整份草稿
+  // 经保存按钮同一条路（saveMut → api.saveScript）存一次，不再
+  // 只改本地草稿等用户另点保存——旧做法下删完不点保存、一重载
+  // 就复活。取舍明说：若当时另有未保存的编辑，会随这一次保存
+  // 一并存下。formal 照旧删人物卡。确认弹层在清单组件里。
+  const deleteAutoAdded = async (entry: AutoAddedCharacter) => {
+    if (!scriptDraft) return;
+    const next = applyDeleteAutoAddedToScript(
+      scriptDraft,
+      entry,
+      autoAddedList,
     );
+    if (entry.kind === "formal") await deleteCardIfExists(entry.name);
+    const issue = checkScriptForSave(next);
+    if (issue) {
+      setScriptDraft(next);
+      setScriptDirty(true);
+      setExportMsg(
+        `已删除「${entry.name}」，但整份稿暂时存不上：${issue.text}。删除已写进当前草稿，处理好上面这件事后点「保存台词修改」即可落库。`,
+      );
+      return;
+    }
+    const json = JSON.stringify(next);
+    syncScriptJson(json);
+    const rev = commitLocalDraftEdit(next);
+    try {
+      await withWriteRetry(() => queueScriptSave(json, rev));
+      setExportMsg(
+        `已删除「${entry.name}」并保存：${entry.kind === "formal" ? "TA 的台词与画面提及已清掉、已移出正式人物表，人物卡也一并删了" : "画面里的提及已清掉"}，别人的台词没动，删除立即生效、重载也不会回来。删错了想加回来：在「人物与大纲」重新加这位人物，或在剧本行里重新写 TA 的台词（会进待确认清单由你确认）。`,
+      );
+    } catch {
+      setScriptDirty(true);
+      setExportMsg(
+        `已删除「${entry.name}」，但保存没成功（网络或服务问题）：删除还在当前草稿里，点「保存台词修改」再存一次即可。`,
+      );
+    }
   };
 
   // 移入群演（正式人物 → 群演）：移出正式人物表、删人物卡，记为无
@@ -7986,11 +8558,6 @@ function StepThree({
   );
   // v5.32 双口径对照（实测时长 vs 语速换算）：与上面两个 duration
   // 同源现算，只供时长试算卡并列展示，判定口径仍是 beatTiming。
-  const reviewDual = useMemo(
-    () =>
-      scriptDraft ? dualTimingInfo(scriptDraft, scriptDraft.groups) : null,
-    [scriptDraft],
-  );
   const storyboardDual = useMemo(
     () =>
       sbScript && scriptDraft
@@ -8083,10 +8650,6 @@ function StepThree({
   } | null>(null);
   const [aiAuditBusy, setAiAuditBusy] = useState(false);
   const [aiAuditError, setAiAuditError] = useState("");
-  const aiAuditStale =
-    !!scriptDraft &&
-    !!aiAudit &&
-    aiAudit.contentHash !== scriptContentHash(scriptDraft);
   const runAiAudit = async () => {
     if (!scriptDraft || aiAuditBusy) return;
     setAiAuditBusy(true);
@@ -8141,313 +8704,12 @@ function StepThree({
   // 已过期都只是面板里的参考信息，用户自己看过稿子就能点面板里的
   // 「我已看过剧本，直接跑分镜」；想让 AI 查一遍才点「开始审核」。
   // 审核本身只读不改稿。
-  const [unifiedBusy, setUnifiedBusy] = useState(false);
-  const [unifiedBusyText, setUnifiedBusyText] = useState("");
-  const [unifiedError, setUnifiedError] = useState("");
   const viralAudit = scriptDraft?.viralAudit ?? null;
   const viralStale =
     !!scriptDraft &&
     !!viralAudit &&
     viralAudit.contentHash !== scriptContentHash(scriptDraft);
-  // 合并问题清单：严格现算硬规则 + 爆款盖章（按 detIssueCount 分
-  // 硬规则 / AI审核；旧盖章无此字段按全部硬规则）+ 严格 AI 深审
-  // （未过期才计入）。硬问题在前、同级按段拍位置排序。
-  const unifiedIssues = useMemo<UnifiedIssue[]>(() => {
-    if (!scriptDraft || genIncomplete) return [];
-    const out: UnifiedIssue[] = [];
-    for (const i of strictIssues) {
-      out.push({
-        source: "硬规则",
-        severity: i.severity,
-        title: STRICT_CATEGORY_LABELS[i.category],
-        message: i.message,
-        evidence: i.evidence,
-        suggestion: i.suggestion,
-        groupIndex: i.groupIndex,
-        beatIndex: i.beatIndex,
-        strict: i,
-      });
-    }
-    if (viralAudit && !viralStale) {
-      const detCount = viralAudit.detIssueCount ?? viralAudit.issues.length;
-      viralAudit.issues.forEach((vi, idx) => {
-        out.push({
-          source: idx < detCount ? "硬规则" : "AI审核",
-          severity: vi.severity,
-          title: `${VIRAL_CATEGORY_LABELS[vi.category]} · ${vi.rule}`,
-          message: vi.message,
-          evidence: vi.evidence,
-          suggestion: vi.suggestion,
-          groupIndex: vi.groupIndex,
-          beatIndex: vi.beatIndex,
-          viral: vi,
-        });
-      });
-    }
-    if (aiAudit && !aiAuditStale) {
-      for (const i of aiAudit.issues) {
-        out.push({
-          source: "AI审核",
-          severity: i.severity,
-          title: STRICT_CATEGORY_LABELS[i.category],
-          message: i.message,
-          evidence: i.evidence,
-          suggestion: i.suggestion,
-          groupIndex: i.groupIndex,
-          beatIndex: i.beatIndex,
-          strict: i,
-        });
-      }
-    }
-    const sevRank = (s: "blocker" | "warning") => (s === "blocker" ? 0 : 1);
-    return out.sort(
-      (a, b) =>
-        sevRank(a.severity) - sevRank(b.severity) ||
-        a.groupIndex - b.groupIndex ||
-        a.beatIndex - b.beatIndex,
-    );
-  }, [scriptDraft, genIncomplete, strictIssues, viralAudit, viralStale, aiAudit, aiAuditStale]);
-  // 面板口径的通过：盖章通过 + 严格确定性无硬问题 + 严格 AI 深审无
-  // 硬问题。v4.18 起这只是面板展示口径，不再决定能不能确认分镜
-  // （严格确定性硬问题仍由 confirmBlockers / 服务端校验单独拦截，
-  // 与审核结论无关）。
-  const unifiedPassed =
-    !!viralAudit &&
-    !viralStale &&
-    viralAudit.passed &&
-    strictBlockers.length === 0 &&
-    !(aiAudit && !aiAuditStale && aiAudit.issues.some((i) => i.severity === "blocker"));
-  const runUnifiedAudit = async (opts?: {
-    rounds?: number;
-    draftOverride?: ScriptData;
-  }) => {
-    if (unifiedBusy || genIncomplete) return;
-    const baseDraft = opts?.draftOverride ?? scriptDraft;
-    if (!baseDraft) return;
-    setUnifiedBusy(true);
-    setUnifiedError("");
-    setAiAuditError("");
-    try {
-      if (!opts?.draftOverride && scriptDirty) await persistDraft(baseDraft);
-      setUnifiedBusyText("剧本审核中：先跑硬规则与爆款审核官，再跑严格 AI 深审…");
-      // v3.98 可靠性口径沿用：网关超时自动重试一次（审核只读、重试
-      // 安全），仍失败按真实原因报。runViralAudit 内部先跑确定性
-      // 铁律、再跑 AI 审核官；结论由这里盖章存进稿子。
-      const res = await callWithGatewayRetry(() =>
-        api.runViralAudit({
-          projectId: project.id,
-          scriptJson: JSON.stringify(baseDraft),
-        }),
-      );
-      const detIssues = res.deterministic as ViralIssue[];
-      const issues = [...detIssues, ...(res.aiIssues as ViralIssue[])];
-      const record: ViralAuditRecord = {
-        auditedAt: new Date().toISOString(),
-        modeId: res.modeId,
-        modeName: res.modeName,
-        hasGeneCard: res.hasGeneCard,
-        modeNote: res.modeNote,
-        passed: res.passed,
-        blockerCount:
-          res.summary?.blockerCount ??
-          issues.filter((i) => i.severity === "blocker").length,
-        warningCount:
-          res.summary?.warningCount ??
-          issues.filter((i) => i.severity === "warning").length,
-        rounds: opts?.rounds ?? baseDraft.viralAudit?.rounds ?? 0,
-        contentHash: res.contentHash,
-        summary: res.aiSummary ?? "",
-        issues,
-        detIssueCount: detIssues.length,
-      };
-      const stamped: ScriptData = { ...baseDraft, viralAudit: record };
-      await persistDraft(stamped);
-      if (!res.ok) {
-        // AI 审核官没跑成：结论先按确定性铁律盖章，原因亮出来人工决定。
-        setUnifiedError(
-          res.error ?? "AI 审核官没跑成，爆款部分先按硬规则判定。",
-        );
-      }
-      // 严格 AI 深审：结果以当前稿哈希绑定存进 aiAudit，改稿即过期。
-      setUnifiedBusyText("剧本审核中：爆款部分已完成，正在跑严格 AI 深审…");
-      let strictAiBlockers = 0;
-      try {
-        const sres = await callWithGatewayRetry(() =>
-          api.runStrictAudit({
-            projectId: project.id,
-            scriptJson: JSON.stringify(stamped),
-          }),
-        );
-        if (sres.ok || sres.aiIssues.length > 0) {
-          const sIssues = sres.aiIssues as StrictIssue[];
-          strictAiBlockers = sIssues.filter((i) => i.severity === "blocker").length;
-          setAiAudit({
-            issues: sIssues,
-            summary: sres.aiSummary,
-            contentHash: scriptContentHash(stamped),
-          });
-        }
-        if (!sres.ok) {
-          setAiAuditError(
-            sres.error ?? "严格 AI 深审没跑成，硬规则结果仍在清单里。",
-          );
-        }
-      } catch (e) {
-        setAiAuditError(
-          `严格 AI 深审没跑成：${describeThrownError(e)}。硬规则结果仍在清单里。`,
-        );
-      }
-      const strictDetBlockers = collectStrictIssues(stamped, speakerRegistry).filter(
-        (i) => i.severity === "blocker",
-      ).length;
-      if (record.passed && strictDetBlockers === 0 && strictAiBlockers === 0) {
-        setSaveMsg({
-          ok: true,
-          text: `剧本审核通过（${record.modeName || "未选模式"}${record.hasGeneCard ? "，已按基因卡铁律审" : ""}）：可以确认分镜了。结论已存进稿子，稿子再改动后这份结论会标过期（不影响直接跑分镜）。`,
-        });
-      } else {
-        setSaveMsg({
-          ok: false,
-          text: `剧本审核未通过：问题逐条列在下方「剧本审核」面板里（来源、原因、位置、原文、改法都有）。可以照清单改完后重新审核，或点面板里的「AI修改」让 AI 按清单只重写有问题的段；不想改也没关系，自己觉得可以就点「我已看过剧本，直接跑分镜」。`,
-        });
-      }
-    } catch (e) {
-      setUnifiedError(
-        `剧本审核没跑完：${describeThrownError(e)}。稿子的修改都还在页面上，先点保存再重试。`,
-      );
-    } finally {
-      setUnifiedBusy(false);
-      setUnifiedBusyText("");
-    }
-  };
 
-  // AI修改（v4.13 恢复 v4.08）：把合并清单的硬问题喂 rewriteScriptForViral
-  // ——爆款问题用盖章原文，严格问题映射为 ViralIssue（category=quality、
-  // rule=分类名）；round = 盖章 rounds + 1（动作上限 2，满 2 轮转人工）。
-  // 只生成候选稿 + 对照，不落盘；adoptAiFix 确认后直接写入、随后自动重审。
-  const [aiFixBusy, setAiFixBusy] = useState(false);
-  const [aiFixError, setAiFixError] = useState("");
-  const [aiFixCandidate, setAiFixCandidate] = useState<{
-    script: ScriptData;
-    rewrittenGroups: number[];
-    round: number;
-    baseHash: string;
-  } | null>(null);
-  const aiFixStale =
-    !!aiFixCandidate &&
-    !!scriptDraft &&
-    aiFixCandidate.baseHash !== scriptContentHash(scriptDraft);
-  const aiFixDiff = useMemo<AiFixDiffGroup[] | null>(() => {
-    if (!aiFixCandidate || !scriptDraft) return null;
-    const groups: AiFixDiffGroup[] = [];
-    for (const gi of aiFixCandidate.rewrittenGroups) {
-      const beforeG = scriptDraft.groups[gi];
-      const afterG = aiFixCandidate.script.groups[gi];
-      if (!afterG) continue;
-      const rows: AiFixDiffGroup["rows"] = [];
-      const maxLen = Math.max(beforeG?.beats.length ?? 0, afterG.beats.length);
-      for (let bi = 0; bi < maxLen; bi++) {
-        const b = beforeG?.beats[bi];
-        const a = afterG.beats[bi];
-        const bt = beatDiffText(b);
-        const at = beatDiffText(a);
-        if (!b && a) rows.push({ beatIndex: bi, before: "", after: at, kind: "added" });
-        else if (b && !a)
-          rows.push({ beatIndex: bi, before: bt, after: "", kind: "removed" });
-        else if (bt !== at)
-          rows.push({ beatIndex: bi, before: bt, after: at, kind: "changed" });
-      }
-      groups.push({ groupIndex: gi, title: afterG.title, rows });
-    }
-    return groups;
-  }, [aiFixCandidate, scriptDraft]);
-  const runAiFix = async () => {
-    if (aiFixBusy || unifiedBusy || !scriptDraft) return;
-    const blockers = unifiedIssues.filter((i) => i.severity === "blocker");
-    if (blockers.length === 0) return;
-    const round = (viralAudit?.rounds ?? 0) + 1;
-    if (round > 2) {
-      setAiFixError("AI修改已用满 2 轮：照清单自己改，或者不用审、直接点「我已看过剧本，直接跑分镜」。");
-      return;
-    }
-    setAiFixBusy(true);
-    setAiFixError("");
-    try {
-      if (scriptDirty) await persistDraft(scriptDraft);
-      const mapped: ViralIssue[] = [];
-      const seen = new Set<string>();
-      for (const u of blockers) {
-        const vi: ViralIssue =
-          u.viral ??
-          ({
-            severity: "blocker",
-            category: "quality",
-            rule: u.strict ? STRICT_CATEGORY_LABELS[u.strict.category] : u.title,
-            groupIndex: u.groupIndex,
-            beatIndex: u.beatIndex,
-            message: u.message,
-            evidence: u.evidence,
-            suggestion: u.suggestion,
-          } satisfies ViralIssue);
-        const key = `${vi.category}|${vi.rule}|${vi.groupIndex}|${vi.beatIndex}|${vi.message}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        mapped.push(vi);
-        if (mapped.length >= 40) break;
-      }
-      const res = await callWithGatewayRetry(() =>
-        api.rewriteScriptForViral({
-          projectId: project.id,
-          scriptJson: JSON.stringify(scriptDraft),
-          issues: mapped,
-          round,
-        }),
-      );
-      if (!res.ok || !res.scriptJson) {
-        setAiFixError(res.error ?? "AI修改没跑成，稿子没有改动，可以再试一次。");
-        return;
-      }
-      let candidate: ScriptData;
-      try {
-        candidate = JSON.parse(res.scriptJson) as ScriptData;
-      } catch {
-        setAiFixError("AI修改返回的稿子解析失败，原稿没有改动。");
-        return;
-      }
-      setAiFixCandidate({
-        script: candidate,
-        rewrittenGroups: res.rewrittenGroups,
-        round,
-        baseHash: scriptContentHash(scriptDraft),
-      });
-    } catch (e) {
-      setAiFixError(`AI修改没跑成：${describeThrownError(e)}。原稿没有改动。`);
-    } finally {
-      setAiFixBusy(false);
-    }
-  };
-  const adoptAiFix = async () => {
-    if (!aiFixCandidate || !scriptDraft || aiFixBusy || unifiedBusy) return;
-    if (aiFixCandidate.baseHash !== scriptContentHash(scriptDraft)) {
-      setAiFixError("原稿在候选生成后又被改过，候选已作废，请重新点「AI修改」。");
-      return;
-    }
-    const cand = aiFixCandidate;
-    setAiFixBusy(true);
-    setAiFixError("");
-    try {
-      // v5.29: no pre-adopt version snapshot anymore (snapshots removed).
-      await persistDraft(cand.script);
-      setAiFixCandidate(null);
-      setAiFixBusy(false);
-      await runUnifiedAudit({ rounds: cand.round, draftOverride: cand.script });
-    } catch (e) {
-      setAiFixError(
-        `采用 AI 修改失败：${describeThrownError(e)}。原稿还在页面上，先点保存再重试。`,
-      );
-      setAiFixBusy(false);
-    }
-  };
 
   // 成片资料包的导出门槛：待确认清单（说话人问题 + 未登记人物）非空、
   // 或总时长超目标时，点任何一项导出都先弹确认——「先处理再导出」
@@ -8636,21 +8898,8 @@ function StepThree({
       `剧本审核未通过（严格）：剧本有 ${strictBlockers.length} 项硬问题（${strictBlockers
         .slice(0, 2)
         .map((i) => i.message)
-        .join("；")}${strictBlockers.length > 2 ? "；等" : ""}）——先在下方「剧本审核」面板里逐项改完再确认分镜`,
+        .join("；")}${strictBlockers.length > 2 ? "；等" : ""}）——拦截原因与逐条明细（段·拍定位 + 原文 + 改法）在下方「确认分镜被拦截的原因」卡里展开看，改完再确认分镜`,
     );
-  // v4.18：剧本审核（爆款 + AI 深审结论）不再进 confirmBlockers——
-  // 没审 / 审完又改过稿 / 审了未通过都只是下方审核面板与这行普通
-  // 提示里的参考信息，不拦确认分镜。auditHint 只用于页面提示文案。
-  const auditHint: string | null =
-    !scriptDraft || genIncomplete || unifiedPassed
-      ? null
-      : !viralAudit
-        ? "提示：这份稿子还没跑 AI 审查（可选，不拦你）——你自己看过觉得可以，直接点「我已看过剧本，直接跑分镜」或上方「确认台词 · 生成分镜」；想让 AI 先查一遍，点审核面板里的「开始审核」。"
-        : viralStale
-          ? "提示：稿子在上次 AI 审查后又改过，之前的结论已过期（仅供参考，不拦你）——可以直接跑分镜，想让 AI 复查就点「重新审核」。"
-          : !viralAudit.passed
-            ? `提示：AI 审查没通过（${viralAudit.blockerCount} 项硬问题，仅供参考，不拦你）——问题清单在下方审核面板里，改不改由你定；自己觉得可以就直接跑分镜。`
-            : null;
   if (reviewDuration?.hasUnsplittableBeat)
     confirmBlockers.push(
       "有单个节拍超过 30 秒：节拍不会被切开，先缩短那句台词或拆成两个节拍",
@@ -8705,9 +8954,10 @@ function StepThree({
     // v3.98 写数据加固：手动保存与导入保存同口径走 withWriteRetry
     // （同一份稿整份重发、幂等，任何失败自动重试共 3 次）；失败
     // 的最终提示仍由 saveMut.onError 给出（带真实原因）。
-    void withWriteRetry(() =>
-      saveMut.mutateAsync(JSON.stringify(draft)),
-    ).catch(() => {});
+    const rev = saveGuard.draftRev;
+    void withWriteRetry(() => queueScriptSave(JSON.stringify(draft), rev)).catch(
+      () => {},
+    );
   };
 
   // 导入剧本确认：导入稿整体替换当前稿，走与普通保存完全相同的
@@ -8718,11 +8968,13 @@ function StepThree({
     importPendingRef.current = true;
     const json = JSON.stringify(final);
     syncScriptJson(json);
-    setScriptDraft(final);
-    setScriptDirty(false);
-    // v3.98 写数据加固：导入保存同走 withWriteRetry（整份重发、
-    // 幂等，共 3 次）；最终失败由 saveMut.onError 报真实原因。
-    void withWriteRetry(() => saveMut.mutateAsync(json)).catch(() => {});
+    const rev = commitLocalDraftEdit(final);
+    // v3.98 写数据加固口径保留：导入保存同走 withWriteRetry（整
+    // 份重发、幂等，共 3 次）；v6.68（危-05）改走串行保存器，序
+    // 号确认后才清脏标（旧版先 setScriptDirty(false) 再发保存，
+    // 保存失败也看不见未保存标记）；最终失败由 saveMut.onError
+    // 报真实原因。
+    void withWriteRetry(() => queueScriptSave(json, rev)).catch(() => {});
   };
 
   // Free editing of the script content (restored): add / delete / reorder
@@ -8791,8 +9043,8 @@ function StepThree({
     };
     const json = JSON.stringify(next);
     syncScriptJson(json);
-    setScriptDraft(next);
-    void withWriteRetry(() => saveMut.mutateAsync(json)).catch(() => {});
+    const rev = commitLocalDraftEdit(next);
+    void withWriteRetry(() => queueScriptSave(json, rev)).catch(() => {});
   };
 
   // v5.30 分镜页人物表「同步到分镜提示词」：把用户在人物表里改的
@@ -8916,8 +9168,13 @@ function StepThree({
       charPending,
     };
     const json = JSON.stringify(next);
+    // v6.68（危-05）：只 bump 序号 + 置脏标，不先 setScriptDraft——
+    // 保存失败时本地稿保持同步前的样子（函数头注释的既有口径）。
+    saveGuard.draftRev += 1;
+    const rev = saveGuard.draftRev;
+    setScriptDirty(true);
     try {
-      await withWriteRetry(() => saveMut.mutateAsync(json));
+      await withWriteRetry(() => queueScriptSave(json, rev));
     } catch (err) {
       return {
         ok: false,
@@ -8925,6 +9182,10 @@ function StepThree({
       };
     }
     syncScriptJson(json);
+    // C1（v6.68）：这里的 setScriptDraft(next) 是保存成功后的本地
+    // 同步（把刚存好的整份稿设为当前稿），不是一笔新编辑——不
+    // bump 序号、不置脏标；位置必须在 queueScriptSave 成功之后
+    // （保存失败时上方 catch 已 return，本地稿一字不动）。
     setScriptDraft(next);
     if (opts?.rematchOnly && edits.length === 0)
       return {
@@ -8946,8 +9207,8 @@ function StepThree({
     const next: ScriptData = { ...scriptDraft, filmStyle: text };
     const json = JSON.stringify(next);
     syncScriptJson(json);
-    setScriptDraft(next);
-    void withWriteRetry(() => saveMut.mutateAsync(json)).catch(() => {});
+    const rev = commitLocalDraftEdit(next);
+    void withWriteRetry(() => queueScriptSave(json, rev)).catch(() => {});
   };
 
   // v5.72 人物别名手动钉死 / 恢复自动（分镜页「人物称呼对照」面
@@ -8967,8 +9228,8 @@ function StepThree({
     const next: ScriptData = { ...scriptDraft, aliasOverrides };
     const json = JSON.stringify(next);
     syncScriptJson(json);
-    setScriptDraft(next);
-    void withWriteRetry(() => saveMut.mutateAsync(json)).catch(() => {});
+    const rev = commitLocalDraftEdit(next);
+    void withWriteRetry(() => queueScriptSave(json, rev)).catch(() => {});
   };
 
   // v3.57 确认分镜 / 重新生成分镜共用进度条状态（GenProgress）：两步
@@ -8999,6 +9260,7 @@ function StepThree({
       allowOverlong?: boolean;
       skipWarningGate?: boolean;
       skipMappingDiffGate?: boolean;
+      skipReviewGate?: boolean;
     },
   ): Promise<boolean> => {
     const allowOverlong = opts?.allowOverlong === true;
@@ -9013,6 +9275,23 @@ function StepThree({
       confirmHardBlockers.length > 0
     )
       return false;
+    // v6.70 审查问题提醒（只提醒、不拦路，挂在超长三选一与警告门
+    // 之前、调 api.confirmStoryboard 之前）：审片台标了「有问题」
+    // 的拍还没处理完时先弹框问一声，点「仍确认」带 skipReviewGate
+    // 继续走原流程；点「回去处理」什么都不发生。未审的拍不拦。
+    if (!opts?.skipReviewGate) {
+      const issueN = Object.values(scriptDraft.reviewMarks ?? {}).filter(
+        (m) => m.state === "issue",
+      ).length;
+      if (issueN > 0) {
+        setReviewIssuePrompt({
+          count: issueN,
+          cuts: cutAfterFlat,
+          allowOverlong: allowOverlong || undefined,
+        });
+        return false;
+      }
+    }
     // v3.56 警告知晓门（只警告、不拦截）：有未读的一致性警告时先弹
     // 知晓框，点「已知晓，仍确认」才继续走下面的原流程；现有拦截
     // （上方 confirmHardBlockers 等）一字未动，顺序也在警告之前。
@@ -9187,7 +9466,13 @@ function StepThree({
         text:
           "已由服务端确认分镜并完成分组。" +
           (res.overlongLenses.length > 0
-            ? `其中 ${res.overlongLenses.length} 个镜头超过 30 秒（${res.overlongLenses.map((l) => `镜头${l.lensIndex} ${l.duration.toFixed(1)} 秒、超 ${l.overBy.toFixed(1)} 秒`).join("、")}），是按你的高权限确认保留的：没有拆分、没有缩减，分镜页会标红注明；随时可以回审查页缩减，或重新进行分镜分配改回来。`
+            ? `其中 ${res.overlongLenses.length} 个镜头超过 30 秒（${res.overlongLenses.map((l) => `镜头${l.lensIndex} ${l.duration.toFixed(1)} 秒、超 ${l.overBy.toFixed(1)} 秒`).join("、")}），已按原样确认保留：没有拆分、没有缩减，分镜页会标红注明；生图 / 生视频时注意工具的单镜头上限，超长部分要在剪辑时自己处理；随时可以回审查页缩减，或重新进行分镜分配改回来。`
+            : "") +
+          // v6.70：确认生成新分镜时服务端已清空审查标记（位置键对
+          // 不齐），有标记时在回执里写明，别让用户以为标记还在。
+          (scriptDraft.reviewMarks &&
+          Object.keys(scriptDraft.reviewMarks).length > 0
+            ? "审查标记已清空，请按新分镜重审。"
             : ""),
       });
       queryClient.invalidateQueries({ queryKey: ["project", project.id] });
@@ -9309,6 +9594,23 @@ function StepThree({
       void confirmLines(pending.cuts, {
         allowOverlong: pending.allowOverlong,
         skipWarningGate: true,
+        // v6.70：审查问题提醒排在警告门之前，走到警告门说明提醒
+        // 已经问过（或本就没有问题拍），续行时不要再弹一次提醒。
+        skipReviewGate: true,
+      });
+    }
+  };
+
+  // v6.70 审查问题提醒点「仍确认」：关框后带 skipReviewGate 按暂存
+  // 的入口（普通确认 / 切分点确认 / 高权限确认）继续走原确认流程；
+  // 点「回去处理」只关框，稿子与旧分镜都不动。
+  const confirmReviewIssue = () => {
+    const pending = reviewIssuePrompt;
+    setReviewIssuePrompt(null);
+    if (pending) {
+      void confirmLines(pending.cuts, {
+        allowOverlong: pending.allowOverlong,
+        skipReviewGate: true,
       });
     }
   };
@@ -9334,6 +9636,8 @@ function StepThree({
         allowOverlong: pending.allowOverlong,
         skipWarningGate: true,
         skipMappingDiffGate: true,
+        // v6.70：同警告门续行口径，审查问题提醒不再重复弹。
+        skipReviewGate: true,
       });
     }
   };
@@ -9355,9 +9659,14 @@ function StepThree({
     };
     const json = JSON.stringify(next);
     syncScriptJson(json);
-    setScriptDraft(next);
-    saveMut.mutate(json);
-    goWindow("review");
+    // C2（v6.68，危-05）：backToReview 原本没有任何置脏标调用，
+    // 保存前显式走 commitLocalDraftEdit 置脏标 + bump 序号，再走
+    // 串行保存器；保存成功才跳回审查页，失败时脏标保持 true、
+    // 不跳转（停在当前页，失败原因由 saveMut.onError 显示）。
+    const rev = commitLocalDraftEdit(next);
+    void queueScriptSave(json, rev)
+      .then(() => goWindow("review"))
+      .catch(() => {});
   };
 
   return (
@@ -9381,7 +9690,12 @@ function StepThree({
         {inStoryboard ? "分镜" : "剧本审查"}
       </h2>
 
-      {/* 顶部操作区：一行小按钮，每种操作只在这里出现一次 */}
+      {/* 顶部操作区：一行小按钮，每种操作只在这里出现一次。v6.71 起
+          审查态有稿且生成完成时，确认 / 保存 / 查看分镜已移到审片台下方
+          的独立按钮行、导入与重新生成已移到纸面正文卡右上角，本区只剩
+          无稿态 / 分镜态 / 生成未完成态的内容，这三种情况之外不渲染，
+          免得顶部留一条空框。 */}
+      {(!scriptDraft || inStoryboard || genIncomplete) && (
       <div className="mt-4 flex flex-wrap items-center gap-2" aria-label="操作区">
         {!scriptDraft && (
           <button
@@ -9393,7 +9707,7 @@ function StepThree({
             {generating ? "正在写剧本…" : "一键生成剧本"}
           </button>
         )}
-        {!inStoryboard && (
+        {!inStoryboard && !scriptDraft && (
           <button
             type="button"
             className="btn btn-sm"
@@ -9411,57 +9725,6 @@ function StepThree({
           >
             {generating ? "正在续写…" : "继续生成"}
           </button>
-        )}
-        {scriptDraft && !inStoryboard && !genIncomplete && (
-          <button
-            type="button"
-            className="btn btn-sm"
-            disabled={generating}
-            onClick={() => setShowRegenConfirm((v) => !v)}
-          >
-            重新生成剧本
-          </button>
-        )}
-        {scriptDraft && !inStoryboard && (
-          <>
-            {scriptDirty && (
-              <button
-                type="button"
-                className="btn btn-sm btn-primary"
-                onClick={() => saveScript(true)}
-                disabled={saveMut.isPending}
-              >
-                {saveMut.isPending ? "保存中…" : "保存台词修改"}
-              </button>
-            )}
-            <button
-              type="button"
-              data-tour="confirm-storyboard"
-              className="btn btn-sm btn-primary"
-              onClick={() => void confirmLines()}
-              disabled={
-                scriptDirty ||
-                saveMut.isPending ||
-                genIncomplete ||
-                confirmHardBlockers.length > 0
-              }
-            >
-              {saveMut.isPending
-                ? "正在生成分镜…"
-                : stageStoryboard
-                  ? "按当前台词重新生成分镜"
-                  : "确认台词 · 生成分镜"}
-            </button>
-            {stageStoryboard && (
-              <button
-                type="button"
-                className="btn btn-sm"
-                onClick={() => goWindow("storyboard")}
-              >
-                查看分镜 →
-              </button>
-            )}
-          </>
         )}
         {scriptDraft && inStoryboard && (
           <>
@@ -9512,6 +9775,7 @@ function StepThree({
           </p>
         )}
       </div>
+      )}
       {/* v4.16 按分镜写资产提示词：生成中 / 报错 / 完成提示 / 预览确认
           面板（只在分镜页出现——确认分镜之后才有这个功能） */}
       {inStoryboard && assetGenMut.isPending && (
@@ -9862,6 +10126,24 @@ function StepThree({
           onCancel={() => setOverridePrompt(null)}
         />
       )}
+      {/* v6.70 审查问题提醒：审片台标了「有问题」的拍还没处理，
+          点确认先问一声（只提醒、不拦路）。点「仍确认」继续走原
+          确认流程；点「回去处理」= 什么都不发生。 */}
+      {reviewIssuePrompt && (
+        <ConfirmDialog
+          title="还有问题没处理"
+          body={
+            <p>
+              审片台上还有 {reviewIssuePrompt.count}{" "}
+              处标了「有问题」的拍没处理，确定要确认吗？确认后会照常生成分镜，审查标记会清空、按新分镜重审；想先处理，点「回去处理」回审片台改。
+            </p>
+          }
+          confirmLabel="仍确认"
+          cancelLabel="回去处理"
+          onConfirm={confirmReviewIssue}
+          onCancel={() => setReviewIssuePrompt(null)}
+        />
+      )}
       {/* v3.56 一致性警告知晓框：只提醒、不拦截。点「已知晓，仍
           确认」才继续刚才那次确认分镜；点取消 = 什么都不发生，
           稿子和旧分镜都不动。 */}
@@ -9998,135 +10280,6 @@ function StepThree({
           )}
         </div>
       )}
-      {scriptDraft && !inStoryboard && (
-        <SnapshotCompareCard script={scriptDraft} project={project} />
-      )}
-      {scriptDraft && !inStoryboard && serverCheck?.validation && (
-        <div
-          className="mt-3 rounded-[var(--radius)] border p-3.5"
-          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-          aria-label="服务端校验结果"
-        >
-          <p className="text-sm leading-6">
-            <strong>服务端校验结果</strong>
-            （保存与确认分镜时服务端跑同一份共享规则，页面只展示这份结果）——
-            总时长 {serverCheck.validation.reviewDuration.totalSeconds.toFixed(1)} 秒
-            （台词 {serverCheck.validation.reviewDuration.dialogueSeconds.toFixed(1)} 秒 +
-            动作 {serverCheck.validation.reviewDuration.actionSeconds.toFixed(1)} 秒）
-            {serverCheck.validation.reviewDuration.targetSeconds > 0
-              ? `，目标 ${serverCheck.validation.reviewDuration.targetSeconds} 秒，差值 ${serverCheck.validation.reviewDuration.diffSeconds != null ? (serverCheck.validation.reviewDuration.diffSeconds >= 0 ? "+" : "") + serverCheck.validation.reviewDuration.diffSeconds.toFixed(1) : "—"} 秒`
-              : "，未设目标时长"}
-            ；待确认人物 {serverCheck.validation.speakerIssues.length} 项
-            {serverCheck.validation.tempCharacters.filter(
-              (t) => t.status !== "extra-ok",
-            ).length > 0
-              ? `；待自动分拣 ${serverCheck.validation.tempCharacters.filter((t) => t.status !== "extra-ok").length} 人（有台词进正式表、无台词记群演，审查页会自动补上）`
-              : "；新人物已全部分拣（正式表 / 群演）"}
-            {overlongLenses.length > 0
-              ? sbCutMode === "segment"
-                ? `；按剧本段切镜将有 ${overlongLenses.length} 个段（镜头）超过 30 秒（${overlongLenses.map((l) => `第${l.lensIndex}段「${l.title}」 ${l.duration.toFixed(1)} 秒`).join("、")}）——确认分镜时不会自动拆分、不会静默拆段，会先让你选「缩减」，或用「高权限确认」明知超长仍生成`
-                : `；按当前每镜头秒数分配将有 ${overlongLenses.length} 个镜头超过 30 秒（${overlongLenses.map((l) => `镜头${l.lensIndex} ${l.duration.toFixed(1)} 秒`).join("、")}）——确认分镜时不会自动拆分，会先让你选「缩减」「重新进行分镜分配」，或用「高权限确认」明知超长仍生成`
-              : ""}
-            。
-          </p>
-          {serverCheck.validation.blockers.length > 0 ? (
-            <p className="mt-1 text-sm leading-6" style={{ color: "var(--bad)" }} role="alert">
-              服务端拦截原因：{serverCheck.validation.blockers.join("；")}。
-            </p>
-          ) : (
-            <p className="mt-1 text-sm leading-6" style={{ color: "var(--ok)" }}>
-              服务端校验通过：无拦截项，可确认分镜。
-            </p>
-          )}
-          {serverCheck.validation.characterWarnings.length > 0 && (
-            <p className="mt-1 text-sm leading-6 text-[var(--dim)]" role="note">
-              人物资产提醒（只提醒、不拦截）：{serverCheck.validation.characterWarnings.join("；")}。
-            </p>
-          )}
-        </div>
-      )}
-      {/* v3.56 切镜方式选择（分镜确认页）：默认按时长打包（现行）；
-          主动选「按剧本段切镜」后，下次确认分镜一段一镜。只改选择、
-          不动稿子，旧分镜在重新确认前保持原样。 */}
-      {scriptDraft && !inStoryboard && (
-        <div
-          className="mt-3 rounded-[var(--radius)] border p-3.5"
-          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-          aria-label="切镜方式选择"
-        >
-          <StoryboardCutModeSelector
-            mode={sbCutMode}
-            segmentCount={scriptDraft.groups.length}
-            onChange={setSbCutMode}
-          />
-        </div>
-      )}
-      {/* v3.56 三处一致警告清单（只读、只提醒不拦截）：挨着服务端
-          校验结果展示。保存不受影响；确认分镜前有未读警告会先弹
-          知晓框，点「已知晓，仍确认」继续。 */}
-      {scriptDraft && !inStoryboard && consistencyWarnings.length > 0 && (
-        <div
-          className="mt-3 rounded-[var(--radius)] border p-3.5"
-          style={{ borderColor: "var(--accent)", background: "var(--accent-soft)" }}
-          aria-label="三处一致警告清单"
-        >
-          <p className="text-sm leading-6">
-            <strong>一致性提醒（{consistencyWarnings.length} 条，只提醒、不拦截）</strong>
-            ——大纲、剧本、分镜三处有对不上的地方，先列出来给你看，保存与确认都不被它拦：
-          </p>
-          <ul className="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-6">
-            {consistencyWarnings.map((w) => (
-              <li key={w}>{w}</li>
-            ))}
-          </ul>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {warningsAcked ? (
-              <span className="text-xs text-[var(--dim)]" role="status">
-                已知晓这批提醒：确认分镜时不会再弹知晓框（提醒内容变了会重新提醒）。
-              </span>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-sm"
-                aria-label="已知晓这批一致性提醒"
-                onClick={() => setWarnAckHash(warningsHash)}
-              >
-                已知晓
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-      {scriptDraft && !inStoryboard && !genIncomplete && (
-        <UnifiedAuditPanel
-          audit={viralAudit}
-          stale={viralStale}
-          issues={unifiedIssues}
-          viralSummary={viralAudit?.summary ?? ""}
-          strictSummary={aiAudit && !aiAuditStale ? aiAudit.summary : ""}
-          passed={unifiedPassed}
-          busy={unifiedBusy}
-          busyText={unifiedBusyText}
-          error={unifiedError || aiAuditError}
-          roundsUsed={viralAudit?.rounds ?? 0}
-          aiFixBusy={aiFixBusy}
-          aiFixError={aiFixError}
-          aiFixDiff={aiFixDiff}
-          aiFixRound={aiFixCandidate?.round ?? 0}
-          aiFixStale={aiFixStale}
-          onRun={() => void runUnifiedAudit()}
-          onAiFix={() => void runAiFix()}
-          onAdoptAiFix={() => void adoptAiFix()}
-          onDiscardAiFix={() => {
-            setAiFixCandidate(null);
-            setAiFixError("");
-          }}
-          onDirectStoryboard={() => void confirmLines()}
-          directDisabled={
-            scriptDirty || saveMut.isPending || confirmHardBlockers.length > 0
-          }
-        />
-      )}
       {scriptDraft && !inStoryboard && speakerIssues.length > 0 && (
         <div
           className="mt-3 rounded-[var(--radius)] border p-3.5"
@@ -10248,24 +10401,36 @@ function StepThree({
           </ul>
         </div>
       )}
-      {scriptDraft && !inStoryboard && auditHint && (
-        <p
-          className="mt-2 text-sm leading-6 text-[var(--dim)]"
-          role="note"
-          aria-label="剧本审核提示（可选，不拦截）"
-        >
-          {auditHint}
-        </p>
-      )}
       {scriptDraft && !inStoryboard && confirmHardBlockers.length > 0 && (
-        <p
-          className="mt-2 text-sm leading-6"
-          style={{ color: "var(--bad)" }}
+        <div
+          className="mt-2"
           role="alert"
           aria-label="确认分镜被拦截的原因"
         >
-          暂时不能确认分镜：{confirmHardBlockers.join("；")}。
-        </p>
+          <p className="text-sm leading-6" style={{ color: "var(--bad)" }}>
+            暂时不能确认分镜：{confirmHardBlockers.join("；")}。
+          </p>
+          {!isAiDissectProject && strictBlockers.length > 0 && (
+            <ul
+              className="mt-1.5 list-disc space-y-1 pl-5 text-sm leading-6"
+              style={{ color: "var(--bad)" }}
+              aria-label="严格硬问题明细"
+            >
+              {strictBlockers.map((i, k) => (
+                <li key={k}>
+                  {i.groupIndex < 0
+                    ? "全片"
+                    : i.beatIndex < 0
+                      ? `第 ${i.groupIndex + 1} 段（整段）`
+                      : `第 ${i.groupIndex + 1} 段 · 第 ${i.beatIndex + 1} 句（节拍 ${i.beatIndex + 1}）`}
+                  ：{i.message}
+                  {i.evidence ? `（原文：${i.evidence}）` : ""}
+                  {i.suggestion ? ` 改法：${i.suggestion}` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       {scriptDraft &&
         !inStoryboard &&
@@ -10278,8 +10443,7 @@ function StepThree({
             aria-label="单个节拍超过30秒提示"
           >
             有单个节拍超过 30
-            秒：节拍不会被切开。点「确认台词 ·
-            生成分镜」会先让你选——缩减（把这拍改短或拆成两拍）、重新进行分镜分配，或高权限确认明知超长仍保留这一拍。
+            秒：节拍不会被切开。点「通过传分镜」会按原样确认，超长镜头在分镜页标红留痕；想改短就缩短那句台词或把节拍拆成两个。
           </p>
         )}
       {genError && (
@@ -10309,7 +10473,7 @@ function StepThree({
       )}
       {scriptDraft && !inStoryboard && stageStoryboard && !scriptDirty && (
         <p className="mt-2 text-xs text-[var(--dim)]">
-          这份剧本已生成过分镜。在这里改台词后，点顶部「按当前台词重新生成分镜」，分镜才会按新台词更新；时长、时间码、SRT 与导出都在「分镜」窗口。
+          这份剧本已生成过分镜。在这里改台词后，点下方「通过传分镜」，分镜才会按新台词更新；时长、时间码、SRT 与导出都在「分镜」窗口。
         </p>
       )}
 
@@ -10435,13 +10599,6 @@ function StepThree({
         </div>
       )}
 
-      {/* 时长试算（审查窗口）：统一公式 台词字数（去标点）÷ 语速 + 动作秒数，
-          逐段、逐节拍、总时长、目标与差值都摆出来，超标标红。 */}
-      {scriptDraft && !inStoryboard && reviewDuration && (
-        <div className="mt-4">
-          <DurationSummaryCard summary={reviewDuration} unitLabel="段落" dual={reviewDual} />
-        </div>
-      )}
 
       {/* 缩减提示横幅：从超长选择框点【缩减】回来时出现，写明每个
           超长镜头至少要缩减多少秒（约合多少字），对应节拍已在下方
@@ -10478,11 +10635,86 @@ function StepThree({
                 秒，超 {lens.overBy.toFixed(1)} 秒：需要至少缩减{" "}
                 {lens.overBy.toFixed(1)} 秒（按当前语速 {scriptDraft.speechRate}{" "}
                 字/秒约合 {needChars} 个字；也可以减动作秒数或删节拍）才能不超
-                30 秒。对应的节拍已在下方正文里高亮——删台词、改台词、减动作秒数、删节拍都行，改完先保存，再点「确认台词 ·
-                生成分镜」重新校验；仍超会再次让你选择。
+                30 秒。对应的节拍已在下方正文里高亮——删台词、改台词、减动作秒数、删节拍都行，改完先保存，再点「通过传分镜」重新确认；如果还是超长，会按原样确认并在分镜页标红留痕。
               </p>
             );
           })}
+        </div>
+      )}
+
+      {/* v6.70 审片台（一行一拍通表）：按镜头分组审画面与对白，
+          打勾／标问题／忽略误报都即时落库；下方纸面正文照旧。 */}
+      {scriptDraft && !inStoryboard && !genIncomplete && (
+        <div
+          className="mt-4 rounded-[var(--radius)] border p-4 card-shadow"
+          style={{ borderColor: "var(--border)", background: "var(--surface)" }}
+          aria-label="审片台"
+        >
+          <h3 className="text-sm font-bold">审片台 · 一行一拍</h3>
+          <p className="mt-1 text-xs leading-5 text-[var(--dim)]">
+            按镜头分组，一拍一行：画面和对白并排看，审完一拍点「通过」，有问题点「有问题」写一句备注——标记立刻存进剧本，刷新、换电脑都还在。时间码点一下跳到分镜页对应镜头。台词在这里改和在下方正文里改是同一份稿子。
+          </p>
+          <div className="mt-3">
+            <ReviewTable
+              script={scriptDraft}
+              projectId={project.id}
+              mappingCtx={mappingCtx}
+              groupSeconds={sbGroupSeconds}
+              cutMode={sbCutMode}
+              overlongLenses={overlongLenses}
+              speakerIssueBeatKeys={speakerIssueBeatKeys}
+              speakerIssueCount={speakerIssueCount}
+              totalSeconds={reviewDuration?.totalSeconds ?? null}
+              onEditBeat={updateBeat}
+              onBlurSave={saveScript}
+              onApplyMark={applyReviewMark}
+              onJumpLens={jumpToReviewLens}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* v6.71 独立按钮行：审片台下方、纸面正文上方。「通过传分镜」=
+          原「确认台词 · 生成分镜」改名搬位（confirmLines 同一入口、
+          禁用条件一字未动，首次与再次确认统一这个文案）；不带
+          !genIncomplete 门——生成未完成时按钮保持禁用态可见，与搬位
+          前一字不差。 */}
+      {scriptDraft && !inStoryboard && (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {/* v6.72：审查页直接传新对白——超长按原样确认（静默高权限确认），不弹三选一；分镜页重切仍走三选一。 */}
+          <button
+            type="button"
+            data-tour="confirm-storyboard"
+            className="btn btn-sm btn-primary"
+            onClick={() => void confirmLines(undefined, { allowOverlong: true })}
+            disabled={
+              scriptDirty ||
+              saveMut.isPending ||
+              genIncomplete ||
+              confirmHardBlockers.length > 0
+            }
+          >
+            {saveMut.isPending ? "正在生成分镜…" : "通过传分镜"}
+          </button>
+          {scriptDirty && (
+            <button
+              type="button"
+              className="btn btn-sm btn-primary"
+              onClick={() => saveScript(true)}
+              disabled={saveMut.isPending}
+            >
+              {saveMut.isPending ? "保存中…" : "保存台词修改"}
+            </button>
+          )}
+          {stageStoryboard && (
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => goWindow("storyboard")}
+            >
+              查看分镜 →
+            </button>
+          )}
         </div>
       )}
 
@@ -10490,20 +10722,44 @@ function StepThree({
       {scriptDraft && !inStoryboard && (
         <div ref={resultRef}>
           <FoldHelp label="审查页说明">
-            上方「时长试算」按统一公式（台词字数去标点 ÷ 语速 + 动作秒数）逐段试算，但不生成时间码与分镜。下面每个节拍都能自由修改：说话人、语气、台词、画面、音效直接点进去改；没有台词的节拍点「＋ 给这个节拍加台词」；每段末尾能新增节拍，每个节拍也能删除或上下移动。改完先点顶部「保存台词修改」，再点「确认台词 · 生成分镜」；每镜头秒数在分镜窗口里设置。
+            上方「时长试算」按统一公式（台词字数去标点 ÷ 语速 + 动作秒数）逐段试算，但不生成时间码与分镜。下面每个节拍都能自由修改：说话人、语气、台词、画面、音效直接点进去改；没有台词的节拍点「＋ 给这个节拍加台词」；每段末尾能新增节拍，每个节拍也能删除或上下移动。改完先点「保存台词修改」，再点「通过传分镜」；每镜头秒数在分镜窗口里设置。
           </FoldHelp>
           <div
             className="review-script-card mt-4 rounded-[var(--radius)] border p-4 card-shadow"
             style={{ borderColor: "var(--border)", background: "var(--surface)" }}
             aria-label="剧本正文"
           >
-            <h3
-              className="text-sm font-bold"
-              id="review-script-heading"
-              tabIndex={-1}
-            >
-              剧本正文 · 逐句审查台词
-            </h3>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3
+                className="text-sm font-bold"
+                id="review-script-heading"
+                tabIndex={-1}
+              >
+                剧本正文 · 逐句审查台词
+              </h3>
+              {/* v6.71：导入剧本 / 重新生成剧本从顶部操作区搬到正文卡
+                  右上角（它们操作的都是正文稿子）；无稿时正文卡不渲染，
+                  导入入口留在顶部操作区。重新生成保留 !genIncomplete 门。 */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  onClick={() => setShowScriptImport(true)}
+                >
+                  导入剧本
+                </button>
+                {!genIncomplete && (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    disabled={generating}
+                    onClick={() => setShowRegenConfirm((v) => !v)}
+                  >
+                    重新生成剧本
+                  </button>
+                )}
+              </div>
+            </div>
             <ReviewDocument
               script={scriptDraft}
               highlightBeats={shrinkHighlight}
@@ -11101,90 +11357,6 @@ function StepThree({
 
 }
 
-/**
- * Generation snapshot comparison （风格快照锁定）: two rows — the
- * settings the script was generated with vs the current project
- * settings. Mismatched items are marked red. Changing project settings
- * never rewrites the generated draft; it only affects the next
- * generation, and this card says so.
- */
-function SnapshotCompareCard({
-  script,
-  project,
-}: {
-  script: ScriptData;
-  project: ProjectDetail;
-}) {
-  const currentStyleLabel =
-    project.stylePreset === "自定义"
-      ? project.styleCustom.trim() || "自定义风格"
-      : project.stylePreset;
-  const fmtTarget = (t: number) => (t > 0 ? `${t} 秒` : "未设");
-  const items: {
-    label: string;
-    generated: string;
-    current: string;
-    changed: boolean;
-  }[] = [
-    {
-      label: "语速",
-      generated: `${script.speechRate} 字/秒`,
-      current: `${project.speechRate} 字/秒`,
-      changed: script.speechRate !== project.speechRate,
-    },
-    {
-      label: "风格",
-      generated: script.styleLabel,
-      current: currentStyleLabel,
-      changed: script.styleLabel !== currentStyleLabel,
-    },
-    {
-      label: "目标时长",
-      generated: fmtTarget(script.targetSeconds),
-      current: fmtTarget(project.targetSeconds),
-      changed: script.targetSeconds !== project.targetSeconds,
-    },
-  ];
-  const anyChanged = items.some((i) => i.changed);
-  const mark = (changed: boolean): CSSProperties | undefined =>
-    changed ? { color: "var(--bad)", fontWeight: 700 } : undefined;
-  return (
-    <div
-      className="mt-3 rounded-[var(--radius)] border p-3.5"
-      style={{ borderColor: "var(--border)", background: "var(--surface)" }}
-      aria-label="生成快照对照"
-    >
-      <div className="space-y-1 text-sm leading-6">
-        <p>
-          <strong>生成时：</strong>
-          {items.map((i, idx) => (
-            <span key={i.label}>
-              {idx > 0 ? "、" : ""}
-              {i.label}
-              <span style={mark(i.changed)}> {i.generated}</span>
-            </span>
-          ))}
-        </p>
-        <p>
-          <strong>当前项目：</strong>
-          {items.map((i, idx) => (
-            <span key={i.label}>
-              {idx > 0 ? "、" : ""}
-              {i.label}
-              <span style={mark(i.changed)}> {i.current}</span>
-              {i.changed ? "（已变更）" : ""}
-            </span>
-          ))}
-        </p>
-      </div>
-      <p className="mt-1.5 text-xs leading-5 text-[var(--dim)]">
-        {anyChanged
-          ? "标红的是已变更的设置。改项目设置只影响下一次生成，已生成的稿子不变（仍按生成时的快照计时与分镜）；想按新设置来请重新生成，重新生成前会先提示导出当前稿并确认覆盖。"
-          : "改项目设置只影响下一次生成，已生成的稿子不变；想按新设置来请重新生成（会先提示导出和覆盖确认）。"}
-      </p>
-    </div>
-  );
-}
 
 /**
  * Duration trial card （时长试算）: per-group durations (split into
@@ -12089,7 +12261,7 @@ function StoryboardSettingsPanel(props: {
 
 // ---------------------------------------------------------------------------
 
-const WORKSPACE_VERSION = "v6.61";
+const WORKSPACE_VERSION = "v6.73";
 const WORKSPACE_CHANGELOG: {
   version: string;
   date: string;
@@ -12102,9 +12274,75 @@ const WORKSPACE_CHANGELOG: {
   highlightSteps?: HighlightStepDef[];
 }[] = [
   {
+    version: "v6.73",
+    date: "2026-11-20",
+    current: true,
+    text: "这一版把分镜页两套提示词的规矩对齐了。左边 MiniMax H3 版以前每镜开头只有一句简写的风格句、没有【郑重声明】，现在和右边 Seedance 版一样：每镜开头带全片统一风格（中文一行加英文一行）和【郑重声明】三条，末尾带资产图优先规则——复制本镜头、复制全部、发送到画布批量生成，三条路都带。另外修了一个错：画面描述里混进来的后期剪辑东西——顶部黄字标题、字幕、花字、弹幕、水印、片头大字、关注点赞提示这类——以前会被写进 H3 和 Seedance 的分镜头提示词里，现在拼提示词的时候会自动剔掉，只留在剧本和后期剪辑环节；剧本原文一个字没动，重新生成也不会再出现。黑板上写的字、招牌上的字、手机屏幕里的短信这类剧情里的实物文字不受影响，照样保留。分镜的切法、时长、镜头数、台词、人物定义都没变。",
+    features: "H3 同步 Seedance 固定规则 + 后期元素过滤（v6.73，提问题 #112001，用户原话见问题单；Muse2 方案 + Muse3 方案审核「通过（附条件）」+ 附条件 C2（Seedance 过滤后空段丢弃规则）已落地；纯客户端 scriptlib.ts（新增 stripPostProductionText / stripNoLineDialogueText + buildH3TextForGroup / h3FixVisualText / beatLinesForModel / beatLinesForFastMini 五处接线）+ App.tsx 版本/日志/H3 区说明 + replication 基线 + DATA-PLAN；服务端 actions.ts / rules.ts 零改动、无 DB schema 变更、无新 migration、无新 npm 依赖；沙箱未提交任何真实生成、未用任何凭证）：【H3 同步固定规则】buildH3TextForGroup 的 detailed_description 开场改为与 Seedance 同源同序：filmStyleLockLines(script) 逐行原样（默认 = DEFAULT_FILM_STYLE_LOCK_LINES 中英两行，项目改过 filmStyle 有几行写几行）紧跟 videoDeclarationLines() 一行（【郑重声明】三条 = VIDEO_DECLARATION_ITEMS 原文一字不动，以代码原文「不烧录任何字幕」为准），其后接原有场景句与 10–15 秒版切镜规则同义句；sections 拼装把 ASSET_PRIORITY_RULE 拼进 detailed_description 末尾（最后一个 [Shot] 之后、仍在本段内，其后还有 overall_soundscape 与 non_diegetic_music 两段，位置与 Seedance 的整镜最后一行不同、不写同口径）。不加 Seedance 2.5 的一句话概述（H3 summary 已等价覆盖）；六段顺序与段名、summary、retention、(Sx) 编号、齐声复合编号、appears in、音色行、站位句、切分 / 时长 / Shot 数 / 台词原文一字未动。本版推翻 v6.19「H3 两版不动」旧口径（落点只在 detailed_description 段内，不新增段、不在 subject_definitions 之前加前言）。复制单镜 / 复制全部 / 发送到画布批量生成三路同源 buildH3TextForGroup，改一处三路跟随，App.tsx 拼装层未动。【后期元素过滤】新增纯函数 stripPostProductionText（不读数据、不写回）：按 [。；！？\\n] 切大句、大句内按 [：:，、] 切小片段，命中后期关键词的小片段整段剔除后按原分隔符重拼并清理残留标点（孤标点、连续冒号压一）；关键词 = 带修饰或引文形态的标题、字幕、花字、弹幕、水印、片头、片尾、LOGO、消息界面 / 聊天框 / 聊天记录，关注 / 点赞 / 评论区只在与按钮 / 提示 / 点击 / 弹窗 / 引导同现时才剔（裸动作词如「对着镜头点赞」保留）；白名单优先（黑板 / 白板 / 招牌 / 霓虹灯 / 纸条 / 书本 / 报纸 / 试卷 / 作业本 / 手机屏幕片段整段保留，剧情道具文字不误删），但互动引导判定优先于白名单（屏幕弹出关注提示照删）；LOGO 带衣物 / 商品等实物词时保留；「标签：内容」式写法（标签片段无引文）时冒号后第一片段（标题 / 字幕文字本身）连带剔除，标签自带引文时不连坐后续正常片段。接线三处：①h3FixVisualText 出口一处（画面句 / 末帧句 / 组内承接句 / 跨组承接句四路覆盖）；②beatLinesForModel 对 visualContent / finalFrame 过滤、无台词拍经 stripNoLineDialogueText 只剥台词行摘要（beatDisplay 把无台词拍画面首分句截 24 字拼进 dialogueText 的泄漏路），过滤点在 dialogueLineForModel 的 2.0 花括号替换之前；③beatLinesForFastMini 同口径（主动作分句截取点在过滤后）。有台词拍的 dialogueText 含台词原文、台词一字不差绝不过滤（与方案字面「dialogueText 也过一遍」的口径出入在此写明：方案点名的泄漏路只有无台词拍，有台词拍过滤会伤台词原文）。【空段处理（附条件 C2）】Seedance 过滤后 visualContent / finalFrame 为空的段整段丢弃、两段都空整行不写（beatLinesForModel），Fast/Mini 画面为空时「画面内容」行不写，不留「画面内容：；末帧：。」畸形行；H3 侧画面句本有非空守卫。【明确不动】通用版 buildSingleGroupText（全仓零调用点）与 lensBeatLines（Markdown / AI 清单共用）——已知残留：Markdown / AI 清单 / 逐镜头提示词包三处导出里的画面原文仍逐字保留后期句，本批不动、后续一批再扩；剧本数据（beat.visual 原文、overlays 字段）一字未动，审查页纸面正文仍显示原文；Seedance 三版 × 四档的切分、时长、拍数与原有规则声明保持不变。【删除清单】零删除（除沙箱自建临时项目验证完清理外，不动任何正式数据）。平台版本仍 28（v29 全站迁移不在本批）。真机待核（项目 52，用户亲手走）：分镜页 H3 每镜 10–15 秒版逐段展开核对开头风格锁两行 + 郑重声明、末尾资产图优先规则、全文搜不到顶部标题与字幕描写；把 H3 镜头 1 粘进 H3 桌面端实际生成一镜，看开场新增的声明行是否被接受（本批唯一未核实项）；Seedance 逐镜复制与改前对照，除被剔的后期分句外逐字一致。",
+  },
+  {
+    version: "v6.72",
+    date: "2026-11-20",
+    text: "这一版就改一件小事：审查页点「通过传分镜」时，镜头超过 30 秒不再弹那个三选一的框了。以前镜头超长（比如 30.6 秒）会先让你选——缩减、重新进行分镜分配、还是明知超长仍确认，选完还要再确认一次；现在点下去就直接把新对白传进分镜表，超长的镜头按原样保留、不拆不缩，分镜页照旧标红写明超了多少秒，确认完的回执里也会写清哪几个镜头超长、超了多少秒，并多提醒一句：生图、生视频的工具对单个镜头有上限，超长的部分可能生成失败或被截断，剪辑时要自己处理。想改短随时能回审查页缩减，或者到分镜页重新进行分镜分配。其他几道提醒（还有问题没处理、人物映射变了、一致性警告没看过）照旧会弹，不受影响。分镜页那边的「按当前设置重新分镜」没动，还是老样子：超长时仍会让你三选一，因为那边是主动重切镜头结构，最后一道确认留着更稳妥。说话人没填、总时长超目标这类硬拦截也照旧，按钮该禁用还是禁用。",
+    features: "通过传分镜跳过超长弹窗（v6.72，用户主聊直派，无 flor 编号，用户原话「点击“通过传分镜”我不希望有这个弹窗，直接将新的对白传到分镜表里，更新分镜表」；Muse2 方案（276 行）+ Muse3 方案审核「通过（附条件）」+ 附条件 C1（行号 4 处：提醒框门 9286、映射对照门 9333–9354、分镜页超长警告卡 10548–10606、FoldHelp 所在页为模式／基础设置页）与 C2（A5 断言排除口径改写）已由主负责直改进方案文件；纯客户端 App.tsx 改动，服务端零改动、无 DB schema 变更、无新 migration、无新 npm 依赖；沙箱未提交任何真实生成、未用任何凭证）：【核心改动一处】审查页「通过传分镜」按钮 onClick 由 confirmLines() 改为 confirmLines(undefined, { allowOverlong: true })，复用既有 opts.allowOverlong 字段（与 confirmOverride 今天走的同一条路），不新增 state、不新增服务端字段、不新增分支；按钮上方加 v6.72 注释一行（JSX 注释形式 {/* */}，因该位置是 JSX 子节点、裸 // 会渲染成页面文字——与 brief 字面形式的口径出入在此写明，文字内容一字未改）；禁用条件（scriptDirty || saveMut.isPending || genIncomplete || confirmHardBlockers.length > 0）一字未动。客户端超长预检 if (!allowOverlong) 跳过、服务端收到 allowOverlong:true 后 overrideUsed 成立不拒单，服务端兜底弹框同样不触发；无超长时带旗无害（走普通确认、旧 overlongOverride 照旧清除）。【回执超长句改口径】confirmLines 成功分支的共享超长句：旧句「按你的高权限确认保留」改为「已按原样确认保留」，并追加工具上限后果句「生图 / 生视频时注意工具的单镜头上限，超长部分要在剪辑时自己处理」（不写具体数字）；两路（审查页静默确认、分镜页显式高权限确认）共用此句、都成立。【活文案 4 处】高光引导步骤 body（点「通过传分镜」直接传、超长按原样确认＋分镜页标红留痕）、FoldHelp「分镜怎么切」（模式／基础设置页）、审查页单拍超 30 秒提示卡、缩减横幅——均改成只讲审查页按钮的新口径，三选一的说法只在分镜页路径下成立。【采用的决定 7 条】①范围只改审查页按钮，分镜页「按当前设置重新分镜」（regenerateStoryboard 自带预检＋无参 confirmLines）一字不动，两入口表现不同是有意取舍（传新对白 vs 重切结构）；②超长按原样确认（静默高权限确认），绝不自动重切，overlongOverride 留痕照旧、分镜页标红照旧；③其余三道门（v6.70 提醒框、映射对照门、一致性警告知晓门）照旧，续行透传 allowOverlong 本单未动、已核实；④单拍超 30 秒同口径（原样确认＋留痕＋回执写明，不另写分支）；⑤修超长入口留在分镜页超长警告卡（返回修改台词／按当前设置重新分镜）＋再分配预览，审查页缩减横幅保留；⑥禁用门一字不动；⑦失败重试口径照旧（callWithGatewayRetry 不碰）。【明确不动】三对话框定义（OverlongChoiceDialog / OverlongOverrideDialog / ReallocationDialog）与渲染点、confirmLines 其余逻辑、confirmBlockers / confirmHardBlockers、处理函数（chooseShrink / chooseReallocate / confirmReallocation / chooseOverride / confirmOverride 与三道门续行函数）、服务端 actions.ts / rules.ts / scriptlib.ts、历史更新日志条目、分镜页文案与分镜页单拍提示卡，全部一字未动。【删除清单】零删除（除沙箱自建临时项目验证完清理外，不动任何正式数据）。平台版本仍 28（v29 全站迁移不在本批）。真机待核（项目 52，用户亲手走）：审查页改一句台词保存后点「通过传分镜」不弹任何框、直接出成功回执且回执写明镜头 1 超 30.6 秒已按原样确认保留＋工具上限提醒；分镜页镜头 1 仍 30.6 秒且对白是新词、H3 两版与 Seedance 三版逐字新台词；分镜页超长警告卡标红与两个入口在；分镜页点「按当前设置重新分镜」三选一照常弹（阴性对照）；改台词不点按钮切分镜页还是旧词（阴性对照）；标一处「有问题」点通过传分镜提醒框照常弹、点继续确认后仍按原样确认不弹三选一；分镜页三选一选缩减回审查页横幅是新文案、改短保存再点通过传分镜直接确认；单拍超 30 秒项目 52 没有（最长单拍 3.2 秒），真机无法测、沙箱动作测试覆盖同一代码路径。",
+  },
+  {
+    version: "v6.71",
+    date: "2026-11-20",
+    text: "这一版把剧本审查页上半截清爽了：你框选的生成快照对照、服务端校验结果、切镜方式选择、一致性提醒、剧本审核（可选）五张卡，加上时长试算卡，都删掉了；剧本审核面板连同它背后的 AI 审核、AI 修改入口一并下线（爆款审核的老结论还留在稿子里、导出清单里照旧如实标注，想再审以后单独加回来）。确认按钮换了名字也换了地方：现在叫「通过传分镜」，搬到审片台正下方单独一行，左边是它，旁边依次是「保存台词修改」和「查看分镜 →」。用法跟以前一样：审片台或正文里改完对白，先点保存，再点「通过传分镜」，分镜立刻按新对白重新切好，H3、Seedance 打开就是新台词；不点这个按钮，分镜还是旧台词，不会自己跟着变。导入剧本和重新生成剧本搬到了正文卡片右上角（还没稿子时，导入入口还在页面顶部）。确认被拦时原因还写在原来那张「确认分镜被拦截的原因」里，严格问题现在能逐条展开看：第几段第几拍、原文是什么、怎么改，都写明了。审片台表头进度旁边多了一行「全片 X 秒」，删掉时长试算卡之后总时长在这儿看。审查标记还是老规矩：确认一次清一次，回执里会写明。",
+    features: "审片台删卡与「通过传分镜」（v6.71，用户主聊直派，无 flor 编号，用户原话「将图1、2框选的进行删除，我希望改完台词设置按钮“通过传分镜”点击之后就把新对白传到分镜里面了，h3、seedance都会更新」；Muse2 方案 v2（376 行）+ Muse3 复审「通过（附条件）」+ 附条件 4 处主负责直改（auditHint const 结束行 9566→9565、拦截卡范围 11250–11258→11250–11259、重新分镜按钮 10447–10455→10448–10455、删除清单补 onDirectStoryboard 并计数 15 项→19 项）+ Q1–Q10 按方案推荐值执行、Q6 随决定⑤选 (a) 撤回；纯客户端 App.tsx 单文件改动；服务端零改动（confirmStoryboard 一字未动、delete next.reviewMarks 与其注释保留、saveReviewMark 保留）、无 DB schema 变更、无新 migration、无新 npm 依赖；沙箱未提交任何真实生成、未用任何凭证）：【删图1六块】①操作区审查态分支移出（见按钮搬移）；②生成快照对照卡 SnapshotCompareCard 渲染点＋组件定义删除；③服务端校验结果卡删除（只删展示，校验与拦截逻辑不动；服务端 blockers / characterWarnings 在审查页不再常驻展示，只剩确认被拒时的错误回执）；④切镜方式选择卡只删审查页渲染（StoryboardCutModeSelector 定义与分镜页设置面板里的实例保留，切法取存档值 storyboardConfig.mode ?? \"duration\"，分镜页改）；⑤一致性提醒卡删除（consistencyWarnings / warningsAcked 等 state 保留，确认警告门不动，警告内容改在确认时的知晓框里看）；⑥剧本审核（可选）面板 UnifiedAuditPanel 整链删除共 19 项：渲染点、组件定义、面板内类型 UnifiedIssue / AiFixDiffGroup、handler runUnifiedAudit / runAiFix / adoptAiFix、state unifiedIssues / unifiedPassed / unifiedBusy / unifiedBusyText / unifiedError / aiFixBusy / aiFixError / aiFixCandidate / aiFixDiff / aiFixStale、面板 props onDiscardAiFix / onDirectStoryboard。连带必删两处（不删构建 strict 不过）：beatDiffText（仅 aiFixDiff 用）、aiAuditStale 派生量（底版里读处只有 unifiedIssues / unifiedPassed / 面板 strictSummary prop，均已删）。明确保留：runAiAudit / aiAudit / aiAuditBusy / aiAuditError（分镜页 StrictAuditPanel 用）、viralAudit / viralStale（导出门槛清单仍读）、serverCheck、strictIssues / strictBlockers、服务端动作 runViralAudit / runStrictAudit / rewriteScriptForViral。【删图2】时长试算卡审查页实例删除（DurationSummaryCard 定义与分镜页实例保留）；reviewDual 随卡删除，reviewDuration 保留（confirmBlockers 超目标拦截与审片台表头「全片 X 秒」都读它）。【删 auditHint 整段】const（9556–9565，含上方注释 9553–9555）＋渲染段（11241–11249）整段删除，不改文案；9566 行 if (reviewDuration?.hasUnsplittableBeat) 是单拍超 30 秒进 confirmBlockers 的入口，保留未动；unifiedPassed 随之删除；面板上方 6199–6219 的统一审核说明注释块与 states 上方注释保留未删（只删代码，注释留作历史口径）。【通过传分镜】现有确认按钮改名（confirmLines 同一入口、不新增按钮、不新增服务端动作），取消 stageStoryboard 三元文案切换，统一叫「通过传分镜」（保存中仍显示「正在生成分镜…」）；禁用条件与现行一字不动（scriptDirty || saveMut.isPending || genIncomplete || confirmHardBlockers.length > 0）；从顶部操作区移到独立按钮行：审片台卡闭合之后、纸面正文卡之前，独立 div，渲染条件 scriptDraft && !inStoryboard（不含 !genIncomplete 门，genIncomplete 态下按钮禁用态可见）；按钮行自左至右＝通过传分镜（data-tour=\"confirm-storyboard\" 锚点随按钮走）＋保存台词修改（scriptDirty 时出现）＋查看分镜 →（stageStoryboard 时出现）。点完不自动跳分镜页（Q2）。【按钮搬移】导入剧本分两处（有稿→纸面正文卡右上角小按钮；无稿→操作区 div 内原位，条件改 !inStoryboard && !scriptDraft，同一 setShowScriptImport 入口）；重新生成剧本→纸面正文卡右上角，保留现行 !genIncomplete 门；继续生成、一键生成、返回修改台词、按当前设置重新分镜、按分镜写资产提示词、无稿提示 1/2 全部在操作区 div 内原位保留；操作区 div 本体加渲染条件 !scriptDraft || inStoryboard || genIncomplete（审查态有稿且生成完成时不渲染空框）。【文案同步】帮助文案（已分镜提示）改「点下方「通过传分镜」更新」；审查态 11302 提示段落改「点下方「通过传分镜」」（该段不是概览卡，概览卡只在分镜态渲染、未动）；FoldHelp 改「改完先点「保存台词修改」，再点「通过传分镜」」；高光引导步骤 location 改「审片台下方的「通过传分镜」按钮」（target 不变）；严格拦截文案改指「确认分镜被拦截的原因」卡；7647 导入注释改入口位置。不动：11576 注释（挂在分镜页时长试算卡上）、历史更新日志条目、确认成功回执（含 v6.70 清空追加句）。【拦截原因卡】保留的「确认分镜被拦截的原因」卡（原 11250–11259）由 p 改 div，继续显示 confirmHardBlockers 文案，并扩 strict 明细：!isAiDissectProject && strictBlockers 非空时逐条列段·拍定位（全片 / 整段 / 第 N 段 · 第 M 句（节拍 M），与已删面板 loc 同格式）+ message + 原文 evidence + 改法 suggestion；不新增卡片、不新增数据源（strictBlockers 现成）。11263 一带的「单个节拍超过 30 秒提示」卡未动。【审片台表头】ReviewTable 新增 totalSeconds prop（StepThree 传 reviewDuration?.totalSeconds ?? null），进度同一行右侧 ml-auto 小字「全片 X 秒」（Q8）。【决定⑤选 (a)】维持 v6.70 清空口径：确认清审查标记，服务端零改动，Q6 撤回。【数据流不变】对白只存正文拍；通过传分镜＝走原 confirmLines 重切 storyboardGroups 快照；H3 两版 / Seedance 三版 useMemo 现算随快照自动更新，无显式重拼、无第二份缓存。【删除清单】本版删除只限方案 §2.1 #6 的 19 项＋图1其余五块＋图2时长试算卡审查页实例＋auditHint 整段＋reviewDual＋连带必删 beatDiffText / aiAuditStale，共删约 890 行；除沙箱自建临时项目验证完清理外，不动任何正式数据。平台版本仍 28（v29 全站迁移不在本批）。真机待核（项目 52，用户亲手走）：图1六块与图2时长试算不见、审片台 / 纸面正文 / 待确认人物清单都在、独立按钮行三按钮位置、纸面正文右上角导入 / 重新生成在、审片台表头「全片 X 秒」在、auditHint 消失且无过期提示；审片台改一句台词点「通过传分镜」后分镜页对白是新词、H3 两版与 Seedance 三版逐字是新台词；阴性对照（改台词不点按钮切分镜页还是旧词）；标一处「有问题」确认后刷新标记已清空且回执有清空句；留一个说话人为空的拍时按钮禁用、拦截卡有原因、strict 明细能展开；镜头 1 超长点按钮三选一照常弹；分镜页「按当前设置重新分镜」照常走通、返回修改台词 / 按分镜写资产提示词都在；分镜页时长试算卡还在、分镜设置里切分方式还能改。",
+  },
+  {
+    version: "v6.70",
+    date: "2026-11-20",
+    text: "这一版给剧本审查页加了一张「审片台」：以前审查剧本要在正文里一拍一拍往下翻着看，现在正文上方多了一张表，一行就是一拍，按镜头分好组——时间、画面、对白、这一拍多长、审没审，五样并排摆着，画面里有谁也用小色块标出来（色块上带一句造型，认人更快）。审完一拍点「通过」，有毛病点「有问题」写一句备注，标记马上存进剧本，刷新页面、换台电脑打开都还在，不像以前关掉就没了。哪一拍的说话人其实没在画面里（比如画外音），表里会红字提醒，要是本来就是画外音、提醒报错了，点一下「忽略这条」就不再提，忽略也存下来。镜头超过 30 秒的，整组标红、组头挂「超长镜头」牌子；筛选按钮可以只看有问题的、只看没台词的、只看超长的、只看说话人还没确认的，表头还写着审了多少拍、几处有问题，道具名点一下能只看带这件道具的拍。点某一拍的时间码，能跳到分镜页对应的镜头。最后点「确认台词 · 生成分镜」时，要是还有标了「有问题」的拍没处理，会先弹框问一声「还有 N 处问题没处理，确定要确认吗」，点「仍确认」照常走，点「回去处理」就回去改，不拦路、只提醒。确认生成新分镜后审查标记会清空（新分镜的拍和旧的对不上号），回执里会写明，照着新分镜重审一遍就行。下面的纸面正文、人物待确认那一段、原来的按钮，一个都没动。",
+    features: "剧本审查页改版第一期（v6.70，用户主聊直派，无 flor 编号，用户 2026-11-20 00:5x 定改版方向、01:24 立新规「Muse3 审核通过即执行」；Muse2 方案 v2（返修稿 355 行）+ Muse3 复审「通过（附条件）」8 条全改到位、打回 0 条 + 附条件 3 处小修主负责直改（6 处行号、Q5 改写、搜台词移第二期）+ Q1–Q10 按方案推荐值执行；无 DB schema 变更、无新 migration、无新 npm 依赖；服务端只加一个轻量动作 saveReviewMark 与 storedScript 一个可选字段；沙箱未提交任何真实生成、未用任何凭证）：【采用的决定 Q1–Q10】Q1 一行一拍通表；Q2 色块＋造型句（characterRows[].look 第一分句、超 20 字截断加…）；Q3 台词原文逐字比对放第二期、记录 20 本次不修；Q4 只提醒不拦路、「没处理的问题」仅指状态「有问题」的拍；Q5 第一期清单＝能审、能标、能存、能提醒；Q6 标记进剧本数据；Q7 超长按镜头标；Q8 误报可一键忽略、忽略状态落库；Q9 参考帧图／原片对照本期不做；Q10 visual 拆字段本期不做。【第 1 项 审片台通表（App.tsx 新增 ReviewTable 组件，渲染在审查页纸面正文上方）】一行一拍五列（时间码／画面／对白／时长／状态），按镜头分组：时长切分口径与分镜页同一份（cutMode=segment 时一组一镜，否则 scriptlib 复用 rules.rawLensSegments 按 storyboardConfig.groupSeconds 切）；组头行＝镜头序号＋标题＋时间段＋时长＋场景＋拍数。表头工具只留筛选（全部／只看有问题／只看无台词／只看超长／只看说话人待确认）＋进度（已审 N／总拍数，有问题 M 处）＋待确认人物同数徽标（数字与校验段 speakerIssues 同数、服务端校验在手时取服务端那份，点徽标即筛「只看说话人待确认」）。时间码点击跳分镜页对应镜头（分镜页 H3 镜头卡容器加 id={`lens-${lensIndex}`}，goWindow + setTimeout 350ms scrollIntoView，与缩减回流滚动同法；未确认分镜时回落滚到纸面正文对应拍 paper-beat-<gi>-<bi>）。画面列＝visual 原文＋场景标签＋在场人物色块（lensScreenCasts inclusive 现算，色块＝代号＋lookSnippet 造型句，颜色按代号哈希取固定 8 色）；对白列＝说话人色块＋台词 AutoGrowTextarea＋情绪 input，与纸面正文同一套 updateBeat/onBlurSave 数据、只换摆法，台词原文一个字不由本表自动改；无台词拍写明「无台词·花字」或「无台词·动作」（scriptlib noLineBeatKind：visual 含「花字」→花字，否则动作；overlays 是空数组不能拿它判）。道具静态清单行：propAssets 名字点一下筛出 visual 含该道具名的拍、再点取消，只做筛选不做首次／末次断言。【第 2 项 超长按镜头标红】rules.ts rawLensSegments 与 LensSegment 类型加 export（原为模块内函数）；客户端经 scriptlib import 块复用（LensSegment 进类型再导出块）；超长判定只用服务端同一份结果 serverCheck.overlongLenses（StepThree 既有 overlongLenses 变量，服务端优先、本地兜底口径未动），不客户端另算；整组标红＝组头行红底＋「超长镜头 · 超 30 秒」徽标（只挂组头、不挂拍行）＋组内拍行左缘红条（inset box-shadow）；「只看超长」筛出超长镜头整组。单拍超 30 秒是另一条线，拍行照旧标红＋「单拍超 30 秒」小标（30.05 软顶口径未动）。【第 3 项 审查标记落库】scriptlib ScriptData 加 reviewMarks?: Record<string, ReviewMark>（键＝既有 `${gi}-${bi}` 拍键）；ReviewMark = { state?: \"pass\" | \"issue\", note?, ignoredChecks?, updatedAt }——state 定为可选是与 brief 字面的一处口径出入（brief 写必填）：只忽略了误报、还没给结论的拍也要能落库，这类记录不算已审、不计入确认提醒，parseScript 归一与进度计数均按此口径；parseScript 补归一（键须 /^(\\d+)-(\\d+)$/ 且拍存在、state 只认 pass/issue、note 只留字符串截 500 字、ignoredChecks 只留字符串数组、全空记录丢弃、全空删键、旧稿无键原样过，照 charPending 口径）；服务端 storedScript 加 reviewMarks 可选字段（reviewMarkIn）；新动作 saveReviewMark 仿 saveCharPending（只改一键：读 scriptJson→parseScript 校验键存在→写/删该键→updatedAt 服务端盖章→整份回写，并顺带清掉指向已不存在的拍的旧标记；mark=null 或键不合法即删该键）；整份 saveScript 为兜底（客户端 applyReviewMark 同步本地草稿与 syncScriptJson 但不置脏标，标记不顶亮「保存台词修改」按钮）；importProject／importBackupProjects 落库前 stripReviewMarks（仿 stripCharPending，导入的稿子不带别人的审查标记）；confirmStoryboard 服务端 delete next.reviewMarks（与 viralOverride 同处）——确认／重新生成分镜即清空，客户端确认成功回执在有标记时追加「审查标记已清空，请按新分镜重审。」；只改台词文字不清空（saveScript 原样存）。regenerateStoryboard 走 confirmStoryboard 同一服务端路径、同样清空；backToReview 只切 stage 不删标记，回到审查页再确认时由 confirm 清空，口径与 brief 一致。【第 4 项 检查项】「说话人未在画面点名」：台词非空＋说话人非空＋说话人在 characterRows 名内＋说话人不在本拍 lensScreenCasts inclusive 内 → 红字提醒＋「画外音／误报，忽略这条」按钮（把 REVIEW_CHECK_SPEAKER_OFFSCREEN 写进该拍 ignoredChecks 落库，保留已有 state/note）；明确不用 scriptlib retention 的 inclusive ∪ 本拍说话人口径（照搬则这条永远报不出来）；说话人代号与描述词 code 同取 characterRows 名、同一套 code。三项查不了的不进第一期：台词时间对不上（解剖稿无逐句时间戳）、无台词静默说明（H3 拼装侧 R4 已管、审查侧无新信息）、站位跳变（visual 无结构化站位字段）。【第 5 项 确认前提醒】确认按钮与文案一字未动（仍「确认台词 · 生成分镜」）；提醒挂 confirmLines 内、硬拦截之后、警告知晓门与超长三选一之前、调 api.confirmStoryboard 之前：reviewMarks 里 state=issue 的拍数 N>0 → ConfirmDialog「还有 N 处问题没处理，确定要确认吗？」［仍确认／回去处理］；仍确认走 confirmReviewIssue 带 skipReviewGate 续行原入口（cuts/allowOverlong 暂存透传）；警告门与映射对照门的续行（confirmWarningAck/confirmMappingDiff）同步带 skipReviewGate，防提醒重复弹；被忽略的检查不产生 issue 状态、天然不计入 N；未审的拍只在表头进度计数、不拦。【第 6 项 待确认人物不动】校验段（服务端校验区 speakerIssues 展示与 charPending 改动流程）一字未动，只在审片台表头加同数徽标做筛选入口。【刻意不做（第二期）】搜台词、批量操作、迷你时长条、快捷键、导出、缩略图升级、台词原文逐字比对、道具首次／末次结构化字段、参考帧图／原片对照、原片播放器；不自动改台词；现有四个按钮（生成/重新生成剧本、确认台词·生成分镜等）一字未动；不动共用解析 parseDissection、不修分析记录 20。【与 brief 的出入（如实记）】①ReviewMark.state 可选（见第 3 项，ignore-only 记录需要）；②审片台是加在纸面正文上方的新段，没有替换或删改既有 ReviewDocument 纸面正文（brief 只要求通表，没要求删纸面；纸面正文的增删拍/移动等编辑能力保留）；③方案 §三提的拍行「超长」小标按 brief 第 2 项口径不挂（徽标只挂组头），拍行只有左缘红条。【验收样本】项目 52（14 组 40 拍、34 句台词、6 拍无台词＝5 拍花字＋1 拍纯动作 46.8–48.2、总时长 63.44 秒、只有镜头 1 第 1–20 拍 30.6 秒超长、最长单拍 3.2 秒）只读验收，绝不对项目 52/50/49 跑写动作。【删除清单】零删除（除沙箱自建临时项目验证完清理外，不动任何正式数据）。真机待核：项目 52 审查页打开审片台看镜头 1 组头红底＋超长徽标、40 拍行数与进度；任一拍点通过/有问题＋写备注后刷新验标记还在；B 教转头那类画外音拍点「忽略这条」后刷新验不再提醒；五个筛选逐个点；时间码点镜头 1 跳分镜页落点；标一处有问题后点确认看提醒框、点回去处理与仍确认两路；确认后看回执「审查标记已清空」一句与标记确已清空；按段切分的项目（如项目 52 groupSeconds=30/segment 口径）组头与分镜页镜头数对齐。",
+  },
+  {
+    version: "v6.69",
+    date: "2026-11-19",
+    text: "这一版只动 MiniMax H3 两版提示词的拼法，治的是你查到的两个声音毛病：同一个人换个镜头声音就变了（音色漂移）、没人说话的空档里模型自己补出人声。改了五处，全是提示词文字，台词和人物资料一个字没动。一，每个人的音色那一行末尾加了一句固定的话——「全片固定用这一把声音，每一镜音色保持一致」，让模型把音色当成这个人的固定身份，而不是随便挑一类声音；音色没填的人不加，也不会替他编。二，多人同框、只有一个人说话时，台词后面补一句「其余在场人物保持闭嘴、不出声」，免得第二个人跟着开口或者把台词抢过去；说话的人在画面外时改说「画面内人物保持闭嘴、不出声」；只有一个人出镜的镜头不加。三，说台词时把位置也带上——「在画面左侧低声说出」，位置和同拍那句站位说明用的是同一份，谁在左谁在右不会自相矛盾，帮模型认准是谁在说话。四，一个镜头里有台词、但某一拍没人说话且这拍够长（1 秒以上）时，写明「本镜第几秒到第几秒完全安静，只有环境底噪持续」，把留白说死，不给模型补人声的空子；整个镜头都没台词的还是原来那句，不重复写。五，相邻两个镜头是同一个场景时，新镜头第一句先接上一个镜头的结尾画面再停顿半秒，让镜头之间连得上；换了场景、或者上一个镜头结尾的人不在这个镜头里，就不硬接。先说清：这版是把漂移收窄、去掉一个补人声的成因，不是根治——光靠提示词文字锁不住声音本身，真要锁死得走参考音频那条路，那是另一件事，这版没动。声音到底有没有变稳，要你真机生成一镜戴耳机听过才算数。",
+    features: "H3 提示词音色优化（v6.69，用户主聊直派，无 flor 编号，用户 2026-11-19 中午发 MiniMax H3 音色漂移调研结论并令出方案；Muse2 方案 R1–R5＋R0 + Muse3 引用核对 18 项（17 全对、1 项行号范围出入）与审核结论「通过（附条件）」+ 主负责 6 项必改修正全部采纳逐条执行；纯客户端 scriptlib.ts 的 buildH3TextForGroup 一个函数 + App.tsx 版本/日志/H3 区说明 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；沙箱未提交任何真实生成、未用任何凭证）：【目标口径】本批是「漂移收窄＋去掉一个杂音成因」，不是根治：H3 每次生成独立采样、无 voice ID、无 seed，提示词锁不住声音身份本身；根治在声音管线一侧（参考音频／固定 voice_id 的 TTS 先行），另立单、本批不动。【R1 音色锁定句】新增常量 H3_VOICE_LOCK=「全片固定用这一把声音，每一镜音色保持一致。」（H3 常量区、与 H3_SCALE_LOCK 同风格）；音色行原文照写、行尾恒跟锁定句；音色为空整行不出、锁定句也不出；不写「不随情绪、语速改变」（不压情绪）；不虚构 <Audio N>、不机翻；retention 不动。【R2 他人闭嘴句】台词句三分支（齐声 6322 / 单人 6329 / 认不到主体 6338，行号为底版口径）在台词句 push 之后、本拍末尾追加：他人 = beatCast.inclusive 减本拍说话人代号（齐声扣齐声全体），仅 others.length >= 1 时写，单人镜头不写；台词 <d> 内外一字不改；措辞按修正 3 分流——说话人代号在 inclusive 内用「其余在场人物保持闭嘴、不出声。」，已识别但不在 inclusive 内（画外音／未入画）用「画面内人物保持闭嘴、不出声。」，R: 分支同理用「画面内人物」版（且 inclusive 非空才写）。【R3 台词位置指代（修正 1 改措辞）】站位块先重构成位置表 positionOf（按 presentTags 顺序：2 人左/右、3 人左/中/右、4+ 人左半侧/右半侧），站位句改从表拼、输出逐字不变；单人台词句位置放进发声动词短语、标签仍打头：「<Subject N> (Sx) 在{位置}{h3SpeakVerb 返回值}，<d>…</d>」，动词随情绪走；标签前加前缀的方案不采用（无特批偏离）；齐声句不动；说话人不在位置表（不在画面内）不加；单人拍不加。【R4 逐拍静默句】新增常量 H3_SILENCE_MIN_SECONDS = 1.0；本拍无台词、本镜头有台词、本拍时长 ≥1.0 秒、起止时间戳有限时，在本拍最后一句写「本镜 {h3Timecode(beat.start - g.start)}–{h3Timecode(beat.end - g.start)} 完全安静，只有环境底噪持续。」（肯定式、禁否定词；相对本镜头起点、与 At 切点同口径）；整镜无台词不写（soundscape 已覆盖）；有台词的拍不写；hasAnyLine 按修正 2 在拍循环前先算（原 6495 行声明上移、soundscape 共用同一个量、输出不变）。【R5 跨组承接句】拍循环前算 prevGroupLead：groupIndex >= 1 且上一组存在非空时，三守卫全过才有值——①同场景复用 lensScreenCasts 口径（两组 sceneName 按 / 切分取交集，禁字符串相等口径）；②上一组末拍末帧（splitVisualFinal 的 finalFrame）经 h3FixVisualText（prevLastCast 取 lensScreenCasts(script, groupIndex - 1, ctx) 末元素、tagOf 用本组映射）后非空；③segmentFinalCast(上一组) 全员在本组 tagOf 内。组首拍（bi === 0）写「承接上一镜头结尾：{末帧}。」＋「先停顿约半秒，再开始本镜的主要动作。」（修正 5：示例与产物均为 <Subject N> 形式、无裸代号）；守卫拦住时不补停顿句（保持现状）；只取上一组末拍末帧。【R0】WORKSPACE_VERSION v6.69 + 本条日志 + replication REPLICATION_BASELINE 同步 + DATA-PLAN 补记；分镜页 H3 区顶部说明末尾追加定稿一句；画布批量面板音色差异提示（本期不带参考音频…）不动。【修正 4 口径】「一字不动」限定 Seedance 三版／通用版导出；H3 复制全部（buildH3FullText）随 R1–R5 而变、仅限新增句，回归以逐镜 diff 只允许 R1–R5 新增句为准。【修正 6】行号以 Muse3 核对为准：lensScreenCasts 承接逻辑 3026–3044、单人台词模板 6329。【作用范围】只改 buildH3TextForGroup 一处，按剧情版／每镜 10–15 秒版／批量 buildH3ShotBundles 三路跟随；分组逻辑（h3ShortGroups／actionUnits／15 秒硬顶）、台词原文、人物音色／造型原文、<Picture N> 编号与绑定、六段顺序与段名、(Sx) 编号规则、齐声复合编号、运镜枚举、配乐 N/A、身高锚点、尺度锁句、平视机位句、站位句文字、组内承接句一字未动。【遗留与观察项】R5 残留：上一组跨多场景（A→B）、本组为 A 时场景交集放行，承接句可能取上一组末拍（B 场景）末帧与本组场景错位（继承 lensScreenCasts 整组交集口径、拍循环内无逐拍场景字段可收紧）；R4 缺口：bi === 0 短静默首拍（<1.0 秒）无任何声音指令（修正 5 已接受）；R3 改措辞后句式与 H3 解析器的接受度未核实；R4 阈值 1.0 秒是初值、最优值未核实。【删除清单】零删除。平台版本仍 28（v29 全站迁移不在本批）。真机待核：项目 50 任一镜真跑同一角色连续两镜戴耳机对比音色、多人同框听串声、含无台词拍听静默处填充语音与 1.0 秒阈值、同场景连续两镜听衔接与换场镜确认无承接句、R3 新句式粘 H3 桌面端确认被接受、画布批量一镜提示词与复制按钮逐字一致。",
+  },
+  {
+    version: "v6.68",
+    date: "2026-11-19",
+    text: "这一版是工作台全面检查后第一批修复，专修查出来最要紧的十个毛病。一，批量生成不会再自己乱跑：以前「只试选几个镜头」和「全部开始」共用一个开关，试选的跑完会顺手把剩下的全派出去多扣费；现在两个开关彻底分开，试选跑完就停。二，批量队列不会再卡死：以前提交一个镜头要等它慢慢腾出手才轮到下一个，队列一忙页面就可能转圈圈到死；现在腾位和提交分开，该派的立刻派。三，诊断区的「批量按钮自测」不会再真花钱：以前你只要填了密钥，自测第 5 步会真点一次生成、真扣费；现在填了密钥时自测只看不点，一分钱不花。四，学爆款模式的 AI 分析失败时不再拿一份现编的假分析冒充成功了：失败就明说失败、原因写进记录里，你点重试就行，进度也不会假涨。五，剧本保存不会再丢稿：以前几处保存同时发、慢的后到会把新稿盖回旧稿，保存成功的提示一出来还会把本机草稿删掉；现在保存排队一份一份来，存成功才算数，本机草稿只有在服务器真存好了才清。六，储存库人物图批量分析时，哪张卡的结果没存上会逐张点名说清，不再笼统说「都存好了」。七，监控清理时云端视频删不掉会记进清理报告里告诉你，不再悄悄算删成功（卡片删除照旧不受影响）。八，删项目前会先存一份完整快照——以前快照漏了封面和生图记录、场景图还会被连带删掉，恢复出来图打不开；现在八类数据全存全恢复，封面里记的人物引用也会对上新人物，恢复中途失败会自动清掉半截项目并告诉你。九，批量队列被隔离保护时点「恢复」，以前会先把锁打开再检查、检查不过就把原始数据弄丢；现在先检查再开锁，数据丢不了。十，生成中的镜头查询出错不会再悄悄停摆：以前查询一出错就默默停了、镜头永远挂在「生成中」；现在出错会有限次重试，还不行就明说，暂停中的镜头也会把并发位置让出来。",
+    features: "第 1 批修复（v6.68，审计 §0 危-01 至危-10；Muse2 方案 + Muse3 引用核对与验收标准 + 主负责六项裁决与三处修正 C1/C2/C3；未经过 GPT 审核，用户自办口径）：【危-01】source.html 三个试选入口（batchConfirmShotPick/batchRetryFailed/batchConfirmResubmit）进试选前清 fullRunStarted/started；batchNormalizeRunFlags 双 true 一律试选胜出 + waitingForStartAllNote 分支；新增 batchClearFullRunIfDrained（FAILED/CONFIRM/POLL_PAUSED 不挡全量收尾清理）；batchStartAll/batchFromSaved 未改（归一化在前、补记在后顺序保留）。【危-02/U-1/U-2/U-3】batchSubmitShot 拆为 batchTrySubmitShot（同步守卫返布尔、槽满 toast 2 秒节流文案不变）+ batchSubmitShotAsync（原函数体自 mock 行起原样移入）+ 同步包装（四调用点签名不变）；batchPump 统一版（归一化 + 集合确保 + 试选步 + 全量循环 guardSteps 上限与 break 收尾 + batchClearFullRunIfDrained）；新 batchSlotVersionId 统一提交/续跑版本键，batchPollShot 的 versionId: t.curVer || 1 未动。【危-03】自测钩子第 5 步在 hasToken 时只做只读验证（skipRealSubmit）、返回值加 skippedRealSubmit；新增 window.__flor911HasToken 只返布尔；videogen.tsx runBatchTest 先探该钩子、不存在按有密钥处理强制只读（fail-closed），两处误导注释改实话。【危-04】actions.ts submitModeTraining 失败不再回退 fallbackDraft 冒充成功（函数保留、仅不再被调用）：新增 validateStyleDraft（运行时已按 modeDraft schema 校验结构，只补 viralSummary/summary 非空检查——构建时实测口径）；failOrRetry 与 catch 路径写 analysisSummary（真实原因截断 500 字）；失败更新已落库的分析中记录为 failed 并返回 ok:false（偏差说明：方案字面是 return failOrRetry，但推理失败时分析中记录已落库、failOrRetry 会新建一条 failed 留下永久分析中孤儿行，故 catch 内直接更新该记录，failOrRetry 本身仍按方案加了 analysisSummary）。【危-05】App.tsx 序号守卫（draftRevRef/lastAckedRevRef/commitLocalDraftEdit）+ 串行保存器 queueScriptSave（在途只排一份、取最新、序号确认才清脏标）+ 草稿同步 effect 三路状态（dirty || lastSaveFailed 才写、写失败记 localDraftSavedOkRef 绝不清脏标）+ saveMut.onSuccess 删无条件清脏标 + onError 文案按本机草稿真实状态分支 + 切项目（project.id 变化时）重置序号与队列 + savePropNote/confirmScriptImport/updateVoice/syncCharBasics/updateFilmStyle/updateAliasOverride/deleteAutoAdded/persistDraft/saveScript 全部改走保存器；C1：syncCharBasics 保存成功后的 setScriptDraft(next) 保留为本地同步、不 bump、排在保存成功之后并加注释；C2：backToReview 保存前显式 commitLocalDraftEdit 置脏标、走 queueScriptSave、失败不跳转。【危-06】charbench.tsx PresetAnalysisOutcome 加 savedPending/savedError，drivePresetJob 两处字面量与 failedOutcome 补字段，批量循环优先查 !oc.savedPending，结尾总结按实际计数生成、未存上逐张点名带原因。【危-07】privileged.ts 抽 withCloudStateLock 共用锁 helper（口径与原内联锁一字相同），upsertCloudDownloaded 改走它（行为不变），cloudVideoDelete 重写（锁内重读、非 ENOENT 保留账本记 failed、仅变更时写回、tmp 名进程唯一、写失败清 tmp 抛错），响应 schema 加 deleted/failed/warnings；actions.ts syncDeleteCloudVideos 改返回结构不断删除、executeMonitorCleanup 把 cloudFailed/cloudWarnings 写进清理报告 JSON、三个其余调用点失败记 console.error、getMonitorCleanupStatus 新加 cloudFailed 响应字段（C3：只从报告 JSON 挑字段、不透出原文）；卡片删除不受云端失败影响的既定口径不变。【危-08】actions.ts 新增 deleteProjectsWithFullSnapshot（快照 v2：8 张关联表 + blobKeys、一项目一行快照、删除审计日志、blob 一律走引用检查）；deleteProject/batchDeleteProjects 改走它并改响应（ok/error/snapshotId、skipped/snapshotIds）；restoreDeleteSnapshot 兼容 v1/v2、人物逐行插记 charIdMap、coverGenerations.refCharIds 重映射（映射不到丢弃）、失败补偿删除（补偿失败写 console.error 审计日志 + error 带 newId 明说需手动删）、快照行只在全部成功后消费；deleteDeleteSnapshot 补 sceneImages/imageGenRecords/blobKeys 收集；deleteBlobIfUnreferenced 加快照引用检查 blobUsedByDeleteSnapshot（解析后按字段比对、禁用子串匹配）；App.tsx 三个删除调用点（deleteMut/batchDeleteMut/cleanupMut）按新响应接；快照保留期 30 天口径入注释、超期清理另立单、本批不新增自动清理。【危-09】batchQuarantineRestore 改先校验（validateBatchQueueSchema + normPid 比对，不调会重锁的 batchGuardQueueData）再解锁再加载。【危-10】batchPollShot 开头捕获 pollCtx 一次；新增 batchPollPause（减数 + 释槽 + 调泵三件套）；isLatest 失败转 POLL_PAUSED 不再无限轮询；tuple 对不上改软失败（记 note 不抛错）；batchPollNoteError 在函数体内闭包续订 loop（以实际代码结构为准）。【平台】版本仍 28，v29 全站迁移不在本批；无 DB schema 变更、无新 migration；测试全程临时项目/假 token/演示态，沙箱未提交任何真实生成。",
+  },
+  {
+    version: "v6.67",
+    date: "2026-11-19",
+    text: "这一版修你今天连着报的两个批量问题。第一个：你只点了镜头 06 一个，06 跑完之后 01 到 04 自己一组一组接上生成了。根子在「开始」这个开关只有一个——你点单个镜头试生成时，它把整个队列的开关也打开了，试的那个一跑完，程序就顺手把排队的全派出去。现在开关拆成两个：一个只管你勾选的那几个镜头，一个只管「全部开始」；勾选的跑完就停，面板上会明明白白写一句「已选镜头已全部生成结束，剩下的已安全暂停，不会自动扣费，要继续请手动点全部开始」。失败重试、待确认重提也都改成只动它们自己的那一镜，不会再顺带把整个队列打开；你现在那条还在跑的队列（4 个在跑、5 个在等）升级后也不会被误派，等在跑的跑完就停住。第二个：报错之后钥匙显示没填、批量面板 0 镜、生成记录 0。这次没抓到是哪一下触发的（还要你补当时的报错原文），但查到三处会「悄悄把东西弄没还不吭声」的地方，全堵上了：一是钥匙保存加了铁闸——程序里钥匙一时读成空的时候，绝不许拿空值把你存好的钥匙盖掉（你亲手点「清除」还是能清掉）；二是队列和生成记录保存失败时，面板顶部会直接弹红字说明「这次没存上」和原因，不再装没事；三是万一队列又被数据保护隔离了，原来的隔离提示条上多了一个「确认恢复这批记录」按钮，点一下就能把那批镜头原样找回，找回后默认是暂停的、不会自己开始扣费。另外要是再出现「队列读着是空的、但生成记录还在」，面板会直接告诉你没读到数据、该回哪个浏览器窗口找，不再让你对着 0 镜干瞪眼。",
+    features: "批量双问题修复（v6.67，用户主聊直派，无 flor 编号，用户 2026-11-19 08:14 报问题一（只点镜头 06、06 跑完后 01–04 自动 4 个一组接上生成）、08:41 报问题二（报错后 API 钥匙两项显示未填写、批量面板 0 镜、生成记录 0，08:14 时还有 10 镜与记录 #1），13:38 令开始修复；打包问题文件已发 Gemini（代码与分析 4 Argon）出方案，按主代理裁决采用/否决/必须改动清单实施，Gemini 代码未原样合入；纯客户端 laoluo/source.html 改写为新底版 + sync.mjs 重跑再生 generated.* + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；沙箱未提交任何真实生成、未用任何凭证；未经过 GPT 审核（用户自办口径）：【问题一根因】batchPump 试选集空后回落全量分发 + batchConfirmShotPick 把 started=true 全局打开，试选集分发即出集、06 完成调泵即触发；同类开全量开关还有 batchRetryFailed/batchStartAll/batchConfirmResubmit。【问题一改法】拆旗标：trialStarted（只跑 trialShotIds）与 fullRunStarted（仅显式全量动作开），started 保留为 fullRunStarted 兼容镜像（batchNormalizeRunFlags 统一同步，旧数据迁移口径 fullRunStarted = !!(started && !trial)、trialStarted 按试选集非空恢复）；batchFresh 只追加四字段（fullRunStarted/trialStarted/_trialDispatchedIds/waitingForStartAllNote），未整体替换；batchPump 集空不再回落全量（闸只看 circuitMsg/paused，先归一化 + batchEnsureSelectionSets，trialStarted 时只走试选分发、fullRunStarted 未开即返回）；batchPumpTrialStep 保持真实分流（FAILED→batchRetryShot、SUCCESS/SKIPPED→batchRedrawShot、READY→batchSubmitShot、其余跳过，Gemini 的 else 一律提交已否决），分发前 batchPickGate 重查作防线、追踪 _trialDispatchedIds；batchRefreshTrialCompletionState 在试选集空且已派发试选镜全终态时关 trialStarted 并置 waitingForStartAllNote；batchConfirmShotPick 保持真实体只改旗标（started=true → trialStarted=true + waitingForStartAllNote=false，trialShotIds 仍为替换）；batchRetryFailed 机制改试选集分发（FAILED 进 trialShotIds、只开 trialStarted），保留 batch.circuitMsg 清熔断与清旧集；batchStartAll 保留 UNKNOWN toast 与防重复启动闸（改判 fullRunStarted），暂停恢复分支并入同一路径（清 paused + 清试选集 + 开全量），batchResumeQueue 保持一行别名不变（Gemini 单独重写已否决）；batchConfirmResubmit 保留 t.status = READY 翻转 + 清旧集，只把 started 换 trialStarted 并把该镜推进试选集；新旗标落盘：persistBatch 白名单快照与 batchFromSaved 还原各加四字段，batchFromSaved 还原后调 batchNormalizeRunFlags，非全量模式下仍在途镜头补进 _trialDispatchedIds 并点亮 trialStarted（覆盖用户现存活队列形状 started=true/trial=true/4 RUNNING/5 READY）；batchTrialDoneNoticeHtml 接进 batchPanelHtml 隔离横幅之后、面板头之前，文案用大白话（已选镜头已全部生成结束；剩余 N 个待生成镜头已安全暂停，不会自动扣费，如需继续请手动点右下角「全部开始」）。【问题二根因（已实读部分）】persistKeys 无空值保护（内存空串会覆盖好钥匙）、persistBatch 写失败静默吞、隔离闸一触发面板直接显示空队、读空时静默显示 0 镜；四路存储同时读空的触发点未定死，待用户补报错原文/是否重载/是否换浏览器，本版按可观测症状做防御不谎称已找到触发点。【问题二改法】persistKeys 空值铁闸：新增 explicitClearToken/explicitClearDskey 显式清除选项，内存空串且非显式清除时先读 LS 现值回填内存再写回；LS 镜像写保持同步（Gemini 全异步版已否决，关窗写操作等不到 await），IDB 仍异步走 idbSetWithDiag，keySavedAt 与 keyPersistDiag 四种失败原因诊断保留；clearKeyOne 两处清除改传显式清除参数；钥匙保存失败时除批量面板横幅外，对话框状态行经 patchKeyStatus 同步显示同一句（复用 keyPersistDiag/keyStatusText 现有位置）。persistBatch 不整体替换（Gemini 版键名错、写活对象、丢 emptyView 守卫、丢 scheduleArchiveSync 四处致命错已否决）：只加 batchWriteQueueKey 写路径（Promise.resolve().then 包一层调 idbSetDomain——真实 idbSet 域被锁/DB 为空时直接 return undefined、直接 .then 会抛 TypeError；三态结果 ok/blockedByLock/error 分别处理，失败写 batchStorageErrorBanner 大白话横幅、成功清同句横幅）与空队覆写守卫（内存 0 镜时先异步读回存储，存储已有非空队列则禁止覆盖，判定以读回存储为准不依赖内存隔离标记；emptyView 守卫与 scheduleArchiveSync 保留）。batchSyncArchiveNow 的静默 catch 改为写失败进横幅，batchSaveArchives 改走 idbSetDomain 三态写、失败抛错给调用方。隔离恢复：现有隔离横幅加第三个按钮「确认恢复这批记录」（不另起平行横幅，Gemini 的 batchQuarantineBannerInfo 已否决），新增 batchQuarantineRestore——先用内存 batch.quarantine.rawData、无则按 qKey 回 IDB 读包装取 .rawData 解包（Gemini 直读 qData.shots 永远 undefined 已否决），恢复前把 batch_queue 域清回 HEALTHY（画布 pid 与队列 projectId 两个口径的健康记录都清，否则落盘被写入口拦截），batchFromSaved 还原后置 paused=true/fullRunStarted=false/trialStarted=false/started=false/quarantine=null，再落盘、渲染、toast 报镜数。读空提示（针对 08:41 无隔离横幅的真实症状）：loadBatchState 实时键读回为空/无 shots 时查 batchLoadArchives，存档有记录则置 batch.readEmptyNote，面板出琥珀提示（没读到已存数据、队列显示为空但生成记录还在，请回原来那个浏览器窗口打开工作台，API 钥匙可在原窗口密钥设置里用「导出」迁移），存档也没有时保持现有 emptyView 文案。新增 CSS 三条：.uv-batch-notice（绿）/.uv-batch-storage-error（红）/.uv-batch-readempty（琥珀）；batchStorageErrorBannerHtml + batchDismissStorageBanner（只关横幅不动数据）。【保持不变】暂停、熔断、4 并发（BATCH_MAX_CONCURRENT = 4）、试选内部分流、「全部开始」语义（清试选集、全量分发）、刷新后续查在途任务不重提、密钥加密与存储位置（LS llpub-token/llpub-dskey + IDB auth-keys）、H3 拼装、隔离机制本身、正式数据一字不动；新增 onclick 处理函数均为 0 参数。【自测钩子】flor911TestBatchClicks 追加 v6.67 同步断言（旗标归一化三例、试选完成提示渲染与计数、密钥铁闸——仅两把钥匙都为空时真跑、已填密钥环境如实记跳过、隔离恢复按钮在位）。【沙箱验证】Node mock 从 source.html 抽取真实函数配最小桩实跑 15 条断言全过、退出码 0：问题一 7 条（只选 1 镜 submit 只调 1 次且完成后 9 镜 READY + waitingForStartAllNote + 提示已渲染；只选 2 镜余 7 镜 READY；失败重试只重提 FAILED 且熔断先清、fullRunStarted 保持 false；CONFIRM 镜翻 READY 后提交成功；全部开始立即 4 并发、再点不重复派发、UNKNOWN toast、暂停后在途完成不再派新活；用户现存活队列形状归一化 + 逐个完成回调全程零新派发；旧全量队列读回归一化与 CTA 文案一致）、问题二 6 条（钥匙置空不覆盖且回填、clearKeyOne 两步仍能真清；idbSet blocked/error/throw 三态 persistBatch 都出「没存上」横幅且不抛 TypeError、写成功后横幅清除；空队不覆盖存储非空队列且 scheduleArchiveSync 仍被调用；构造旧版 schema 队列触发隔离、横幅带恢复按钮、恢复后 10 镜找回默认暂停且落盘成功域已解锁；读空 + 存档还在出「没读到已存数据」提示；persistKeys 返回时 LS 已同步落盘）、联合 1 条（钥匙置空→只勾 1 镜→完成后不动→隔离恢复→显式全部开始→暂停→重读回，persistBatch/loadBatchState/batchPump 三处无状态冲突）。【新底版】source.html SHA-256 前缀 9793749e202a45d5 → e219e70082b1ee8d；sync.mjs 计数 CSS 461→464、顶层函数 374→381、on* 模板 200→202、模板引用函数 131→133；锚点 setTimeout=20、winAdd=12、DEFAULT_TOKEN 置空=1 不变。【删除清单】零删除。平台版本仍 28（v29 FIELDS 全站迁移与本单分开处理，与 brief 及历版裁决一致）。真机待核：项目 50 只勾 1 镜真跑看完成后是否停住且提示出现、隔离恢复真机走一遍、钥匙置空后重开看是否还在、刷新 10 次看队列与旗标、诊断区跑「批量按钮自测」看 v6.67 断言组。",
+  },
+  {
+    version: "v6.66",
+    date: "2026-11-19",
+    text: "这一版专修你报的「生成视频里人物总跟参考图对不上」——主角被换脸、A 的脸贴到 B 身上、两个人共用一张脸。查下来是三处一起出的毛病，这版全堵上。第一，有图的人物，提示词里不再塞原来拆解视频时写的外貌文字了：那些文字写的是原片里的人、跟你自己的资产图不是一个人，模型一边看图一边读到另一套长相，就容易串脸；现在有图的人只写身份（比如「大学生」），长相完全以参考图为准，没图的人照旧写外貌。第二，同一个镜头里要是两张参考图绑到了同一张人物卡、或者图片地址一模一样，以前没人拦、直接发出去两人就共用一张脸；现在发送前先查一遍，中的那一镜会被跳过并把原因写清（哪两张图撞了），其它镜头照常生成；「B+C」这种把两个人拼成一个代号的行也会被拦下来，提示你先去审查页拆开。第三，画布真正提交前多了一道硬检查：每张参考图都必须真能打开、真能解码，两张图内容完全相同也会拦下——检查不过就在扣费之前停住，绝不把坏图、漏图发出去（以前是悄悄拿原地址凑数发出去，模型少看一张脸就会把别人的脸贴过来）。另外两个小改动：多人同框时每个镜头会写明谁在左谁在右、站位不许互换；那句 69 字的身高锁定长句以前每个镜头都重复一遍，现在每段只完整写一次、后面用短句提醒，免得把台词和动作的份量冲淡。要注意：有图人物定义句不再带外貌文字，是按「以图为准」直接定的，没先拿一镜做对比实验，你真机先跑一镜看看效果。",
+    features: "H3 人物与参考图不匹配修复（v6.66，用户主聊直派，无 flor 编号，用户 2026-11-19 02:49 报生成视频人物与参考图对不上（主角被换脸/A 脸贴 B 脸/A-B 共用一张脸，只测了画布批量生成 Path B），03:21 发来 Gemini《修复代码汇总：H3 人物与参考图不匹配》（h3.md）并令修复；按主代理裁决 R-1–R-4 实施，Gemini 的 helper 替换与全提示词计数检查两处已被裁决否决、未采用；scriptlib.ts（绑定校验 + H3 拼装）+ App.tsx（发送端拦截）+ laoluo/source.html（画布提交 fail-closed）改写为新底版 + sync.mjs 重跑再生 generated.* + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；沙箱未提交任何真实生成、未用任何凭证；未经过 GPT 审核（用户自办口径，本次用户直接令修）：【步骤0 锚点复核】WORKSPACE_VERSION v6.65、底版 SHA 3a75b4b183829f03、H3ShotBinding（无 url 字段）/validateH3PictureMapping/buildH3ShotBundles/buildH3TextForGroup/H3_SCALE_LOCK/sendH3Batch/batchSubmitShot/compressRefImage/存档抽卡循环位置与现状与裁决逐项一致后才动手。【R-1 绑定校验】保留现有 validate 结构（pics 集合 + defOf 逐行 map + 逐绑定核对、正则宽松度不变），新增四项：组合代号（isComboCharacterCode + COMBO_CHARACTER_CODE_RE，只查 code）、重复 assetId（仅非 null）、重复 url（仅非空，现有调用点无 url、只作防御，真正查重在发送端）、picNum 连续 + apiField 对齐；H3ShotBinding 加 url?: string | null 可选字段；空绑定/>9 张检查保留在 validate 内作防御（现有调用点已预先排除、不可达，取舍在此写明）；未改 buildH3ShotBundles 构造顺序。【R-2 H3 拼装】只动四处、其余逐字保留：①定义句——有图人物 lookText 强制为空（desc 只剩身份首段、为空沿用 e.label 兜底），无图人物一字不动，身高锚点与音色行不动，不建 cardVerifiedLook 管道（无数据来源）；后果：有图人物定义句不再带任何外貌文字（E1 式取舍，未跑 E1 实验验证，用户直接授权实施）。②retention 每人行——有图人物改为「与 <Picture K> 锁定的面部五官、发型与服装完全一致…」锚图行，appearsText 沿用现有逻辑；无图行（含 lookHead 前 3 分句与 heightClause）一字不动；每图行/场景行/兜底行逐字不动。③尺度锁去重——段内首个「多人同框且非特写家族」拍写 H3_SCALE_LOCK 全文、后续同类拍写短句「各人相对身高与同地面站位保持不变。」，判定条件 multiPerson && !H3_CLOSE_SCALES.has(scale) 不变。④站位兜底（新增）——多人拍且在场标签 ≥2 时恒写一句站位句（平视机位句之后、画面句之前；标签按 cast 顺序即 <Subject N> 升序；2 人左右/3 人左中右/4+ 人左半右半句式取 h3.md；不读 group.blocking、不设特写排除）。作用范围 = buildH3TextForGroup，H3 两版与批量同进，Seedance 三版/通用版/导出一字不动。【R-3 发送端拦截】sendH3Batch 内 urlOf 保留真实语义（assetId 优先、回退 c.name === b.code 精确匹配、不 trim），resolvedCardId 只作比较不写回、绑定形状保持 {...b, url}；附 url 后、定 excludedReason 前加查组合代号/同卡/同 url，命中只标该镜（文案取 h3.md 第三节），不拦整批；0 可提交说明补「串卡或重图」一词。【R-4 画布提交 fail-closed】新增顶层函数 compressRefImageStrict/__shortUrlFingerprint/prepareAndAttachBatchRefImages（+ 诊断异步自测 flor911TestRefStrict）；batchSubmitShot 压缩循环替换为 await prepareAndAttachBatchRefImages(t, body, wf)（在 submitTask 之前、零扣费），compressRefImage 本体一字不动；strict 在 h3.md 基础上补齐：http(s) 图压缩后与输入逐字相同（原样回退）判失败抛错、返回值为空抛错、data: 直通不判失败；抛错文案禁用「HTTP 40x」字样与余额类词（状态码写作「状态码 N」），不误触熔断正则，落点复用现有 catch（首提 FAILED+reason、抽卡 v6.59 保护、熔断不变）；maxImages 取 wf.maxImages 兜底 9，picNum/apiField 对齐 + 指纹（FNV+长度）查重 + t.lastSubmittedRefAudit 审计快照照做；存档抽卡路径（batchArchiveRedraw）以 sh.bindings 元数据复用同一严格准备（实读确认该处能拿到 picNum/apiField/roleName/assetId 全套绑定元数据，无已知缺口）。已知残缺：同一张图一张走 data: 直通、一张走 http 重编码时指纹不同、查重拦不住（可接受残缺，不建像素级比对）。【自测钩子】flor911TestBatchClicks 新增 v6.66 同步断言（指纹确定性 + 异步入口在位），异步断言独立成 window.__flor911TestRefStrict（错位绑定/重复指纹/空地址抛错且不提交、正常两图 body 与审计快照、拉不到的 http 图抛错）。【不动清单】分组逻辑（h3ShortGroups/15 秒硬顶/actionUnits/转折点）、台词 <d> 与 (Sx)/齐声、summary/soundscape/N/A、Seedance 三版/通用版/导出、密钥三路与 v6.59 持久化、手动模式、P3/P4、连线/雷达/菜单、BatchScheduler 状态机与 shotHash、诊断区既有断言——grep 与 sync 门禁证实未动；平台版本仍 28。【新底版】source.html SHA-256 前缀 3a75b4b183829f03 → 9793749e202a45d5；sync.mjs 计数 CSS 461→461、顶层函数 370→374、on* 模板 200→200、模板引用函数 131→131；锚点 setTimeout=20、winAdd=12、DEFAULT_TOKEN 置空=1 不变。【删除清单】零删除。真机待核：项目 50 任一镜批量真跑看新定义句与站位句、串卡/重图真机拦截、坏图提交零扣费、抽卡与存档抽卡各一次、诊断区自测（含控制台 __flor911TestRefStrict）。",
+  },
+  {
+    version: "v6.65",
+    date: "2026-11-19",
+    text: "这一版修你连着报的四个问题。第一，批量窗的滚动条不再自己跳回顶部：以前窗口每隔两三秒就整块重画一次，滚到哪都会被弹回最上面；现在重画前先记下你滚到的位置、画完再放回去，滚到底部时新镜头追加进来也继续贴着底部。第二，「选择镜头生成」可以多选了：每行前面有勾选框，点几行就选几个，顶部有「全选符合条件」，底部会写清一共选了几镜、大约多少钱（只选 1 个时和以前一模一样）；点确认后，够格的按各自情况走——没生成的直接生成、失败的走重试、已完成的在勾了强制重生时走再次抽卡；同时在跑的满了 4 个也不会把你选的整批拒掉，剩下的排队等空位，而且只跑你选的，不会顺手把没选的镜头也提交。第三，审查页删群演/人物这次是真删干净：以前删除只改了页面上的草稿、还得再点一次保存才算数，忘了点、一刷新就又冒出来；现在点确认删除就直接保存生效，而且系统那边也认这个删除标记、不会再把 TA 自动加回来；删错了想加回来，在「人物与大纲」重新加人、或在剧本行里重新写 TA 的台词到待确认清单里确认即可（顺带把删节拍弹框里一句早已过时的「能从快照恢复」也改成了实话）。第四，密钥存不住的原因这次查清并修了：上一版给数据分家看管时，把密钥误记到了「当前项目」的账上，项目那边一上锁，密钥就被连带拦着存不进去，还不告诉你原因；现在密钥归到它自己独立的账上、任何项目上锁都连累不到它，本地数据库一时不可用也不会把密钥写入堵死，万一真没存上，状态行会把原因说清（是被拦下、是浏览器写不进去、还是写完读不回来），诊断区也能看到密钥存储的自查结果。",
+    features: "四问题修复（v6.65，用户主聊直派，无 flor 编号，用户 2026-11-19 01:01–01:07 连报四问题附图、01:08 令总结成题让 Gemini 写修复代码、01:32 发来 Gemini changelog 并令开始修复；按 changelog 设计 + 主代理裁决 R1–R8 实施，changelog 两处错误已纠：Task C 不走 syncScriptJson（只写 ref 不落库）、Task B 不一律按 PICKER_SELECT 过权限（先按状态分流再用对应授权）；laoluo/source.html 改写为新底版 + sync.mjs 重跑再生 generated.* + App.tsx（Task C 客户端 + 版本/日志）+ server actions.ts/rules.ts（Task C 服务端）+ videogen.tsx 诊断区追加密钥自查；无 DB schema 变更、无新 migration、无新 npm 依赖；沙箱未提交任何真实生成、未用任何凭证）：【步骤0 提取结论】saveMut = useMutation(mutationFn: (json) => api.saveScript({projectId, scriptJson: json})，onSuccess 置 scriptDirty=false + 校验回填 + invalidateQueries([project,id])，onError 出 saveMsg)；既有落库写法 = syncScriptJson(json) + setScriptDraft(next) + withWriteRetry(() => saveMut.mutateAsync(json))；deleteCardIfExists 按名找卡 api.deleteCharacter({id}) + invalidate、失败吞掉不挡剧本侧。batchPump 旧 trial 闸为单镜 trialShotId；batchStartAll 两处清 trial；batchRetryShot 走 checkBatchShotSubmitPermission(ROW_RETRY) 后置 READY 直提、batchRedrawShot 走 ROW_REDRAW + 熔断/满额检查后 batchSubmitShot({seedOverride,isRedraw})；行内按钮即此二函数。委托：sync.mjs ARG_OK 白名单含引号字符串参（batchPickShot('...') 因此能过），顶层函数自动全量进 handlers 字典——本版全选走新增零参顶层函数 batchToggleSelectAllShots（不走 '__ALL__' 哨兵）；门禁故意改坏 callee 名实测 sync 构建 exit 1、恢复后通过。idbSetDomain 事务以 tx.oncomplete 确认、idbSet 以 rq.onsuccess 确认（heal 插入点）；ensureDb 返回 db 或 null；dbDomainHealth 仅内存。删除确认框在 ReviewDocument（confirmDeleteAuto）；全仓活代码快照承诺共两处：该框的「删错了可以从自动快照恢复」与删节拍框的「删除前会自动存一份快照……可从快照一键恢复」（均与 v5.29 已删快照的事实不符，一并改掉；人物卡删除框「不再有自动快照可恢复」是实话、保留；版本日志历史条目一字未动）。keyStatusText/patchKeyStatus 在 source.html 密钥区；诊断区在 videogen.tsx buildDiagText（平台经 window 钩子暴露报告）。changelog §5 的 14 项 [TO VERIFY]：1/2/5/7/8/10 已由 R6/R6/R3/R5/R7/R1 回答；3 selShotId 读者实测在 picker/自测/batchSetOverlay/batchDismiss/batchToggleCollapse——按 R4 保留别名；4 委托已答（见上）；6 batchPump/batchStartAll 全文已读、按其形态接入；9 按 R2 整份草稿保存、不做基线合并；11 对话框位置与快照文案已扫（见上）；12 Path 3 既有赋值（c.temp/row 回填）原样保留、只加门禁行；13 idbSet/idbSetDomain 全文已读、heal 只插成功路径；14 keyStatusText 改调 getKeyPersistCauseText、诊断区追加 getKeyStorageDiagnosticsReport。【Task A 滚动保位】patchBatchPanel 在 root.innerHTML 前调 __captureScrollContainer（记 .uv-batch-list/.uv-picker-list 的 scrollTop/scrollHeight/clientHeight + 贴底 2px，存 batch.__scroll_* 与 __batchScrollCache[curProjId()]），全部 DOM 操作（innerHTML + batchObserveModalWidth + data-batch-video src 循环，循环原文一字未动）后调 __restoreScrollContainer 恢复（缩短钳 max(0, sh-ch)、贴底续贴底）；选择器新打开时 picker 归 0；不加 scrollIntoView/focus、不动两容器 CSS。【Task B 多选】batch.selShotIds 集合（batchEnsureSelectionSets 初始化并同步 selShotId 别名，R4）；行模板加 .uv-picker-check 复选框、点行切换；头部全选钮 batchToggleSelectAllShots（只选 batchPickGate 放行行）+ data-fid=batch-picker-select-all；标题改「选择要生成的镜头（可多选，用它们现在的提示词、参考图和面板设置）」；脚注选 1 镜与旧单选文案一字相同、多选「已选 N 镜 · 费用约 ¥X（按高峰价）」（batchShotCost 求和 + fmtPrice）。batchConfirmShotPick 零参不变：逐个重过 batchPickGate 剔除新不合格并汇总、circuitMsg 整批拒绝写清、空集留窗显原因；通过者进 batch.trialShotIds，batchPump 经新增 batchPumpTrialStep 只分发集内镜头（分流按 R3：READY 直提/FAILED→batchRetryShot/SUCCESS·SKIPPED→batchRedrawShot，全经既有分发口与全局 4 并发闸 R5），集内跑完或点全部开始时清集（trial/trialShotId 镜像同步维护）；确认后关窗 + toast 汇总（多选或有跳过时）。【Task C 删除干净】deleteAutoAdded 拆为 applyDeleteAutoAddedToScript 纯算 + 立即落库：extra/formal 一律写 disposition:deleted 墓碑（formal 不再 delete states[name]，墓碑 look=entry.look、voice/tone 空，R7），视觉/说话人/人物行/清单清理沿用现行，formal 照旧删卡；落库走 saveMut 整份当前草稿（R1/R2，另有未保存编辑会一并存下、回执明示），checkScriptForSave 不过时退回本地草稿 + dirty + 明示；toast/状态文案与对话框改「删除立即生效、已自动保存」+ 写明手动加回路径。服务端 autoDesignNewCharacters 四路（speakerIssues/rawRows/temps/直扫说话人）全加 isTombstonedForAutoAdd 门禁（读 scriptView.tempCharacterStates），Path 3 其余赋值不动；rules.ts collectTempCharacters 只改墓碑契约注释、检出行为一字不动。【Task D 密钥】parseStorageKeyDomain：llpub-token/llpub-dskey/llpub-keys-savedat/auth-keys 及 LEGACY 迁移源键名全映射 {__GLOBAL__, auth_keys, bypassLock:true}（R8 误映射纠正）；isDomainLocked 对 auth_keys 恒 false；暂存锁（DB_NOT_AVAILABLE/DB_IO_ERROR/DB_INIT_FAILED）不拦 lsSet、isDomainLocked 冷却 TRANSIENT_LOCK_RETRY_MS=5000 后放行重探、healTransientDomainLock 插 idbSet rq.onsuccess 与 idbSetDomain tx.oncomplete 成功路径回 HEALTHY；QUARANTINED_* 与隔离/红牌/两步重置一字未动。persistKeys 区分四种结果（keyPersistDiag：门禁拦/LS 抛错含错名错信/回读不一致/IDB 备份降级——降级不置 keyPersistFailed），keyStatusText 改调 getKeyPersistCauseText，诊断区追加 getKeyStorageDiagnosticsReport（经 window.__flor911KeyDiag 钩子，只报映射/有无/锁状态、绝不含密钥内容）；idbSetWithDiag 只加诊断不改事务语义；双写+回读校验+镜像互愈+导出/导入兜底+键名全保留。【自测钩子】flor911TestBatchClicks 新增 v6.65 断言组：密钥映射与 auth_keys 永不锁（用 __SELFTEST__ 假 pid 不碰真域）、滚动保位（列表可滚动时设 30px 重渲染后比对，不可滚动时如实记跳过）、多选点选与别名同步、确认后未选镜头不提交且试选集只含所选（演示模式且可选 ≥2 镜时跑，否则如实记跳过）。【不动清单】提示词拼装口径、队列形态与存储键名（trialShotIds 为只追加字段、旧存档读入补默认）、费用函数、画幅枚举 BATCH_RES_OPTIONS、权限矩阵、工作流预设表、手动模式全部交互、监控/封面/生图/拆解预设/下载任务；平台版本仍 28（v29 FIELDS 全站迁移按裁决与本单分开处理）。【新底版】source.html SHA-256 前缀 d4cc49ab6742d366 → 3a75b4b183829f03；sync.mjs 计数 CSS 458→461、顶层函数 355→370、on* 模板 199→200、模板引用函数 130→131；锚点 setTimeout=20、winAdd=12、DEFAULT_TOKEN 置空=1 不变。【删除清单】无功能删除：被取代的只有单选版 batchPickerHtml/batchPickShot/batchConfirmShotPick 函数体、parseStorageKeyDomain 的 auth-keys 旧分支、keyStatusText 的笼统失败句、两处过期快照文案。GPT 审核本轮由用户自办（未经过 GPT 审核）。真机待核：批量窗滚动保位（滚到一半等 10 秒）、选择器多选 3 镜确认看只跑所选、审查页删 B+C 后立即重载不复活 + 重新自动加入不加回、密钥改后重开验恢复、诊断区跑「批量按钮自测」看 v6.65 断言组。",
+  },
+  {
+    version: "v6.64",
+    date: "2026-11-19",
+    text: "这一版给批量生成加了三层保险，都是看不见摸不着但很要紧的底层功夫。第一，数据分家看管：批量队列、参考图、生成记录、设置、密钥各自独立记账，一个地方读坏了不会连累其它地方；万一发现某个项目的队列数据对不上号（比如归属丢了、结构坏了、串了别的项目），系统会先把原数据原封不动备份隔离、在窗口顶上挂红牌说明，再等你亲手确认才重置，绝不自作主张清空重来。第二，提交入口统一安检：每个镜头提交前先查状态——正在跑的、排队中的、状态异常的一律拦下并把原因用大白话说出来；失败的镜头不会被「全部开始」顺手重交（防重复扣费），要重试点行上的「重试」；已完成的镜头点行上「再次抽卡」照旧直接出新版本，不用先勾强制重生；所有项目加在一起同时最多跑 4 个，切换项目不会多开额度。第三，窗口细节：窗口变窄时底部按钮自动换成两行不挤压，画幅按钮自动折行；项目菜单、生成记录、选镜头三个浮层同时只开一个，按 Esc 只关最上面一层不关整个窗口；生成结果窗现在能稳稳浮在批量窗上面。另外诊断区的「批量按钮自测」多了 6 条新断言（权限矩阵、分域、并发上限）。",
+    features: "批量窗第三轮整改——数据库分域安全＋状态权限矩阵＋UI 十项＋真实点击验证（v6.64，用户主聊直派，无 flor 编号，用户 2026-11-19 00:07 亲手上传第三轮方案并令 OK 执行；纯客户端 laoluo/source.html 改写为新底版 + sync.mjs 增 @container at 规则支持与重跑再生 generated.* + App 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；沙箱未提交任何真实生成）：【步骤0 提取 V-1–V-7（v6.63 源码实读）】V-1 委托：v6.63 sync 门禁已证 7 个新 callee 全在字典（本版字典=全部顶层函数，新增 batchQuarantineView/batchQuarantineReset 两 callee 后引用函数 128→130、门禁通过）。V-2 批量镜头 status 真实枚举：READY/SUBMITTING/RUNNING/SUCCESS/FAILED/SKIPPED/EXCLUDED/POLL_PAUSED/CONFIRM（无 QUEUED 字面量）。V-3 真实键名：实时键 proj-<pid>-batch、槽位键 proj-<pid>-batch-sb<sbPid>、归档键 proj-<pid>-batch-archives、素材 proj-<pid>-line-N-assets、状态 proj-<pid>-line-N-state、视频缓存 batch-video-<shotId>-v<N>。V-4 单镜提交 batchSubmitShot(t, opts)、选择器确认 batchConfirmShotPick() 零参。V-5 桥 normalizeSbProjects：id 归一化字符串、name 兜底、过滤 archived。V-6 WORKFLOW_PRESETS 13 项（id/label/maxImages/maxAudios/maxDur/minImages，无 resList）、费用 batchShotCost/batchTotalCost 走 rateFor。V-7 密钥键共三处：llpub-token、llpub-dskey（localStorage）+ auth-keys（IDB）。【实施1 数据库分域安全】idbOpen 增 onblocked/onversionchange/onclose/onerror 生命周期（原签名不变）；新增 dbDomainHealth 分域健康表（batch_queue/assets/archives/settings + 全局 projects_index/auth_keys）、parseStorageKeyDomain 按真实键名解析、idbGetDomain/idbSetDomain 三态（HIT/MISS/DB_ERROR、事务 oncomplete 确认）、idbSet 与 lsSet 底层内嵌分域锁拦截（隔离键 bypassLock）；QUARANTINED_* 永不被普通读取清除、锁只在本域内恢复；validateBatchQueueSchema + batchGuardQueueData 隔离闸（结构损坏 ORPHAN/CORRUPT/CONFLICT 三情形备份至 quarantine-<domain>-<key>-<ts> + 锁域 + 面板红色横幅 + 只读查看 + 两步确认重置，绝不空初始化覆写）；切换 batchSwitchReqSeq 序号保护（每次 await 后校验）；严格迁移（slot MISS + live HIT + 结构校验 + pid 严格相等 → idbSetDomain 写槽位 + 回读校验，失败锁域中止、绝不返 READY）。【实施2 状态权限矩阵】VERIFIED_BATCH_STATUS_MAP 按实读枚举填充、normalizeBatchShotStatus（未知/空 → UNKNOWN）、checkBatchShotSubmitPermission（authSource 四类：BATCH_START/PICKER_SELECT/ROW_RETRY/ROW_REDRAW）逐格落地：UNKNOWN 全入口拒绝、RUNNING/SUBMITTING/QUEUED 硬拦截、FAILED 不被全部开始自动重交、COMPLETED 单行抽卡独立授权；接入 batchRetryShot/batchRedrawShot/batchPickGate/batchConfirmShotPick/batchStartAll；轮询五元组 batchPollTupleCheck（projectId/batchId/shotId/versionId/taskId，旧版迟到只写版本记录不改主状态；版本记录追加 taskId/versionId 字段、只追加不改形状）；全局并发注册表 globalInFlightBatchTasks（跨项目合计 ≤4，submit 占槽、成功/失败/提交异常/切项目回写四路释放、续跑重新登记、释放回调 batchPump 补位；每批 activeCount 闸保留、shotHash 不动）。【实施3 UI 十项】四区布局与唯一主按钮保留；.uv-batch 容器查询 container-name=batchmodal + @container <720px 底部栏双行 + ResizeObserver 切 is-compact-width 兜底（sync.mjs 同步支持 @container 规则抽取）；画幅 pills 容器加 uv-batch-res-pills flex-wrap（枚举沿用 BATCH_RES_OPTIONS 不变，含真机既有的 1080p 两档——裁决口径见回执）；三浮层互斥 batchActiveOverlay 单一枚举驱动既有旗标（batchSetOverlay 接入打开/关闭五处）；Esc 分层沿用 v6.63 并随互斥收口；最小化时 backdrop 本就不挂载（v6.63 既有、本版复核）；项目菜单背板加 uv-bproj-backdrop 局部遮罩类（不复用全屏 .uv-menu-overlay）；.uv-result z-index 55→58 且 pointer-events 白名单补 batch/backdrop/mini-pill/picker/bproj 五项（未移动 .uv-result 的 DOM 父节点）。【实施4 data-fid 与验证】新增 data-fid：open-batch-modal、batch-picker-fee、batch-shot-status-N、batch-pause-queue、batch-force-regen、batch-row-redraw-N、batch-row-retry-N、batch-shot-ver-N-vM、batch-arch-btn、batch-proj-item-<id>、batch-minimize-btn（gen-btn/batch-start-all/batch-open-picker/batch-picker-confirm/batch-picker-row-N/batch-proj-switch-btn 为既有）；sync.mjs 委托门禁（第1层）通过；自测钩子（第3层）新增 6 条断言（矩阵 4 条 + 分域 1 条 + 并发 1 条）；Playwright（第4层）沙箱无 Playwright 包、无 Chromium 二进制、无浏览器缓存，判不可行——未伪造结果，列证据缺口（见 DATA-PLAN 与回执）。【行为变化】空状态不再当 READY（batchFromSaved 不再把缺失 status 补成 READY、选择器/确认/权限三处 UNKNOWN 拒绝）；无 projectId/串项目队列由认领兜底改为隔离（槽位路径；实时键发送队列 projectId 由发送端写入、不受影响）；FAILED 不自动重交（原本 pump 只取 READY、本版显式成文并在权限函数固化）；SKIPPED 口径实读为「已生成过跳过扣费」而非方案假设的缺图跳过——权限函数按实读口径：单行抽卡保留授权、带 skipReason 的行全入口拦截（EXCLUDED 归 SKIPPED 类且 reason 拦截）；全局并发由每批 4 改为跨项目合计 4。【不动清单】密钥三处路径与 v6.59 持久化修复（grep 证实未动）、P3 组绑定拼装、P4 预设表本身、v6.56 连线、v6.57 雷达与菜单、手动模式全部交互与校验、监控/封面/生图/拆解预设/下载任务/人物计数与群演区/待确认流程；平台版本仍 28（v29 FIELDS 全站迁移按裁决不在本单处理，单独说明）。【新底版】source.html SHA-256 前缀 ef31cb4cfa979beb → d4cc49ab6742d366；sync.mjs 计数 CSS 449→458、顶层函数 333→355、on* 模板 197→199、模板引用函数 128→130。【删除清单】无功能删除；batchToggleProjMenu/batchToggleArchiveDrawer 内部旗标写法由 batchSetOverlay 统一驱动（行为等价、互斥更严）。真机待核：诊断区跑「批量按钮自测」看 11 条断言、项目 50 选镜真跑与全部开始看全局 4 并发、切换 50/49/48 看序号保护与隔离横幅不误报、刷新 10 次看队列读回、密钥改后重开验恢复、结果窗浮于批量窗之上。",
+  },
+  {
+    version: "v6.63",
+    date: "2026-11-18",
+    text: "这一版把批量生成窗口推倒重做（上一版 v6.62 你不满意，已经退回，这版按 Gemini 的重设计方案从 v6.61 的底子重新做，不在旧版上打补丁）。先说你报的「生成按钮点没反应」：我们把上一版的代码逐个按钮查了一遍——按钮的接线其实没断，真正的问题是好几个生成入口共用一道看不见的总闸：队列里只要有镜头停在「提交中/生成中」这类状态上，「选择镜头生成」会被直接禁用、点下去的函数也一声不吭就返回，界面上不给任何说法，看起来就是死了。另外还查到两个真毛病：页面刚刷新时存队列的本地库可能还没打开完，读队列会读到空（之前出现过一次空面板就是它）；项目编号在工作台那边是数字、画布这边有时按文字比，对不上时切换和认领会失效。这三个都修了：读库改成等它打开完再读；项目编号一律先转成文字再比；所有会被拦下的镜头都在选择器里把原因用大白话写在那一行上，不再有点了没反应的按钮。新窗口的样子：顶上一行只放标题、切换项目的钮和「生成记录」，收起和关闭在最右边，不再挤成一团；中间配置只剩两行（工作流+画幅一行、种子+强制重生一行）；每个镜头的「再次抽卡/重试/下载」都挪到了那一行右上角，和状态摆在一起；最下面固定一条：左边是镜数统计和总预估，右边只有一个大蓝按钮「全部开始/继续生成剩余」，旁边是描边的「选择镜头生成」——点开它选任意一个镜头，选好先把这个镜头要花多少钱写清楚，你点「确认生成」才提交，而且只提交这一个。顶栏那个项目钮能直接换看别的项目的批量队列（项目多的时候带搜索），切走不会把正在跑的任务弄停，切回来接着查；生成记录也按项目分开看了。左下角诊断区多了一个「批量按钮自测」：点它会把这几个关键按钮挨个真点一遍并报告哪一步没通，你真机上可以先跑一次它再开始生成。密钥、手动生成、监控、封面、生图这些都没动，也没有替你提交任何真实生成。",
+    features: "批量生成窗推倒重做——四区布局＋六条根因全修＋委托门禁与自测钩子（v6.63，用户主聊直派，无 flor 编号，用户 2026-11-18 22:55 报批量窗「生成按钮点击没反应、按钮位置不方便」、23:00–23:01 判 v6.62 设计整体不合格、23:02 令推倒重来以 Gemini 重设计方案为准；v6.62 已退回、线上基线 v6.61，本版在 v6.61 底版上重做、不复用 v6.62 modal 代码；纯客户端 laoluo/source.html 改写为新底版 + sync.mjs 新增委托完整性门禁 + 重跑 sync.mjs 再生 generated.* + videogen.tsx 桥推送项目列表与诊断自测钮 + App 顶层推送未归档项目列表 + 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted、未用任何凭证提交真实生成，沙箱全程走演示分支与 mock）：【步骤0 根因实测（在 v145 构建产物 client/dist-cvm/index.html 上抽取）】委托覆盖检查：v6.62 新增 7 个模板 callee（batchOpenShotPicker/batchCloseShotPicker/batchPickShot/batchConfirmShotPick/batchToggleProjMenu/batchProjSearch/batchSwitchSbProject）全部在 handlers 字典内（字典=全部顶层函数 326 个）；sync 计数「字典 120→126 只 +6」的差额来自同版删掉的 batchStartTrial 模板（一删一增相抵），不是缺项——Gemini 假设 (a) 委托字典缺项实测排除。参数形式实测：batchPickShot/batchSwitchSbProject 均为引号字符串参、batchConfirmShotPick 零参，均在委托白名单内。真正的静默失效点（代码实读）：v6.62 生成入口普遍静默 return——batchOpenShotPicker 在 activeCount>0 或 emptyView 时无提示返回、「选择镜头生成」按钮在 activeCount>0 时直接 disabled、batchStartAll 在 activeCount>0&&started&&!circuitMsg 时静默返回，activeCount 成了唯一总闸且不给任何大白话，属假设 (f) 状态门禁类；另假设 (c) 两条在 v6.61/v6.62 共用代码里坐实：idbGet/idbSet/idbDel 都有 if(!db) 直接返回 null/静默成功（对应沙箱一次空面板）、项目 id 严格 === 比较混数字/字符串（菜单行 jt.id===Be、存档过滤同病）。假设 (e)：v6.62 选择器是 .uv-batch 内的普通层、非 sibling backdrop 结构（不合规但非死点击主因）；假设 (d)：桥搜索 (jt.id+\" \").toLowerCase 已是字符串拼接后调用，此路未复现。【六修】1 委托字典 1:1：新模板 callee 全部为顶层函数、确认按钮零参 onclick=\"batchConfirmShotPick()\" 读内存 selShotId、无动态表达式进 inline onclick；sync.mjs 新增委托完整性门禁（汇总断言 + 5 个 data-fid + 零参确认模板 + 自测钩子齐备性，故意改坏 callee 名实测构建 exit 1、恢复后通过）。2 sibling backdrop：选择器 = .uv-picker-backdrop（z 52）+ .uv-picker-dialog（z 53）兄弟结构、dialog 无祖先 onclick；项目菜单/存档抽屉共用窗内背板（z 53）+ 本体 z 54；Esc 分层（选择器>菜单/抽屉>画布菜单>批量窗）；分层守卫不吞 dialog 内点击（背板非祖先）。3 ensureDb：idbOpen 改单例 Promise、idbGet/idbSet/idbDel 先 await ensureDb；全部项目 id 比较走 normPid（trim 后字符串）；队列分槽键以实读 v6.62 方案为准：实时键 proj-<pid>-batch（发送项目）+ 槽位键 proj-<pid>-batch-sb<项目id>，persistBatch 按队列自己的 storeKey 路由、认领兜底（槽位空且实时键队列 projectId 归一化后等于目标时认领）。4 条件渲染：选择器/项目菜单/存档抽屉关闭时不挂 DOM（batchPickerHtml/batchProjMenuHtml/archDrawerOpen 均 if 才渲染），无 opacity 藏层。5 状态门禁：batchPickGate 先 String(status||READY).toUpperCase() 归一化再判（状态值全用代码既有常量）、不可选原因大白话写在选择器行内；「选择镜头生成」外层按钮只在 shots.length=0 时 disabled（有镜头在跑也能打开看原因，跑满 4 个拦在确认步并给 selNote）；batchForceToggle 既有重渲染覆盖选择器门禁。6 桥归一化：receiveStoryboardProjects 先 normalizeSbProjects（id 转字符串、name 兜底「项目 <id>」、过滤 archived 与空 id）；搜索只对归一化字符串调 toLowerCase 并只过滤已渲染行 data-search（不重渲染不丢焦点）。【四区布局】Zone 1 顶栏 52px：左=标题「批量生成 · H3 10–15s」+1px 分隔线 + 项目切换 pill（data-fid=batch-proj-switch-btn）+ 存档 pill「生成记录 (N) ▾」（按当前项目过滤计数），右=收起/×；Zone 2 配置两行共约 84px（padding 10px 18px）：Row1 工作流 label+select 宽 250px+上限牌（只读 WORKFLOW_PRESETS 实字段）、右画幅 label+pills；Row2 种子 label+input 宽 112px+强制重生、右琥珀音频提示 11.5px；Zone 3 列表 flex 滚动：「提示词（N 字）」钮留在行头第二行左首，每行再次抽卡/重试/继续查询/下载/版本 pills 移到行右上角与状态徽章同行（存档行同口径）；Zone 4 footer 60px pinned：左统计（共 N 镜·可生成·待生成·进行中·已完成[·失败]）+总预估（高峰价、只算待生成）+「下载全部已完成」幽灵钮，右条件钮（运行时「暂停队列」/有失败时「重试失败 (N)」batchRetryFailed）+次级「选择镜头生成」（.uv-btn-pick 描边蓝，data-fid=batch-open-picker）+唯一主 CTA「全部开始/继续生成剩余」（.uv-batch-cta 渐变实心，data-fid=batch-start-all）；选择器子层 sibling backdrop z 52+dialog z 53 宽 min(620px,100%-48px)+底部 pinned 确认栏 54px（选镜后费用明示、确认只提交所选一镜：READY 直提/FAILED 走 batchRetryShot/SUCCESS·SKIPPED+强制重生走 batchRedrawShot，并挂 trial 闸保证完成回调的 batchPump 不顺势提交其余镜头，「全部开始」清 trial）。【画幅裁决说明】裁决2 的枚举清单经实读核对为手动线 RES_OPTIONS（1058 行：768p横/480p竖/768p竖/480p横/480p(1:1)/768p(1:1)），批量路径自 v6.58 起的真实枚举是 BATCH_RES_OPTIONS（768p竖/768p横/1080p竖/1080p横，与用户真机截图 image-316/317 的 pills 一致、已落盘队列的 resolution 与 shotHash 都按它校验）；批量 pills 沿用 BATCH_RES_OPTIONS 不变（改枚举会使存量队列 resolution 校验回落、hash 语义漂移，违反队列兼容裁决），默认 768p竖不变——此点与裁决2 字面清单不一致，按其实读核对口径与队列兼容优先，在回执中明示。【功能不丢】BatchScheduler 4 并发/刷新续跑/shotHash、真实进度（阶段/耗时/查询次数）、再次抽卡版本只追加、密钥双写双读、悬浮窗+胶囊（≤900px 下移 128px）、工作流 13 预设+自定义+上限牌、按项目存档 ≤20 条+抽屉查看/抽卡/删除、暂停后续排队、选择镜头生成、项目快速切换（真实列表+超 8 搜索+切换不串数据+在途停轮询不取消、轮询落账 includes 复查归属、切换只记内存重开回发送项目）、下载顺序命名、诊断区（新增「批量按钮自测」钮调 window.__flor911TestBatchClicks，dispatchEvent 沿捕获期委托真点 5 个 data-fid 控件断言状态流转，演示模式走单镜提交断言、已填密钥只测打开/选择/关闭不真提交）；15 秒硬顶分组器未动。【不动清单】密钥三处读/用/存与 v6.59 持久化修复（grep 证实）、autodl Authorization、DeepSeek Bearer、P3 组绑定拼装、P4 预设表本身、v6.56 连线、v6.57 雷达与菜单、BatchScheduler 状态机与 shotHash 幂等语义、v6.59 进度/抽卡语义、手动模式全部交互与校验、监控/封面/生图/拆解预设/下载任务/人物计数与群演区/待确认流程；平台版本仍 28（托管升级 v29 的 FIELDS 全站迁移与本版分开处理，见回执）。【新底版】source.html 在 v6.61 底版（e0752f26c4860ed1）上改写为 v6.63 新底版（SHA-256 前缀 ef31cb4cfa979beb）；sync.mjs 计数 CSS 405→449、顶层函数 314→333、on* 模板 187→197、模板引用函数 120→128；锚点 setTimeout=20、winAdd=12、DEFAULT_TOKEN 置空=1 不变。【删除清单】「先试生首镜」按钮与 batchStartTrial 函数（被选择器取代）、旧 .uv-batch-actions/.uv-batch-total/.uv-batch-sub/.uv-batch-head-btns/.uv-batch-title-row/.uv-batch-arch-btn 样式与渲染（被四区结构取代）、标题行内嵌统计行（移入 footer）。基线升 v6.63（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：项目 50 点「选择镜头生成」选一镜真跑、50/49/48 往返切换看队列与存档计数、生成中切换续查、刷新 10 次看队列载入、诊断区跑一次「批量按钮自测」。",
+  },
+  {
     version: "v6.61",
     date: "2026-11-18",
-    current: true,
     text: "这一版修你报的那个问题：去人物与大纲页删了人物卡，回到分镜页，「确认并同步到分镜提示词」却不亮，分镜里的旧人物还留着。原因找到了：以前这个按钮只看你有没有在分镜页的人物面板里改过东西，删卡、加卡是在别的页面存的，它根本不知道。现在改成：工作台会记住你上次点确认时的人物表是什么样，之后只要人物表有增、删、改——删卡、加卡、改了卡上的备注，或者分镜里还提到一个人物表里已经没有的人——这个按钮就会亮起来，旁边写一句「人物表变了，点确认重新匹配角色映射」。点下去，它拿现在的人物表把全部提示词版本（四档 Seedance、通用版、导出、MiniMax H3 两版）重新对一遍：删掉的卡，它的造型和音色不会再出现，还在的人序号重新排、不留空号（台词里还写着归他的代号不会自己消失：组合代号按还在的人的资料重拼、单个代号只剩光代号）。原来那套「改了造型、音色先待确认、点确认才转正」一点没变；页面打开、刷新、删卡保存的时候它都不会自己重拼，只有你亲手点这个按钮才算数。有一点先说清：这一版第一次打开某个项目时，会先把当时的人物表记下来当基准，所以你之前已经删掉的那两张不会追着亮灯，从这次打开以后的增删改才会亮。顺带查清你数的对不上：分镜人物表里是 5 个人（小陈、小良、小痞、老板、妈妈）；镜头 4 里多出来的两个主体，一个是「B/C」发言位、一个是「B+C」两人齐声，它们的人物卡其实还在（就是没照片的那两张），有台词和齐声点到它们，拼装就会给它们各编一个主体——不是删掉的卡留下的残影。以后不想让谁出现，把他的人物卡和人物行都删掉，再点一次确认同步就行。",
     features: "人物资产删卡后「确认并同步到分镜提示词」亮起并重新匹配角色映射（v6.61，用户主聊直派，无 flor 编号，用户 2026-11-18 21:08 报障附两图、21:13 补第三图；纯客户端 App.tsx（ScriptDocument 印记检测 + StepThree syncCharBasics 加 rematchOnly 第三参）+ 版本/日志 + replication 基线 + DATA-PLAN；无 DB schema 变更、无新 migration、无服务端动作变更、无新 npm 依赖；NO real image/video generation submitted）：【诊断（裁决1，实读代码+项目 50 真实数据）】按钮点亮条件实测 = disabled={!charDirty}，charDirty 只比对 charEdits（人物行已存值 + charPending 待确认合成）与 characterRows 已存字段（造型/音色/语气/性别/身高锚点）——只看本页对现有人物行的待确认修改；删卡走 characters 表 deleteCharacter（人物与大纲页 StepTwo，与 scriptJson 两套存储）、加行/删行走审查页 autoAdded 与自动加入流程，两条路都不经过 charEdits、也不产生 charPending，故删卡后按钮不亮；且全站没有「上次确认时的人物表」基线记录，无从判断表已变。提示词重拼 = 保存后由 characterRows + 人物卡（mappingCtx）+ voiceMap 现算（buildSingleGroupText/ForModel 四档、通用版、buildMarkdown、buildGenChecklist、buildH3PlotVersion/buildH3ShortVersion），无第二份缓存。H3 subject_definitions 出自 lensCastEntries（lensMappings 按节拍说话人 + 画面提及的已知名字收集出场者，已知名字 = 人物卡名 ∪ 人物行名），定义句数据经 resolveCharacterInfo（人物行 → 人物卡 note 的造型/音色/语气段 → voiceMap）解析。【项目 50 实读】characterRows 5 行 A–E（用户说的 5 个）；characters 表 7 行 = A(222,有图)/B(223,有图)/C(224,有图)/D(225,有图)/E(226,有图)/B/C(229,无图)/B+C(230,无图)，characterCount 数此表；卡 id 序列缺 227/228 两号（项目 49 卡为 214–221、项目 50 为最新项目），与「删了 2 张」吻合，但已删行名字无从查回（删除不留痕）；tempCharacterStates + autoAddedCharacters 另存 4 条群演（路人/众人/B/C/B+C），是第三份记录、只供群演区展示，resolveCharacterInfo 不读它、不进拼装。镜头 4（H3 每镜 10–15 秒版重组）6 个 Subject 逐个对源：S1=B/C（造型/音色与卡 229 note 逐字一致）、S2=B 小良、S3=C 小痞、S4=B+C 二人组（与卡 230 note 逐字一致）、S5=A 小陈、S6=E 妈妈——多出的 S1/S4 来自仍在册的卡 229/230（台词 #19 说话人记 B/C、齐声记 B+C，出场收集点到即编主体），不是已删卡 227/228 的残留。【改法·印记】ScriptDocument 新增 charTableStamp（useMemo）：人物行已存字段 + voiceMap + aliasOverrides + 人物卡（id/名/role/note/有无图）+ 出场无靠代号集合（lensCastEntries 全镜收集、既无行又无卡的代号）拼串后双 FNV 哈希；基线存 localStorage scriptbench.charSyncStamp.<projectId>.v1（与 charAnalysisJob 同制式），首次打开记基线不亮（防老项目全亮 + P-不误亮），之后印记不一致 = charTableChanged，与 charDirty 并联成 charSyncNeeded 驱动按钮 disabled；按钮旁在「只有表变化、无待确认修改」时显示大白话「人物表变了，点确认重新匹配角色映射」；「还没有改动…」灰字提示改按 charSyncNeeded 判。【改法·点击】runCharSyncOrRematch 统一入口：有待确认走原 doCharSync 转正；只有表变化走新增 runCharRematch → onSyncCharBasics([], pendingSnapshot, {rematchOnly:true})（prop 类型同步加第三参）；StepThree syncCharBasics 加 opts.rematchOnly：edits 为空时不再报「还没有改动」，不改人物行、不写 voiceMap，只随整份稿落盘（charPending 收敛口径不变：已删行记录清掉、其余待确认原样保留）并回重新匹配回执（明示删卡的造型/音色/语气不再进任何一版、序号重排；台词说话人代号不宣称消失——探针 UI 实测：组合代号（A+B）在 H3 两版按成员行资料重新拼出组合定义、已删卡原文全消失；函数级模拟（项目 50 真数据删 229/230）里 B/C、B+C 只剩裸代号主体，两路证据口径不同、回执与日志按此如实分开写，项目 50 真实结果列真机待核）；doCharSync / runCharRematch / runCharRollback 成功后置 restampAfterSyncRef，effect 在父级回渲染、印记落定后把基线更新为当前印记、按钮熄灭；失败不更新基线、灯保持。只确认此人仍走 doCharSync 单人路径（成功同样更新基线——它也是一次整份落盘确认）。【裁决对照】裁决3：打开/刷新/切项目/删卡保存均不自动重拼不自动确认，印记只读比对、基线只在亲手确认成功后更新；裁决4：待确认语义/回退点/只确认此人不变，两路关系——待确认修改走转正、纯表变化走 rematch（不动待确认值、只清已删行的待确认记录，沿既有收敛口径）；裁决2：拼装规则（风格锁定句/声明/身高锚点句序/H3 六段式）一字未动，Flor911/密钥/监控/封面/生图/拆解预设/下载任务未动，平台版本仍 28；裁决6：群演区双份记录问题只诊断（见回执第 6 段）不在本版修。【删除清单】零删除（被取代的只有按钮 disabled 表达式、点击入口与灰字提示的判定条件）。基线升 v6.61（App WORKSPACE_VERSION + 更新日志一条 current、replication REPLICATION_BASELINE、DATA-PLAN 本条）。真机待核：项目 50 分镜页删一张无图卡后回分镜页看按钮亮起+说明在位、点确认后展开 H3 镜头 4 逐字核对 Subject 数与序号、刷新后按钮保持熄灭。",
   },
@@ -15759,9 +15997,8 @@ onBlur={onBlurSave}
               ，包括它的台词、画面与音效。
             </p>
             <p className="mt-1.5">
-              <strong>删除前会自动存一份快照</strong>——点确认删除前，当前稿
-              会先存入审查页的「自动版本快照」列表，删错了可从快照
-              一键恢复。
+              删除只改当前草稿，点「保存台词修改」后才落库；自动快照
+              功能已经下线，删错了没有快照可恢复，请确认好再删。
             </p>
           </>
         }
@@ -15791,7 +16028,7 @@ onBlur={onBlurSave}
           )}
         </p>
         <p className="mt-1.5">
-          只处理这个人物的归属，别人的台词原意不动。删除后这一条会从「本次生成已自动加入」清单消失；记得点「保存台词修改」，删错了可以从自动快照恢复。
+          只处理这个人物的归属，别人的台词原意不动。删除立即生效并自动保存（不用再点「保存台词修改」），这一条会从「本次生成已自动加入」清单消失，之后系统也不会再把 TA 自动加回来。删错了想加回来：在「人物与大纲」里重新加这位人物，或在剧本行里重新写 TA 的台词、到待确认清单里确认。
         </p>
       </>
     }
@@ -18534,16 +18771,61 @@ window.setTimeout(() => setH3CopyFail((c) => (c === key ? null : c)), 3000);
 const [h3BatchNote, setH3BatchNote] = useState<string | null>(null);
 const sendH3Batch = () => {
 const chars = mappingCtx?.characters ?? [];
-const urlOf = (b: H3ShotBinding): string | null => {
+// v6.66：urlOf 保留原语义（assetId 优先、回退 c.name === b.code 精
+// 确匹配、不 trim），同时带出 resolvedCardId 只作串卡查重比较，
+// 绝不写回绑定对象（绑定形状保持 {...b, url} 不变）。
+const resolveOf = (
+b: H3ShotBinding,
+): { url: string | null; resolvedCardId: number | null } => {
 const hit =
 (b.assetId != null
 ? chars.find((c) => c.id === b.assetId)
 : undefined) ?? chars.find((c) => c.name === b.code);
 const u = (hit?.imageUrl ?? "").trim();
-return u === "" ? null : u;
+return {
+url: u === "" ? null : u,
+resolvedCardId: hit?.id ?? b.assetId ?? null,
+};
 };
 const shots = buildH3ShotBundles(script, mappingCtx).map((s) => {
-const bindings = s.bindings.map((b) => ({ ...b, url: urlOf(b) }));
+const resolved = s.bindings.map((b) => {
+const r = resolveOf(b);
+return { binding: { ...b, url: r.url }, resolvedCardId: r.resolvedCardId };
+});
+const bindings = resolved.map((r) => r.binding);
+// v6.66 发送端拦截（H8）：组合代号 / 两绑定同卡 / 两绑定同图，
+// 任一命中只标这一镜 EXCLUDED，不拦整批。
+let identityReason: string | null = null;
+const comboHit = s.bindings.find((b) => isComboCharacterCode(b.code));
+if (comboHit) {
+identityReason = `存在组合/群演代号「${comboHit.code}」（${comboHit.roleName}），请先在「剧本审查」删除或拆为独立人物`;
+}
+if (!identityReason) {
+const seenCards = new Map<number, H3ShotBinding>();
+for (let i = 0; i < s.bindings.length; i++) {
+const b = s.bindings[i];
+const cardId = resolved[i]?.resolvedCardId ?? null;
+if (!b || cardId == null) continue;
+const prev = seenCards.get(cardId);
+if (prev) {
+identityReason = `参考图串卡：<Picture ${prev.picNum}>（${prev.roleName}）与 <Picture ${b.picNum}>（${b.roleName}）绑定了同一张人物卡（ID: ${cardId}）`;
+break;
+}
+seenCards.set(cardId, b);
+}
+}
+if (!identityReason) {
+const seenShotUrls = new Map<string, H3ShotBinding>();
+for (const b of bindings) {
+if (!b.url) continue;
+const prev = seenShotUrls.get(b.url);
+if (prev) {
+identityReason = `参考图重复：<Picture ${prev.picNum}>（${prev.roleName}）与 <Picture ${b.picNum}>（${b.roleName}）的图片地址完全相同，已拦截以防共用一张脸`;
+break;
+}
+seenShotUrls.set(b.url, b);
+}
+}
 const missingUrls = bindings
 .filter((b) => !b.url)
 .map((b) => b.roleName);
@@ -18552,6 +18834,7 @@ return {
 bindings,
 excludedReason:
 s.excludedReason ??
+identityReason ??
 (missingUrls.length > 0
 ? `缺参考图：${missingUrls.join("、")}`
 : null),
@@ -18560,7 +18843,7 @@ s.excludedReason ??
 const readyCount = shots.filter((s) => !s.excludedReason).length;
 if (readyCount === 0) {
 setH3BatchNote(
-`这批 ${shots.length} 个镜头暂时都不能批量生成（缺参考图、超过 15 秒或编号核对没通过），先处理好再发送。`,
+`这批 ${shots.length} 个镜头暂时都不能批量生成（缺参考图、串卡或重图、超过 15 秒或编号核对没通过），先处理好再发送。`,
 );
 window.setTimeout(() => setH3BatchNote(null), 6000);
 return;
@@ -19463,7 +19746,7 @@ className={
 {h3PlotLenses.length > 0 && (
 <DocSection title="MiniMax H3 提示词（两版）">
 <p className="text-xs leading-5 text-[var(--dim)]">
-按 MiniMax H3 六段式拼装（subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music），严格照 H3 技能标准写：一个镜头一段，整段粘进 MiniMax H3 桌面端用。定义句是「&lt;Subject N&gt; 是 &lt;Picture N&gt; 中的……」的固定句式，每个人的音色紧跟在他的定义句后面单独成一行；保留段里每个人出场的 [Shot] 和正文逐镜对得上；正文里切镜后先接上一镜的结尾、停顿约半秒再出对白，台词写成 &lt;Subject N&gt; (S1) 说出，&lt;d&gt;[Chinese] 台词&lt;/d&gt;，多人齐声用一个复合编号 (S1,S2)；环境音是同一个地方不断的底噪，没有台词的镜头会写明没人说话；没有配乐数据，配乐段照标准写 N/A。参考图编号 &lt;Picture N&gt; 与每个镜头的镜头包附图清单同序同号：把本镜头附图按清单顺序传进 H3，编号就对得上；没有资产图的人物不占编号、定义句也不引用参考图。人物数据与上方人物表同源——在人物表改了造型 / 性别 / 音色、点「确认并同步到分镜提示词」后，这两版一起按新数据重拼。
+按 MiniMax H3 六段式拼装（subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music），严格照 H3 技能标准写：一个镜头一段，整段粘进 MiniMax H3 桌面端用。定义句是「&lt;Subject N&gt; 是 &lt;Picture N&gt; 中的……」的固定句式，每个人的音色紧跟在他的定义句后面单独成一行；保留段里每个人出场的 [Shot] 和正文逐镜对得上；正文里切镜后先接上一镜的结尾、停顿约半秒再出对白，台词写成 &lt;Subject N&gt; (S1) 说出，&lt;d&gt;[Chinese] 台词&lt;/d&gt;，多人齐声用一个复合编号 (S1,S2)；环境音是同一个地方不断的底噪，没有台词的镜头会写明没人说话；没有配乐数据，配乐段照标准写 N/A。参考图编号 &lt;Picture N&gt; 与每个镜头的镜头包附图清单同序同号：把本镜头附图按清单顺序传进 H3，编号就对得上；没有资产图的人物不占编号、定义句也不引用参考图。人物数据与上方人物表同源——在人物表改了造型 / 性别 / 音色、点「确认并同步到分镜提示词」后，这两版一起按新数据重拼。本版新增：音色固定句、他人闭嘴句、台词位置指代、逐拍静默句与跨镜头承接句，均为提示词文字，台词与人物原文一字未改。每镜开头现带全片风格与郑重声明，末尾带资产图优先规则；画面里的后期标题／字幕／花字不再写进提示词。
 </p>
 <div className="seg mt-3" role="group" aria-label="H3 提示词版本切换">
 <button
@@ -19521,6 +19804,7 @@ const key = `lens-${l.lensIndex}`;
 return (
 <div
 key={l.lensIndex}
+id={`lens-${l.lensIndex}`}
 className="rounded-[var(--radius)] border p-3"
 style={{ borderColor: "var(--border)", background: "var(--surface)" }}
 >
